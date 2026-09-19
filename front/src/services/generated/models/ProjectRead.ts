@@ -2,7 +2,6 @@
 /* istanbul ignore file */
 /* tslint:disable */
 /* eslint-disable */
-import type { ProjectStyle } from './ProjectStyle';
 import type { ProjectVisualStyle } from './ProjectVisualStyle';
 export type ProjectRead = {
     /**
@@ -14,9 +13,9 @@ export type ProjectRead = {
      */
     description?: string;
     /**
-     * 题材/风格
+     * 题材/风格（可用预设值，也可自定义）
      */
-    style: ProjectStyle;
+    style: string;
     /**
      * 画面表现形式
      */

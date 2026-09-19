@@ -47,6 +47,9 @@ export class FilmService {
     /**
      * 视频生成（任务版）
      * 创建视频生成任务并后台执行，结果通过 /tasks/{task_id}/result 获取。
+     *
+     * 会真实出视频（按次计费），因此先过 DRY_RUN 守卫：被拦截时返回 409，
+     * **不会**建任何任务行。
      * @returns ApiResponse_TaskCreated_ Successful Response
      * @throws ApiError
      */

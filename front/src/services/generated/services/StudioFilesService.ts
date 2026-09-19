@@ -8,6 +8,7 @@ import type { ApiResponse_FileRead_ } from '../models/ApiResponse_FileRead_';
 import type { ApiResponse_NoneType_ } from '../models/ApiResponse_NoneType_';
 import type { ApiResponse_PaginatedData_FileRead__ } from '../models/ApiResponse_PaginatedData_FileRead__';
 import type { Body_upload_file_api_api_v1_studio_files_upload_post } from '../models/Body_upload_file_api_api_v1_studio_files_upload_post';
+import type { ExternalFileCreate } from '../models/ExternalFileCreate';
 import type { FileUpdate } from '../models/FileUpdate';
 import type { CancelablePromise } from '../core/CancelablePromise';
 import { OpenAPI } from '../core/OpenAPI';
@@ -68,6 +69,27 @@ export class StudioFilesService {
         });
     }
     /**
+     * 登记外部公网素材（外链，不下载）
+     * 把外部公网地址登记成素材记录。用于「供应商要求公网可达」的场景（例如 APIMart 的 audio_urls 只收公网 URL）；不下载内容、不在本地存储副本。
+     * @returns ApiResponse_FileRead_ Successful Response
+     * @throws ApiError
+     */
+    public static registerExternalFileApiApiV1StudioFilesExternalPost({
+        requestBody,
+    }: {
+        requestBody: ExternalFileCreate,
+    }): CancelablePromise<ApiResponse_FileRead_> {
+        return __request(OpenAPI, {
+            method: 'POST',
+            url: '/api/v1/studio/files/external',
+            body: requestBody,
+            mediaType: 'application/json',
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
      * 上传文件并创建 FileItem 记录
      * @returns ApiResponse_FileRead_ Successful Response
      * @throws ApiError
@@ -93,7 +115,7 @@ export class StudioFilesService {
         });
     }
     /**
-     * 下载文件二进制内容
+     * 下载文件二进制内容（外链素材会 307 重定向到源地址）
      * @returns any Successful Response
      * @throws ApiError
      */
