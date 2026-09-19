@@ -273,7 +273,7 @@ async def _read_image_as_data_url(session: AsyncSession, *, file_id: str, storag
     return f"data:image/{image_format};base64,{encoded}"
 
 
-async def resolve_vendor_image_ref(
+async def resolve_vendor_image_ref(  # pylint: disable=too-many-return-statements
     session: AsyncSession,
     *,
     file_id: str | None,
@@ -315,6 +315,19 @@ async def resolve_vendor_image_ref(
             file_id=clean_id,
             storage_key=storage_key,
             ref=storage_key,
+            kind="public",
+            vendor_usable=True,
+        )
+
+    # S3 驱动下，逻辑 key 的对象其实已经公网可读（``{public_base}/{base_path}/{key}``）。
+    # 这类 key 以前会被当成本机文件转 data URL → 明明公网可读却被判"供应商无法访问"。
+    # 只有**显式**配置了 s3_public_base_url 才走这条（不使用 path-style 回退地址）。
+    s3_public_url = storage.public_url_for_key(storage_key)
+    if s3_public_url:
+        return VendorImageRef(
+            file_id=clean_id,
+            storage_key=storage_key,
+            ref=s3_public_url,
             kind="public",
             vendor_usable=True,
         )

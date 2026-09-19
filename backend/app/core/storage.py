@@ -103,6 +103,27 @@ def _normalize_key(key: str) -> str:
     return key
 
 
+def public_url_for_key(key: str) -> str:
+    """S3 驱动且**显式**配置了公网基址时，返回该对象的公网地址；否则返回空串。
+
+    为什么需要它：``files.storage_key`` 存的是**逻辑 key**（例如
+    ``generated-images/shot_frame_image/12/xxx.png``），而 S3 驱动下对象实际落在
+    ``{s3_base_path}/{key}``，公网地址是 ``{s3_public_base_url}/{s3_base_path}/{key}``。
+    参考帧可用性判定如果只看相对 key，就会把它当成"本机文件"→ 转 data URL →
+    判为供应商不可用；可对象其实已经公网可读（实测匿名 200）。这里给出**唯一**的构造口径。
+
+    硬约束：**不使用** path-style 回退（``{endpoint}/{bucket}/{key}``）—— 在多数云厂商
+    （如阿里云 OSS）上那是错的地址；没有 ``s3_public_base_url`` 就返回空串，让调用方
+    继续走原来的 data URL 分支。
+    """
+    if is_local_storage():
+        return ""
+    base = (settings.s3_public_base_url or "").strip()
+    if not base or not settings.s3_bucket_name:
+        return ""
+    return f"{base.rstrip('/')}/{_normalize_key(key)}"
+
+
 def _build_public_url(key: str) -> str:
     key = _normalize_key(key)
     if is_local_storage():

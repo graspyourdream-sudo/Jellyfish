@@ -61,3 +61,69 @@ def test_local_storage_driver_needs_no_s3_client(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(settings, "storage_driver", "local", raising=False)
     assert storage._resolve_driver() == "local"
     assert storage.is_local_storage() is True
+
+
+def test_public_url_for_key_requires_explicit_public_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    """只有 S3 驱动 + 显式公网基址才返回地址；本地驱动/未配基址一律空串（不做 path-style 回退）。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "storage_driver", "s3", raising=False)
+    monkeypatch.setattr(settings, "s3_bucket_name", "test-bucket", raising=False)
+    monkeypatch.setattr(settings, "s3_base_path", "jellyfish/acceptance", raising=False)
+    monkeypatch.setattr(
+        settings, "s3_public_base_url", "https://test-bucket.oss-cn-beijing.aliyuncs.com", raising=False
+    )
+    assert (
+        storage.public_url_for_key("generated-images/shot_frame_image/12/a.png")
+        == "https://test-bucket.oss-cn-beijing.aliyuncs.com/jellyfish/acceptance/generated-images/shot_frame_image/12/a.png"
+    )
+
+    # 未配公网基址 → 空串（绝不回退到 {endpoint}/{bucket}/{key} 这种可能错误的地址）
+    monkeypatch.setattr(settings, "s3_public_base_url", "", raising=False)
+    assert storage.public_url_for_key("a.png") == ""
+
+    # 本地驱动 → 空串（本地文件由 /files 路由回放，不是供应商可取的公网地址）
+    monkeypatch.setattr(settings, "storage_driver", "local", raising=False)
+    monkeypatch.setattr(settings, "s3_public_base_url", "https://x.example.com", raising=False)
+    assert storage.public_url_for_key("a.png") == ""
+
+
+@pytest.mark.asyncio
+async def test_vendor_ref_maps_s3_backed_relative_key_to_public_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """回归：S3 驱动下相对 storage_key 必须解析成公网地址并判为供应商可用。
+
+    这是"关键帧已公网可读、却被判供应商不可用"的真 bug（2026-09-19 实测发现）：
+    ``storage_key`` 是逻辑 key，公网地址是 ``{public_base}/{base_path}/{key}``。
+    """
+    from app.config import settings
+    from app.models.studio import FileItem
+    from app.utils.files import resolve_vendor_image_ref
+    from tests.llm_orchestration_fixtures import build_session
+
+    monkeypatch.setattr(settings, "storage_driver", "s3", raising=False)
+    monkeypatch.setattr(settings, "s3_bucket_name", "test-bucket", raising=False)
+    monkeypatch.setattr(settings, "s3_base_path", "jellyfish/acceptance", raising=False)
+    monkeypatch.setattr(
+        settings, "s3_public_base_url", "https://test-bucket.oss-cn-beijing.aliyuncs.com", raising=False
+    )
+
+    db, engine = await build_session()
+    async with db:
+        db.add(
+            FileItem(
+                id="file-frame",
+                type="image",
+                name="frame",
+                storage_key="generated-images/shot_frame_image/12/a.png",
+            )
+        )
+        await db.flush()
+
+        outcome = await resolve_vendor_image_ref(db, file_id="file-frame", vendor="apimart")
+        assert outcome.kind == "public"
+        assert outcome.vendor_usable is True
+        assert outcome.ref == (
+            "https://test-bucket.oss-cn-beijing.aliyuncs.com/"
+            "jellyfish/acceptance/generated-images/shot_frame_image/12/a.png"
+        )
+    await engine.dispose()

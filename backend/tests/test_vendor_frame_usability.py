@@ -42,8 +42,19 @@ ASSET_KEY = "asset://project-1/frame-asset-1"
 
 @pytest.fixture(autouse=True)
 def _fake_storage(monkeypatch: pytest.MonkeyPatch) -> None:
-    """本地存储读取替换成确定性假实现：测试不依赖磁盘/S3 上真有文件。"""
+    """把存储明确钉成"本地驱动 + 无公网基址"，再替换读取实现。
+
+    为什么要显式钉：本机运行环境可能带有真的 S3/OSS 配置（例如验收用的
+    ``backend/.env``）。那种情况下相对 storage_key 会（正确地）解析成公网地址，
+    本文件里"本地帧对供应商不可用"的用例前提就不成立了 —— 用例要测的是
+    **本地分支**的行为，所以先把环境钉死，不依赖 ambient 配置。
+    """
+    from app.config import settings
     from app.core.storage import StoredFileInfo
+
+    monkeypatch.setattr(settings, "storage_driver", "local", raising=False)
+    monkeypatch.setattr(settings, "s3_bucket_name", None, raising=False)
+    monkeypatch.setattr(settings, "s3_public_base_url", "", raising=False)
 
     async def _fake_download_file(*, key: str) -> bytes:
         return _TINY_PNG

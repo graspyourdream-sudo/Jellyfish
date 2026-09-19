@@ -155,6 +155,14 @@ async def test_resolve_reference_file_ids_and_names_filters_empty_file_ids():
 
 @pytest.mark.asyncio
 async def test_resolve_reference_image_refs_by_file_ids_returns_data_urls(monkeypatch):
+    # 明确钉成"本地驱动 + 无公网基址"：本机可能出现真的 S3/OSS 配置（例如验收用 .env），
+    # 那种情况下相对 key 会（正确地）解析成公网地址，本用例的"data URL"前提就不成立了。
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "storage_driver", "local", raising=False)
+    monkeypatch.setattr(settings, "s3_bucket_name", None, raising=False)
+    monkeypatch.setattr(settings, "s3_public_base_url", "", raising=False)
+
     file_obj = FileItem(id="file-1", name="sample.png", storage_key="images/sample.png")
     db = _FakeDB(mapping={(FileItem, "file-1"): file_obj})
 
