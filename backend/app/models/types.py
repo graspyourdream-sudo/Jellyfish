@@ -133,10 +133,14 @@ class ShotFrameType(str, Enum):
 
 
 class FileType(str, Enum):
-    """文件类型（用于素材库与时间线引用）。"""
+    """文件类型（用于素材库与时间线引用）。
+
+    注：``type`` 在库中是 String(16) 列，所以**新增成员不需要改表结构**。
+    """
 
     image = "image"
     video = "video"
+    audio = "audio"
 
 
 class FileUsageKind(str, Enum):

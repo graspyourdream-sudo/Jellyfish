@@ -18,6 +18,9 @@ class AssetBase(BaseModel):
     view_count: int = Field(1, ge=1, description="计划为该资产生成的视角图片数量（不含分镜帧）")
     style: ProjectStyle = Field(ProjectStyle.real_people_city, description="题材/风格")
     visual_style: ProjectVisualStyle = Field(ProjectVisualStyle.live_action, description="画面表现形式（现实/动漫等）")
+    image_prompts: dict[str, str] = Field(
+        default_factory=dict, description="按图片槽位类别缓存的 LLM 生成图片提示词"
+    )
 
 
 class AssetCreate(BaseModel):
@@ -29,6 +32,7 @@ class AssetCreate(BaseModel):
     view_count: int = Field(1, ge=1)
     style: ProjectStyle = ProjectStyle.real_people_city
     visual_style: ProjectVisualStyle = ProjectVisualStyle.live_action
+    image_prompts: dict[str, str] = Field(default_factory=dict)
     project_id: str | None = Field(None, description="可选：创建成功后写入 project_*_link（与资产创建同一事务）")
     chapter_id: str | None = Field(None, description="可选：章节 ID")
     shot_id: str | None = Field(None, description="可选：分镜 ID")
@@ -59,6 +63,7 @@ class AssetUpdate(BaseModel):
     view_count: int | None = Field(None, ge=1)
     style: ProjectStyle | None = None
     visual_style: ProjectVisualStyle | None = None
+    image_prompts: dict[str, str] | None = None
 
 
 class AssetRead(AssetBase):
@@ -75,6 +80,7 @@ class AssetImageBase(BaseModel):
     width: int | None = Field(None, description="宽(px)")
     height: int | None = Field(None, description="高(px)")
     format: str = Field("png", description="格式")
+    is_primary: bool = Field(False, description="是否定版主图")
 
 
 class AssetImageCreate(BaseModel):
@@ -84,6 +90,7 @@ class AssetImageCreate(BaseModel):
     width: int | None = None
     height: int | None = None
     format: str = "png"
+    is_primary: bool | None = None
 
 
 class AssetImageUpdate(BaseModel):
@@ -93,6 +100,7 @@ class AssetImageUpdate(BaseModel):
     width: int | None = None
     height: int | None = None
     format: str | None = None
+    is_primary: bool | None = None
 
 
 class SceneRead(AssetRead):

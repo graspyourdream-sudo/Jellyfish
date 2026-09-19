@@ -51,13 +51,25 @@ def _build_project_style_options() -> tuple[dict[ProjectVisualStyle, list[Projec
     return mapping, defaults
 
 
-def _validate_project_style_combo(*, visual_style: ProjectVisualStyle, style: ProjectStyle) -> None:
+def _validate_project_style_combo(*, visual_style: ProjectVisualStyle, style: ProjectStyle | str) -> None:
+    """校验「画面表现形式 × 题材风格」的组合。
+
+    预设风格（ProjectStyle 里的值）仍然要求与 visual_style 匹配；
+    不在预设内的字符串视为用户自定义风格，直接放行——这样前端可以自由输入，
+    同时不放弃对既有预设值的约束力。
+    """
+    try:
+        style_enum = ProjectStyle(style)
+    except ValueError:
+        # 自定义风格：长度与空白由 schema 层把关，这里不再限制组合
+        return
+
     mapping, _defaults = _build_project_style_options()
     allowed = mapping.get(visual_style, [])
-    if style not in allowed:
+    if style_enum not in allowed:
         raise ValueError(
-            f"style is not allowed for visual_style: visual_style={visual_style.value}, "
-            f"style={style.value}, allowed={[item.value for item in allowed]}"
+            f"style is not allowed for visual_style: visual_style={visual_style}, "
+            f"style={style_enum}, allowed={[item.value for item in allowed]}"
         )
 
 

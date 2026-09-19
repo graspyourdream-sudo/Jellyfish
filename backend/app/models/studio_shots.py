@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -163,6 +163,20 @@ class ShotDetail(Base,TimestampMixin):
         nullable=False,
         comment="运镜方式（存 code：STATIC/PAN/...；展示可用 schemas.CAMERA_MOVEMENT_ZH）",
     )
+    audio_file_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("files.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="该镜头使用的音频文件 ID（files.type=audio）；声音绑定落在这一列",
+    )
+    audio_opt_out: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("0"),
+        comment="本镜**明确标记**无需声音（用户授权新增）：与 audio_file_id 互斥，默认 false=未表态",
+    )
     scene_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey("scenes.id", ondelete="SET NULL"),
@@ -214,6 +228,18 @@ class ShotDetail(Base,TimestampMixin):
     )
     key_frame_prompt: Mapped[str] = mapped_column(
         Text, nullable=False, default="", comment="镜头分镜关键帧提示词",
+    )
+    video_prompt: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="",
+        comment="镜头视频提示词（文生视频用；与帧图片提示词分离，可由外部平台导入）",
+    )
+    video_prompt_source: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="",
+        comment="视频提示词来源标记（如 jurilu / external / manual / internal；空表示未知）",
     )
 
     shot: Mapped["Shot"] = relationship(back_populates="detail")
