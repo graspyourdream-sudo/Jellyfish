@@ -1636,3 +1636,126 @@ POST …/image-pipeline/video-submit (text_only)
    §31.6 尝试 1 的原始报错就是证据，§31.10 的判定修复现在会在点击前就拦住它。
 7. **参考音频进请求**：S001 绑定的音频是本地地址，后端明确"本次不会携带它" → **未验证**。
 8. **S001 之外的 7 镜真实出视频**：只验证到"提示词/绑定/帧槽位齐 + `text_only` 可生成" → **未验证**（授权只有 1 次）。
+
+## 三十二、真实端到端验收（2026-09-19，独立付费窗口，无自动重试）
+
+> **与 §31 的关系**：§31 是第三部分（全程 DRY_RUN + 一次 `text_only` 出视频）的历史记录，**保留不动**。
+> §31.11「仍未验证清单」是**当时**的结论快照；本节记录其后的真实端到端跑通，
+> **取代 §31.11 中关于「真实 LLM」「真实图片（资产图/关键帧）」「公网首帧」的旧结论**。
+> 巨日禄 Cookie 与「参考音频进请求」两条维持**仍未验证**。
+
+### 32.1 运行边界（可复现）
+
+| 项 | 值 |
+|---|---|
+| 分支 | `codex/jellyfish-production-pipeline`（唯一运行准线） |
+| 后端 / 前端 | 分支后端占 `:8000`、分支前端 `vite` 占 `:5173`（主工作区的两个进程已停，仅进程层面） |
+| 数据库 | **独立副本** `/tmp/jellyfish_accept/accept.db`；正式 `backend/jellyfish.db` **全程未使用**（mtime 仍为 09-19 16:51） |
+| 对象存储 | 凭证只写入验证工作区 `backend/.env`（权限 `0600`，`git check-ignore` 命中，**未入库**） |
+| 守卫开关 | `guard.sh paid` → `JELLYFISH_DRY_RUN=0 JELLYFISH_REAL_LLM_CONFIRMED=1`；**每个付费阶段结束立即** `guard.sh guard` 恢复守闸 |
+| 终态复核 | `dry_run=true / real_call_confirmed=false` |
+| 证据目录 | `/tmp/jellyfish_accept/`（`a*_log.json`、截图、`video_first.mp4`、`keyframe_first.png`、`oss_probe.png`）——**全部未加入 Git** |
+| 验收项目 | `真实验收项目·整集批量（2026-09-19）` = `56384299-3e08-487d-a3c3-d46140f41794`；章节 `a5a896b5-3f5b-45ee-9a0b-9bf346812420`（剧本 321 字，**页面粘贴**） |
+
+### 32.2 OSS 预检（免费；预检不过就不开付费出口）
+
+| 检查 | 结果 |
+|---|---|
+| 应用存储检查 | 驱动 `s3`（`is_local_storage=False`） |
+| **应用同源上传**极小 PNG（70 B） | `POST /api/v1/studio/files/upload` → **HTTP 201** |
+| 返回地址 | `https://ai-shortdrama-assets.oss-cn-beijing.aliyuncs.com/jellyfish/acceptance/files/oss_probe.png`（**桶公网域名**，未用 path-style 回退） |
+| **匿名外网读取** | **HTTP 200 / `image/png` / 70 B**（与本地探针字节一致） |
+| 前缀核对 | `ListObjectsV2(prefix=jellyfish/acceptance)` 命中该对象 |
+| `HeadBucket` | 仍 **HTTP 403 / Code 403 / Forbidden** → 已与用户确认记为**非阻断启动警告**，未扩权、未修改 Bucket |
+| 凭证泄漏 | 日志扫描 `LTAI` / `AccessKeyId` / `aws_secret` / `X-Amz-Signature` / `Authorization:` **全部 0 命中** |
+
+预检过程中暴露并修掉的两个**存储层真问题**（各自独立 commit，均在本次分支上）：
+
+| commit | 现象（原始报错） | 修法 |
+|---|---|---|
+| `1a74c73` `fix(storage): support S3-compatible checksum handling` | botocore 新版默认 aws-chunked → OSS 返回 `400 NotImplemented: Aws MultiChunkedEncoding STREAMING-UNSIGNED-PAYLOAD-TRAILER is not supported.`（**不是权限拒绝**：同一请求去掉该默认即 200） | `BotoConfig` 增加 `request_checksum_calculation="when_required"`、`response_checksum_validation="when_required"`（保留 `addressing_style="virtual"`）+ 回归测试 |
+| `b82624a` `fix(storage): resolve S3-backed objects to their public URL` | `files.storage_key` 是**逻辑 key**，S3 驱动下对象实际公网可读（实测匿名 200），但可用性判定按相对路径转 data URL → 明明公网可读却被判「供应商无法访问」 | 新增 `storage.public_url_for_key()`（**只在显式配置 `S3_PUBLIC_BASE_URL` 时**返回 `{public_base}/{base_path}/{key}`，不做 path-style 回退）；`resolve_vendor_image_ref` 先判公网 + 回归测试 |
+
+### 32.3 真实调用分项（全部在授权上限内，**零自动重试**）
+
+| 阶段 | 上限 | 实际 | 页面入口 / 证据 |
+|---|---|---|---|
+| LLM 拆镜 | 1 | **1** | 第 1 步「提取分镜」→ `POST /script-processing/divide` 200 → **9 镜**（7–10 区间），标题/摘录为模型原创 |
+| LLM 资产提取 | 1 | **1** | 分镜编辑页「2 提取确认」→「提取并刷新候选」→ `POST /script-processing/extract` 200 → toast「提取完成，候选已刷新」；**7 条候选**（角色 2 / 场景 1 / 道具 3 / 服装 1） |
+| LLM 图片提示词 | 1 | **1** | 资产编辑页「AI 生成图片提示词」→ `POST /studio/llm/image-prompt/preview` 200 → 9 槽位 →「保存到资产」写入 `characters.image_prompts` |
+| LLM 逐镜视频提示词 | 7–10（按镜数） | **9** | 第 4 步「批量生成草稿（**9 镜**）」→ **9 次** `POST /studio/prompt-board/{cid}/draft`（**每镜 1 次请求，不是整集一次**）→ 统一预览表 **9 行** →「确认保存（9 条）」→ `save` 200：`mode=fill_empty / source=llm / applied_count=9 / skipped_count=0` |
+| **LLM 合计** | **≤13** | **12** | — |
+| 真实图片 | 2 | **2** | 资产图 1 + 关键帧 1（见 §32.4） |
+| 真实视频 | 1 | **1** | `first` 模式 1 条（见 §32.5），`video-submit` 调用次数 = **1** |
+
+说明（避免误读为"重试"）：过程中有两次脚本**提前中断**的尝试（提取、资产图等待），经后端日志核对 **POST 计数 = 0**（只发出过 CORS 预检），未产生任何付费调用，**不属于重试**。
+
+### 32.4 图片：资产图与关键帧（真实 `gpt-image-2`）
+
+**资产图 1 张**（页面：资产编辑页「多镜头图片 → 正面 → 生成 → 采纳并设版」）
+
+| 项 | 值 |
+|---|---|
+| 资产 | 角色 `林晚` = `asset_1789819425398`（由真实提取候选「新建并关联」创建） |
+| 通道 | `image2 → provider 模型 gpt-image-2`（后端如实回传该警告） |
+| 落库 | `adopt` 200：`file_id=5ba1aeca-eb8a-4197-89d9-480a77055c05`、`is_primary=true`、`image_id=44`（FRONT） |
+| 公网地址 | `https://ai-shortdrama-assets.oss-cn-beijing.aliyuncs.com/jellyfish/acceptance/generated-images/character/57fb382e831b40d38027274557bb9ae6.png` |
+| 匿名读取 | **HTTP 200 / `image/png` / 1,651,244 B** |
+
+**关键帧 1 张**（页面：工作室「关键帧与参考图 → 首帧图片 → 生成」，提示词先「保存到镜头」再生成）
+
+| 项 | 值 |
+|---|---|
+| 通道 | **APIMart 直连** `gpt-image-2`（`provider=apimart`，参考图 1 张 = 上述定版图，按 `image_urls` 送出） |
+| provider 任务号 | **`task_01M2WSHHGV0WH066P0XBGA7N4J`** |
+| 耗时 | **57.0 s** |
+| 落库 | `file_id=f3741209-4324-4b84-ba6a-e3fe2ee705ba` → 写 `shot_frame_images.first`（`image_slot_id=12`）；提示词同时写入 `shot_details.first_frame_prompt` |
+| 公网地址 | `https://ai-shortdrama-assets.oss-cn-beijing.aliyuncs.com/jellyfish/acceptance/generated-images/shot_frame_image/12/20deec44f8af4e67b581817e7d46fb69.png` |
+| 匿名读取 | **HTTP 200 / `image/png` / 3,297,048 B** |
+
+### 32.5 视频：真实 `first` 模式（本项目唯一一次）
+
+| 项 | 值 |
+|---|---|
+| 入口 | 本镜生产卡（镜头 1）→ 参考模式 **`first`** →「直接生成视频」 |
+| **提交次数** | **1**（上游返回任务号后**未再提交**） |
+| provider task ID | **`task_01M2WT7WHNQ9A7FSAF3N2KXX2N`** |
+| status / 耗时 | **`completed`** / **147,051 ms** |
+| 模型 / 分辨率 / 时长 / 画幅 | `seedance-2.0-mini` / **480p** / **5s** / **16:9** |
+| **实际使用的首帧** | 提交路径 `file_id_to_data_url()` 解析结果 = `https://ai-shortdrama-assets.oss-cn-beijing.aliyuncs.com/jellyfish/acceptance/generated-images/shot_frame_image/12/20deec44f8af4e67b581817e7d46fb69.png`（**公网 http(s)**，非 data URL） |
+| 计划预检 | `参考模式 first · 要求帧 first`、`generation_blocked=false`、帧 `usable=true / ref_kind=public` |
+| 视频 URL | `https://getapib.org/video/9998210178940016-36b29c77-2fef-4dc0-b099-c9dbc19e9a3a-video_task_01M2WT7WHNQ9A7FSAF3N2KXX2N.mp4` |
+| 产物核验 | **HTTP 200 / `video/mp4` / 1,955,044 B**（MP4 Base Media） |
+| Jellyfish file_id | **`b436b492-a172-4f4c-8adc-ce0ec43073a1`**（`files.type=video`，已写 `shots.generated_video_file_id`；页面 toast「已生成并挂到本镜」） |
+
+### 32.6 费用、守卫与数据安全
+
+| 项 | 结论 |
+|---|---|
+| 估算费用 | **≈0.81 credits**（图片 2 张 ×0.14 + 视频 1 条 ×0.53；**供应商响应不返回 credits 字段**，按本项目文档实测单价计）→ 未突破 **1.0 credits** 上限 |
+| 无自动重试 | 是；两次中断的尝试经日志核对未发出 POST（0 次），不构成重试 |
+| 守卫 | 每个付费阶段结束**立即**恢复；终态 `dry_run=true / real_call_confirmed=false` |
+| 敏感信息 | 凭证只在验证工作区 `backend/.env`（`0600`、被忽略）；日志/截图/汇报均不含 AK、Secret、签名 URL |
+| 正式数据库 | **未使用**（全程独立副本），未删除、未改动 |
+| 工程门禁 | 全量 `pytest -q` → **589 passed / 13 failed**（13 条与既有基线**逐条一致**，属信封/health 既有基线，**非本轮回归**）；改动模块 `pylint` **10.00/10**；前端 `typecheck` / `build` 通过 |
+
+### 32.7 最终状态分类（替代 §31.11 的对应条目）
+
+**① 已真实通过（本次取得真实证据）**
+
+1. 真实 LLM **拆镜** → 9 镜
+2. 真实 LLM **资产提取** → 7 条候选
+3. 真实 LLM **图片提示词** → 9 槽位保存
+4. 真实 LLM **整集视频提示词**（逐镜队列 9 次 + 统一预览 + 确认保存）
+5. 真实 **资产图生成 → 采纳 → 定版**（`gpt-image-2`，公网 OSS 可读）
+6. 真实 **关键帧生成**（APIMart `gpt-image-2`，公网 OSS 可读）
+7. 真实 **公网首帧 `first` 视频**（`seedance-2.0-mini / 480p / 5s / 16:9`）
+
+**② 仍未验证（保持"未验证"，不冒充）**
+
+1. **巨日禄 Cookie 整集导入**：本轮无可用 Cookie → 未验证（**未**用外部文本导入冒充）
+2. **参考音频进请求**：本轮不测试 → 未验证（供应商支持参考音频输入，但要求公网 URL / `asset://`；本轮未提供公网音频）
+
+**③ 有意未执行（不是遗漏，是控费选择）**
+
+1. **其余 8 镜的真实视频**：代表镜头（S001）已完整跑通 `first` 链路，按「只生成 1 条、不生成其余镜头视频」的授权执行；如需整集成片，按 §658 的量级另批（64 镜 ≈ 34 credits 的经验值可作参考）
