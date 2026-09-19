@@ -1,0 +1,595 @@
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  Alert,
+  Button,
+  Card,
+  Empty,
+  Input,
+  Modal,
+  Segmented,
+  Space,
+  Spin,
+  Table,
+  Tag,
+  Tooltip,
+  Typography,
+  message,
+} from 'antd'
+import type { TableColumnsType } from 'antd'
+import {
+  ArrowRightOutlined,
+  EditOutlined,
+  PictureOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+} from '@ant-design/icons'
+import { useNavigate, useParams } from 'react-router-dom'
+import { StudioEntitiesApi } from '../../../../../services/studioEntities'
+import {
+  fetchImagePromptSlots,
+  getAssetImagePrompts,
+  previewImagePlan,
+  saveAssetImagePrompts,
+  type ImagePlanTarget,
+  type ImagePromptSlotSpec,
+} from '../../../../../services/llmPipelineApi'
+import {
+  getProjectSignalAssetTypeLabel,
+  type ProjectSignalAsset,
+  type ProjectSignalAssetType,
+  type ProjectStepSignalDetail,
+} from '../hooks/useProjectStepSignals'
+import { AssetImagePromptLlmPanel } from './AssetImagePromptLlmPanel'
+
+/** 待准备资产最多补抓多少个名称（场景/道具/服装的关联行只有 id，没有 name）。 */
+const NAME_LOOKUP_LIMIT = 20
+
+/** 提示词来源的展示口径（与后端 `prompt_source` 一一对应）。 */
+const PROMPT_SOURCE_META: Record<string, { label: string; color: string; hint: string }> = {
+  saved: {
+    label: '已保存提示词',
+    color: 'green',
+    hint: '第 3 步在资产上保存的 image_prompts —— 这一环确认保存的产物正在被生图实际使用',
+  },
+  template: {
+    label: '模板拼装',
+    color: 'gold',
+    hint: '该资产还没有保存过图片提示词，本次用确定性模板 + 资产描述拼装',
+  },
+  request: { label: '本次显式指定', color: 'blue', hint: '调用方传了 prompt_overrides，优先级最高' },
+}
+
+const PLAN_ASSET_TYPES = [
+  { label: '角色', value: 'character' as const },
+  { label: '场景', value: 'scene' as const },
+  { label: '道具', value: 'prop' as const },
+]
+
+const TYPE_COLOR: Record<ProjectSignalAssetType, string> = {
+  character: 'purple',
+  scene: 'blue',
+  prop: 'gold',
+  costume: 'cyan',
+}
+
+function assetKey(asset: ProjectSignalAsset): string {
+  return `${asset.type}:${asset.id}`
+}
+
+/**
+ * 第 3 步「图片准备」的入口页。
+ *
+ * 说明（本轮实现选择）：项目资产的图片与图片提示词是在**已有的资产编辑页**里完成的
+ * （角色 → `/projects/:projectId/roles/:id/edit`，场景/道具/服装 → `/assets/.../:id/edit`），
+ * 全局资产管理页 `/assets` 只覆盖演员/场景/道具/服装、且不区分项目。
+ * 所以这里做成「项目资产图片清单 + 逐个跳到已有编辑页」的就地入口，
+ * 而不是简单把人扔到 `/assets`；顶部再给一个「前往资产库」的次要入口。
+ */
+type ProjectImagePrepPanelProps = {
+  assets: ProjectSignalAsset[]
+  detail: ProjectStepSignalDetail
+  loading: boolean
+  /** 保存图片提示词后重算本步骤信号（摘要条与资产表要跟着变，不能只刷新我自己的预览）。 */
+  onReload?: () => void
+}
+
+export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: ProjectImagePrepPanelProps) {
+  const navigate = useNavigate()
+  const { projectId } = useParams<{ projectId: string }>()
+
+  const openAssetEditor = (asset: ProjectSignalAsset) => {
+    if (!projectId) return
+    const assetType = asset.type
+    if (assetType === 'character') {
+      navigate(`/projects/${projectId}/roles/${asset.id}/edit`)
+      return
+    }
+    const tabByType: Record<Exclude<ProjectSignalAssetType, 'character'>, 'scenes' | 'props' | 'costumes'> = {
+      scene: 'scenes',
+      prop: 'props',
+      costume: 'costumes',
+    }
+    const segment = assetType === 'scene' ? 'scenes' : assetType === 'prop' ? 'props' : 'costumes'
+    // 回到第 3 步（图片准备），而不是退回旧的资产 Tab 链接。
+    const returnTo = encodeURIComponent(`/projects/${projectId}?step=image_prep&tab=${tabByType[assetType]}`)
+    navigate(`/assets/${segment}/${asset.id}/edit?returnTo=${returnTo}`)
+  }
+
+  const pending = useMemo(
+    () => assets.filter((asset) => !asset.hasImage || asset.hasImagePrompt === false),
+    [assets],
+  )
+
+  // ---- 生图计划预览（只读端点，永不触网、不花钱）----
+  // 这一步存在的意义：让「第 3 步保存的图片提示词」在**生产流程里**能当场看到
+  // 被生图计划读取（prompt_source=saved），而不是只能靠接口测试或肉眼看文本。
+  const [planType, setPlanType] = useState<'character' | 'scene' | 'prop'>('character')
+  const [planStage, setPlanStage] = useState<'character_sheet' | 'reference_batch'>('character_sheet')
+  const [plan, setPlan] = useState<{
+    targets: ImagePlanTarget[]
+    warnings: string[]
+    summary: Record<string, unknown>
+  } | null>(null)
+  const [planLoading, setPlanLoading] = useState(false)
+  const [planError, setPlanError] = useState('')
+
+  const loadPlan = useCallback(async () => {
+    if (!projectId) return
+    setPlanLoading(true)
+    setPlanError('')
+    try {
+      const data = await previewImagePlan({
+        project_id: projectId,
+        asset_type: planType,
+        stage: planStage,
+        use_primary_reference: true,
+      })
+      setPlan({ targets: data.targets ?? [], warnings: data.warnings ?? [], summary: data.summary ?? {} })
+    } catch (e) {
+      setPlanError((e as Error)?.message || '生图计划预览失败')
+      setPlan(null)
+    } finally {
+      setPlanLoading(false)
+    }
+  }, [planStage, planType, projectId])
+
+  useEffect(() => {
+    if (assets.length === 0) return
+    void loadPlan()
+  }, [assets.length, loadPlan])
+
+  const planColumns: TableColumnsType<ImagePlanTarget> = [
+    {
+      title: '资产',
+      dataIndex: 'name',
+      ellipsis: true,
+      render: (name: string, row) => (
+        <span className="flex items-center gap-2 min-w-0">
+          <Tag color={TYPE_COLOR[row.asset_type as ProjectSignalAssetType] ?? 'default'} className="mr-0">
+            {getProjectSignalAssetTypeLabel(row.asset_type as ProjectSignalAssetType)}
+          </Tag>
+          <span className="truncate" title={name}>
+            {name || row.source_asset_id}
+          </span>
+        </span>
+      ),
+    },
+    {
+      title: '提示词来源',
+      dataIndex: 'prompt_source',
+      width: 132,
+      render: (source: string) => {
+        const meta = PROMPT_SOURCE_META[String(source ?? '')] ?? PROMPT_SOURCE_META.template
+        return (
+          <Tooltip title={meta.hint}>
+            <Tag color={meta.color} bordered={false}>
+              {meta.label}
+            </Tag>
+          </Tooltip>
+        )
+      },
+    },
+    {
+      title: '本次使用的提示词',
+      dataIndex: 'prompt',
+      ellipsis: true,
+      render: (prompt: string) => (
+        <Tooltip title={<div className="max-w-[420px] whitespace-pre-wrap">{prompt}</div>}>
+          <span className="text-xs text-gray-600">{prompt || '—'}</span>
+        </Tooltip>
+      ),
+    },
+    {
+      title: '垫图（定版主图）',
+      dataIndex: 'reference_image',
+      width: 150,
+      render: (url: string) => {
+        const text = String(url ?? '')
+        if (!text) return <Tag bordered={false} className="text-gray-400">{planStage === 'reference_batch' ? '无可用垫图' : '定妆照不带垫图'}</Tag>
+        const fileId = text.split('/').pop() ?? text
+        return (
+          <Tooltip title={text}>
+            <Tag color="blue" bordered={false}>
+              {fileId.length > 18 ? `${fileId.slice(0, 14)}…` : fileId}
+            </Tag>
+          </Tooltip>
+        )
+      },
+    },
+  ]
+
+  const planSavedCount = (plan?.targets ?? []).filter((t) => t.prompt_source === 'saved').length
+  const planReferenceCount = (plan?.targets ?? []).filter((t) => Boolean(t.reference_image)).length
+
+  // ---- 手工填写图片提示词（DRY_RUN 下也能把"自己的"提示词写进 image_prompts）----
+  const [slotSpecs, setSlotSpecs] = useState<ImagePromptSlotSpec[]>([])
+  const [editorAsset, setEditorAsset] = useState<ProjectSignalAsset | null>(null)
+  const [editorDraft, setEditorDraft] = useState<Record<string, string>>({})
+  const [editorLoading, setEditorLoading] = useState(false)
+  const [editorSaving, setEditorSaving] = useState(false)
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setSlotSpecs(await fetchImagePromptSlots())
+      } catch {
+        setSlotSpecs([])
+      }
+    })()
+  }, [])
+
+  const editorSlots = useMemo(
+    () => slotSpecs.filter((slot) => slot.entity_type === editorAsset?.type),
+    [editorAsset, slotSpecs],
+  )
+
+  const openPromptEditor = useCallback(async (asset: ProjectSignalAsset) => {
+    setEditorAsset(asset)
+    setEditorDraft({})
+    setEditorLoading(true)
+    try {
+      const res = await StudioEntitiesApi.get(asset.type, asset.id)
+      setEditorDraft(getAssetImagePrompts(res.data as Record<string, unknown> | null))
+    } catch {
+      setEditorDraft({})
+    } finally {
+      setEditorLoading(false)
+    }
+  }, [])
+
+  const savePromptEditor = useCallback(async () => {
+    if (!editorAsset) return
+    const cleaned = Object.fromEntries(
+      Object.entries(editorDraft).filter(([, value]) => String(value ?? '').trim() !== ''),
+    )
+    setEditorSaving(true)
+    try {
+      // 合并写入：只覆盖本次填写的类别，不丢掉其它已保存类别。
+      await saveAssetImagePrompts(
+        editorAsset.type,
+        editorAsset.id,
+        cleaned as Record<string, string>,
+      )
+      message.success(`已保存 ${Object.keys(cleaned).length} 个槽位的图片提示词`)
+      setEditorAsset(null)
+      // 先重算步骤信号（摘要条/资产表的「图片提示词」列），再刷新生图计划
+      onReload?.()
+      await loadPlan()
+    } catch (e) {
+      message.error((e as Error)?.message || '保存图片提示词失败')
+    } finally {
+      setEditorSaving(false)
+    }
+  }, [editorAsset, editorDraft, loadPlan, onReload])
+
+  /**
+   * 场景/道具/服装的关联行只带 id（没有 name），表格直接显示 id 不可读。
+   * 这里只对「待准备」的资产补抓名称（最多 20 个，失败回退 id），
+   * 与现有 ScenesTab/PropsTab 的补详情方式一致。
+   */
+  const [nameById, setNameById] = useState<Record<string, string>>({})
+  const pendingKey = pending.map(assetKey).join('|')
+
+  useEffect(() => {
+    const targets = pending
+      .filter((asset) => asset.type !== 'character' && !nameById[assetKey(asset)])
+      .slice(0, NAME_LOOKUP_LIMIT)
+    if (targets.length === 0) return
+    let cancelled = false
+    void (async () => {
+      const entries = await Promise.all(
+        targets.map(async (asset) => {
+          try {
+            const res = await StudioEntitiesApi.get(asset.type, asset.id)
+            const name = (res.data as { name?: string } | null)?.name
+            return [assetKey(asset), typeof name === 'string' ? name.trim() : ''] as const
+          } catch {
+            return [assetKey(asset), ''] as const
+          }
+        }),
+      )
+      if (cancelled) return
+      setNameById((prev) => ({
+        ...prev,
+        ...Object.fromEntries(entries.filter(([, name]) => name !== '')),
+      }))
+    })()
+    return () => {
+      cancelled = true
+    }
+    // nameById 只用于「是否已抓过」，不参与依赖，避免重复请求。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingKey])
+
+  const displayName = (asset: ProjectSignalAsset) => nameById[assetKey(asset)] || asset.name || asset.id
+
+  const orderedAssets = useMemo(() => {
+    const rest = assets.filter((asset) => !pending.includes(asset))
+    return [...pending, ...rest]
+  }, [assets, pending])
+
+  const columns: TableColumnsType<ProjectSignalAsset> = [
+    {
+      title: '资产',
+      dataIndex: 'name',
+      key: 'name',
+      ellipsis: true,
+      render: (_: string, record) => (
+        <span className="flex items-center gap-2 min-w-0">
+          <Tag color={TYPE_COLOR[record.type]} className="mr-0">
+            {getProjectSignalAssetTypeLabel(record.type)}
+          </Tag>
+          <span className="truncate" title={displayName(record)}>
+            {displayName(record)}
+          </span>
+        </span>
+      ),
+    },
+    {
+      title: '参考图片',
+      key: 'image',
+      width: 110,
+      render: (_, record) =>
+        record.hasImage ? (
+          <Tag color="green" bordered={false}>
+            已有
+          </Tag>
+        ) : (
+          <Tag color="gold" bordered={false}>
+            待准备
+          </Tag>
+        ),
+    },
+    {
+      title: '图片提示词',
+      key: 'prompt',
+      width: 130,
+      render: (_, record) => {
+        if (record.hasImagePrompt === null) {
+          return (
+            <Tooltip title="当前接口载荷没有暴露 image_prompts，无法判定，请在资产编辑页确认">
+              <Tag bordered={false} className="text-gray-500">
+                无法判定
+              </Tag>
+            </Tooltip>
+          )
+        }
+        return record.hasImagePrompt ? (
+          <Tag color="green" bordered={false}>
+            已保存
+          </Tag>
+        ) : (
+          <Tag color="gold" bordered={false}>
+            待生成
+          </Tag>
+        )
+      },
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 210,
+      render: (_, record) => (
+        <Space size={6}>
+          <Button size="small" type="primary" icon={<PictureOutlined />} onClick={() => openAssetEditor(record)}>
+            准备图片
+          </Button>
+          <Tooltip title="手工填写/修改这个资产的图片提示词并保存到 image_prompts（不调用大模型、不花钱）">
+            <Button size="small" icon={<EditOutlined />} onClick={() => void openPromptEditor(record)}>
+              填提示词
+            </Button>
+          </Tooltip>
+        </Space>
+      ),
+    },
+  ]
+
+  const summaryTags = (
+    <Space size={4} wrap>
+      <Tag bordered={false}>角色 {detail.assetCounts.characters}</Tag>
+      <Tag bordered={false}>场景 {detail.assetCounts.scenes}</Tag>
+      <Tag bordered={false}>道具 {detail.assetCounts.props}</Tag>
+      <Tag bordered={false}>服装 {detail.assetCounts.costumes}</Tag>
+      <Tag color={detail.assetImageCount > 0 ? 'green' : 'gold'} bordered={false}>
+        已有参考图 {detail.assetImageCount}
+      </Tag>
+    </Space>
+  )
+
+  return (
+    <Card
+      title="图片准备"
+      extra={
+        <Space>
+          {summaryTags}
+          <Button icon={<ArrowRightOutlined />} onClick={() => navigate('/assets')}>
+            前往资产库
+          </Button>
+        </Space>
+      }
+    >
+      <div className="mb-3 text-xs text-gray-500">
+        为角色、场景、道具准备参考图片与图片提示词。图片提示词在资产编辑页生成并保存到资产上，
+        参考图直接决定后续镜头画面的统一性。
+      </div>
+
+      <Spin spinning={loading}>
+        {assets.length === 0 ? (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description="项目还没有角色/场景/道具资产，请先回到第 2 步「提取资产」"
+          >
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate(`/projects/${projectId}?step=extract_assets`)}>
+              去提取资产
+            </Button>
+          </Empty>
+        ) : (
+          <Table<ProjectSignalAsset>
+            rowKey={assetKey}
+            size="small"
+            columns={columns}
+            dataSource={orderedAssets}
+            pagination={orderedAssets.length > 10 ? { pageSize: 10 } : false}
+          />
+        )}
+      </Spin>
+
+      {assets.length > 0 ? (
+        <div className="mt-4 border-t border-slate-200 pt-4">
+          {/* 大模型生成图片提示词（单项 / 选中项 / 只补缺失 / 可停止与重试 / 确认后保存） */}
+          <AssetImagePromptLlmPanel projectId={projectId} assets={assets} onSaved={onReload} />
+        </div>
+      ) : null}
+
+      {assets.length > 0 ? (
+        <div className="mt-4 border-t border-slate-200 pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-slate-900">生图计划预览（只读）</div>
+              <Typography.Text type="secondary" className="text-[11px]">
+                展示「如果现在出图，会用什么提示词、用哪张垫图」。本预览不触网、不建任务、不花钱；
+                <span className="font-medium">提示词来源标记为「已保存提示词」时，说明这一步保存的 image_prompts 正在被生图读取</span>。
+              </Typography.Text>
+            </div>
+            <Space size={8} wrap>
+              <Segmented
+                size="small"
+                value={planType}
+                onChange={(value) => setPlanType(value as 'character' | 'scene' | 'prop')}
+                options={PLAN_ASSET_TYPES}
+              />
+              <Segmented
+                size="small"
+                value={planStage}
+                onChange={(value) => setPlanStage(value as 'character_sheet' | 'reference_batch')}
+                options={[
+                  { label: '定妆照（不带垫图）', value: 'character_sheet' },
+                  { label: '垫图批量（带定版垫图）', value: 'reference_batch' },
+                ]}
+              />
+              <Button size="small" icon={<ReloadOutlined />} loading={planLoading} onClick={() => void loadPlan()}>
+                刷新计划
+              </Button>
+            </Space>
+          </div>
+
+          {planError ? (
+            <Alert className="mt-3" type="error" showIcon message="生图计划预览失败" description={planError} />
+          ) : null}
+
+          {plan ? (
+            <div className="mt-3 space-y-3">
+              <Space size={8} wrap>
+                <Tag color="blue" bordered={false}>{`目标 ${plan.targets.length} 条`}</Tag>
+                <Tag color={planSavedCount > 0 ? 'green' : 'gold'} bordered={false}>
+                  {`用已保存提示词 ${planSavedCount} 条`}
+                </Tag>
+                <Tag color={planReferenceCount > 0 ? 'blue' : 'default'} bordered={false}>
+                  {`带垫图 ${planReferenceCount} 条`}
+                </Tag>
+                {planStage === 'reference_batch' && plan.targets.length > planReferenceCount ? (
+                  <Tag color="orange" bordered={false}>
+                    {`${plan.targets.length - planReferenceCount} 条没有可用垫图（会退化为纯文本出图）`}
+                  </Tag>
+                ) : null}
+              </Space>
+              {plan.warnings.length > 0 ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="后端提示"
+                  description={
+                    <ul className="list-disc pl-4 space-y-0.5 text-xs">
+                      {plan.warnings.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  }
+                />
+              ) : null}
+              <Table<ImagePlanTarget>
+                rowKey="source_task_id"
+                size="small"
+                loading={planLoading}
+                columns={planColumns}
+                dataSource={plan.targets}
+                pagination={plan.targets.length > 8 ? { pageSize: 8, size: 'small' } : false}
+              />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      <Modal
+        title={editorAsset ? `填写图片提示词 · ${displayName(editorAsset)}` : '填写图片提示词'}
+        open={Boolean(editorAsset)}
+        onCancel={() => setEditorAsset(null)}
+        width={860}
+        footer={
+          <Space>
+            <Button disabled={editorSaving} onClick={() => setEditorAsset(null)}>
+              取消
+            </Button>
+            <Button type="primary" loading={editorSaving} disabled={editorLoading} onClick={() => void savePromptEditor()}>
+              保存到资产
+            </Button>
+          </Space>
+        }
+      >
+        <div className="space-y-3">
+          <Alert
+            type="info"
+            showIcon
+            message="这是一条不花钱的填写入口"
+            description="保存后写进该资产的 image_prompts，生图计划会立刻把提示词来源标成「已保存提示词」——用它能当场验证第 3 步的保存结果真的被生图读取。留空的槽位不会覆盖原有内容；已保存的槽位会预填，可直接修改。"
+          />
+          <Spin spinning={editorLoading}>
+            {editorSlots.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有匹配该资产类型的提示词槽位" />
+            ) : (
+              editorSlots.map((slot) => (
+                <div key={slot.category} className="rounded-md border border-gray-200 p-3 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Tag color="blue" className="mr-0">
+                      {slot.label || slot.category}
+                    </Tag>
+                    <span className="text-xs text-gray-500">{slot.category}</span>
+                    {slot.view_hint ? <span className="text-xs text-gray-400">{slot.view_hint}</span> : null}
+                  </div>
+                  <Input.TextArea
+                    rows={3}
+                    placeholder="例如：韩虹，35 岁女律师，齐肩黑发，深灰西装，正脸半身，纯白背景"
+                    value={editorDraft[slot.category] ?? ''}
+                    onChange={(e) =>
+                      setEditorDraft((prev) => ({ ...prev, [slot.category]: e.target.value }))
+                    }
+                  />
+                </div>
+              ))
+            )}
+          </Spin>
+        </div>
+      </Modal>
+    </Card>
+  )
+}

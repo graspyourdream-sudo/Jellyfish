@@ -10,6 +10,7 @@ import {
   Modal,
   Form,
   Select,
+  AutoComplete,
   InputNumber,
   Switch,
   message,
@@ -29,7 +30,7 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { chapters as mockChapters, projects as mockProjects, type Project } from '../../../mocks/data'
 import { StudioChaptersService, StudioProjectsService } from '../../../services/generated'
-import type { ChapterRead, ProjectRead, ProjectStyle } from '../../../services/generated'
+import type { ChapterRead, ProjectRead } from '../../../services/generated'
 import {
   ProjectVisualStyleAndStyleFields,
   type ProjectVisualStyleChoice,
@@ -131,9 +132,16 @@ const ProjectLobby: React.FC = () => {
       if (useMock) {
         setProjects(mockProjects)
       } else {
+        /**
+         * 一次拉满一页（100 条），不再写死 `pageSize: 10`。
+         *
+         * 为什么必须改：这个列表页**没有翻页控件、也没有服务端搜索**，写死 10 条意味着
+         * 第 11 个项目之后在项目列表里根本点不到 —— 新建完项目再回列表就"找不到自己的项目"。
+         * 列表页下方本来就靠 `filteredSorted` 做本地筛选/排序，条数放宽不会改变交互。
+         */
         const res = await StudioProjectsService.listProjectsApiV1StudioProjectsGet({
           page: 1,
-          pageSize: 10,
+          pageSize: 100,
         })
         const items = res.data?.items ?? []
         setProjects(items.map(toUIProject))
@@ -399,7 +407,7 @@ const ProjectLobby: React.FC = () => {
           id: createdId,
           name: values.name,
           description: values.description ?? '',
-          style: values.style as ProjectStyle,
+          style: values.style,
           visual_style: values.visual_style as any,
           seed: values.seed,
           unify_style: values.unifyStyle,
@@ -450,7 +458,7 @@ const ProjectLobby: React.FC = () => {
         requestBody: {
           name: values.name,
           description: values.description ?? '',
-          style: values.style as ProjectStyle,
+          style: values.style,
           visual_style: values.visual_style as any,
           seed: values.seed,
           unify_style: values.unifyStyle,
@@ -993,8 +1001,16 @@ const ProjectLobby: React.FC = () => {
           >
             <InputNumber min={0} className="w-full" />
           </Form.Item>
-          <Form.Item name="default_video_ratio" label="默认视频比例">
-            <Select allowClear placeholder="未设置时由模型/供应商决定" options={videoRatioOptions} />
+          <Form.Item
+            name="default_video_ratio"
+            label="默认视频比例"
+            tooltip="可选预设，也可直接输入自定义比例（格式如 9:16）；留空则由模型/供应商决定"
+          >
+            <AutoComplete
+              allowClear
+              placeholder="选择或输入比例，如 9:16"
+              options={videoRatioOptions}
+            />
           </Form.Item>
           <Form.Item
             name="unifyStyle"
@@ -1038,8 +1054,16 @@ const ProjectLobby: React.FC = () => {
           <Form.Item name="seed" label="全局种子值" tooltip="固定种子可确保整部短剧视觉调性一致">
             <InputNumber min={0} className="w-full" />
           </Form.Item>
-          <Form.Item name="default_video_ratio" label="默认视频比例">
-            <Select allowClear placeholder="未设置时由模型/供应商决定" options={videoRatioOptions} />
+          <Form.Item
+            name="default_video_ratio"
+            label="默认视频比例"
+            tooltip="可选预设，也可直接输入自定义比例（格式如 9:16）；留空则由模型/供应商决定"
+          >
+            <AutoComplete
+              allowClear
+              placeholder="选择或输入比例，如 9:16"
+              options={videoRatioOptions}
+            />
           </Form.Item>
           <Form.Item name="unifyStyle" label="风格统一" valuePropName="checked" tooltip="开启后所有章节继承项目风格">
             <Switch />

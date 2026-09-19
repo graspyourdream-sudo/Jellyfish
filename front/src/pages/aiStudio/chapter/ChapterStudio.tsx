@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Alert,
   Badge,
   Button,
   Card,
@@ -19,8 +20,8 @@ import {
   Tabs,
   Tag,
   Tooltip,
-  message,
-} from 'antd'
+  Upload,
+  message, Typography, } from 'antd'
 import {
   AppstoreOutlined,
   ArrowLeftOutlined,
@@ -57,7 +58,10 @@ import {
   UserOutlined,
   DownloadOutlined,
 } from '@ant-design/icons'
-import { useLocation, useParams, Link } from 'react-router-dom'
+import { useLocation, useNavigate, useParams, Link } from 'react-router-dom'
+import { ChapterShotAssetBindingSection } from '../shots/components/ChapterShotAssetBindingSection'
+import { ShotAudioBindingSection } from '../shots/components/ShotAudioBindingSection'
+import { StudioStepProgressStrip } from './components/StudioStepProgressStrip'
 import {
   FilmService,
   LlmService,
@@ -100,10 +104,33 @@ import type {
   ShotVideoPromptPackRead,
 } from '../../../services/generated'
 import { listTaskLinksNormalized } from '../../../services/filmTaskLinks'
+import {
+  downloadDeliveryTxt,
+  fetchBoardReadiness,
+  fetchImageModels,
+  previewPromptDelivery,
+  persistGeneratedVideo,
+  previewFramePlan,
+  previewVideoSubmitPlan,
+  saveShotVideoPrompt,
+  submitFrameImage,
+  submitVideo,
+} from '../../../services/llmPipelineApi'
+import type { FramePlanResult, ImageModelOption, PromptDeliveryRow } from '../../../services/llmPipelineApi'
 import { buildFileDownloadUrl, resolveAssetUrl } from '../assets/utils'
 import type { Chapter } from '../../../mocks/data'
 import { executeTaskCancel } from '../components/taskActionHelpers'
 import { useRelationTaskNotification } from '../components/taskNotificationHelpers'
+import { VideoPromptLlmPanel } from './components/VideoPromptLlmPanel'
+import { ShotBoundFilesPanel } from './components/ShotBoundFilesPanel'
+import { ShotProductionCard } from './components/ShotProductionCard'
+import { ExportScopeModal } from './components/ExportScopeModal'
+import {
+  evaluateShotReadiness,
+  summarizeStepState,
+  STEP_STATE_META,
+  type ShotReadiness,
+} from './components/shotReadiness'
 import { TASK_COPY } from '../components/taskCopy'
 import { ChapterStudioBatchToolbar } from './components/ChapterStudioBatchToolbar'
 import { ChapterStudioMaintenancePanel } from './components/ChapterStudioMaintenancePanel'
@@ -142,6 +169,69 @@ type VideoPromptDerived = {
   prompt: string
   images: string[]
   pack: ShotVideoPromptPackRead | null
+}
+
+/**
+ * 固定模型直提计划（`/api/v1/studio/image-pipeline/video-plan/preview`）的只读视图。
+ *
+ * 只用于在「视频生成提示词预览」弹窗里如实展示后端固定策略
+ * （seedance-2.0-mini / 480p / 最短 5s）与 DRY_RUN 守卫状态；
+ * 它只预览、不提交，也不代表当前弹窗的「生成」一定走这条路。
+ */
+type VideoPinnedPlanView = {
+  modelName: string
+  resolution: string
+  seconds: number
+  provider: string
+  modelPinned: boolean
+  providerSupported: boolean
+  guardStatus: string
+  warnings: string[]
+}
+
+function normalizeVideoPinnedPlan(raw: unknown): VideoPinnedPlanView | null {
+  if (!raw || typeof raw !== 'object') return null
+  const data = raw as Record<string, unknown>
+  const readString = (key: string): string => (typeof data[key] === 'string' ? (data[key] as string) : '')
+  const rawSeconds = data.seconds
+  const seconds = typeof rawSeconds === 'number' ? rawSeconds : Number(rawSeconds)
+  return {
+    modelName: readString('model_name'),
+    resolution: readString('resolution'),
+    seconds: Number.isFinite(seconds) ? seconds : 0,
+    provider: readString('provider'),
+    modelPinned: data.model_pinned === true,
+    providerSupported: data.provider_supported !== false,
+    guardStatus: readString('guard_status'),
+    warnings: Array.isArray(data.warnings) ? (data.warnings as unknown[]).map((item) => String(item)) : [],
+  }
+}
+
+/** 视频提示词来源的中文标签（与后端白名单 jurilu / skill / llm / internal 对齐）。 */
+function videoPromptSourceLabel(source: string): string {
+  const normalized = String(source ?? '').trim().toLowerCase()
+  if (normalized === 'llm') return 'LLM 生成'
+  if (normalized === 'manual' || normalized === 'manual_workspace' || normalized === 'internal') return '人工编辑'
+  if (normalized === 'shot_description') return '镜头描述生成'
+  if (normalized === 'jurilu') return '剧立方导入'
+  if (normalized === 'skill') return '技能生成'
+  return normalized || '未知来源'
+}
+
+/** 关键帧出图的提示词来源（后端 frame-submit 计划里的 prompt_source）。 */
+function framePromptSourceLabel(source: string): string {
+  const normalized = String(source ?? '').trim().toLowerCase()
+  if (normalized === 'saved') return '镜头已保存'
+  if (normalized === 'request') return '本次输入'
+  if (normalized === 'empty') return '无（提交会被拒）'
+  return normalized || '未知'
+}
+
+/** 帧类型 → shot_details 上保存该帧提示词的字段（与后端 FRAME_PROMPT_FIELDS 一致）。 */
+function framePromptField(frameType: PromptFrameType): string {
+  if (frameType === 'first') return 'first_frame_prompt'
+  if (frameType === 'last') return 'last_frame_prompt'
+  return 'key_frame_prompt'
 }
 
 function normalizeFrameExclusiveTags(tags: string[]): string[] {
@@ -270,14 +360,129 @@ type KeyframeCardState = {
   thumbs: Array<{ linkId: number; fileId: string; thumbUrl: string }>
   modalOpen: boolean
   applyingFileId: string | null
+  /** 上传本地图片作为该帧时，该卡片正在上传。 */
+  uploading?: boolean
+  /** 本次内联生成的落库结果（file_id 非空 = 已经写进 shot_frame_images，刷新后仍在）。 */
+  lastFileId?: string | null
+  /** 实际送出的提示词来源：request / saved / empty。 */
+  lastPromptSource?: string | null
+  /** 实际送出的参考图 file_id。 */
+  lastReferenceFileIds?: string[]
+  /** 供应商/适配层的如实说明（例如「参考图未透传」）。 */
+  lastProviderNotes?: string[]
+  /** 最近一次生成的耗时（毫秒）。 */
+  lastElapsedMs?: number | null
 }
 
 type KeyframeResolutionProfile = 'standard' | 'high'
 
-type InspectorTabKey = 'ops' | 'camera' | 'prompt_image' | 'dialogue' | 'keyframe_gen' | 'gen_ref'
+type InspectorTabKey =
+  | 'ops'
+  | 'video_prompt_text'
+  | 'camera'
+  | 'prompt_image'
+  | 'binding'
+  | 'dialogue'
+  | 'production'
+  | 'keyframe_gen'
+  | 'gen_ref'
+  | 'av'
+
+/**
+ * 章节工作室里的三个步骤（对齐项目后三步）。
+ *
+ * 分镜工作室原本是一排平铺的检查器页签，分不清「先做什么」。这里把它按项目主流程
+ * 收成三步：视频提示词 → 关联绑定 → 生成与交付。只做**分组与切换**，各面板本身
+ * 一个字都没改，因此不会影响已有行为。
+ *
+ * 「当前分镜」不在分组内——它由外层（项目 / 分镜列表）持有，切换步骤时天然保留。
+ */
+type StudioStepKey = 'video_prompt' | 'binding' | 'deliver'
+
+type StudioStepMeta = {
+  key: StudioStepKey
+  /** 第一步对应项目第 4 步，因此这里只写步骤名，序号由页面拼。 */
+  label: string
+  hint: string
+  tabs: InspectorTabKey[]
+  defaultTab: InspectorTabKey
+}
+
+/** 三个步骤都需要的「维护设置」页签，不随步骤隐藏。 */
+const STUDIO_SHARED_TABS: InspectorTabKey[] = ['ops']
+
+const STUDIO_STEPS: StudioStepMeta[] = [
+  {
+    key: 'video_prompt',
+    label: '视频提示词',
+    hint: '看/改这条分镜的视频提示词（交付导出读的就是它），再确认镜头语言与画面提示词。',
+    tabs: ['video_prompt_text', 'camera', 'prompt_image'],
+    defaultTab: 'video_prompt_text',
+  },
+  {
+    key: 'binding',
+    label: '关联绑定',
+    hint: '把角色 / 场景 / 道具 / 服装 / 声音绑到这条分镜上；建议只做推荐，保存后才写入绑定。',
+    tabs: ['binding', 'dialogue'],
+    defaultTab: 'binding',
+  },
+  {
+    key: 'deliver',
+    label: '生成与交付',
+    hint: '关键帧与参考图、视频生成参数与产出，以及导出交付所需的提示词与绑定清单。',
+    // 第二部分：主操作集中在「本镜生产卡」上，关键帧/生成参数作为它的下钻页签
+    tabs: ['production', 'keyframe_gen', 'gen_ref', 'av'],
+    defaultTab: 'production',
+  },
+]
+
+/** 项目步骤 key → 工作室步骤 key（进入工作室时按它落位）。 */
+const PROJECT_STEP_TO_STUDIO_STEP: Record<string, StudioStepKey> = {
+  video_prompt: 'video_prompt',
+  binding: 'binding',
+  generate_deliver: 'deliver',
+}
+
+const STUDIO_STEP_PARAM = 'studio'
+
+function getStudioStepMeta(step: StudioStepKey): StudioStepMeta {
+  return STUDIO_STEPS.find((item) => item.key === step) ?? STUDIO_STEPS[0]
+}
+
+/** 从 URL 的 `?studio=` 推导初始步骤；非法/缺失一律落在第一步。
+ *
+ * 需要同时认两种取值：
+ * - 工作室自己的步骤 key（`video_prompt` / `binding` / `deliver`，本页切步骤时写回 URL 的形态）；
+ * - 项目工作台第 4-6 步的 key（`generate_deliver` 这类，从项目页跳进来时的形态）。
+ * 只认后者会导致「刷新后掉回第一步」。
+ */
+function resolveStudioStepFromParam(raw: string | null): StudioStepKey {
+  const value = (raw ?? '').trim()
+  const direct = STUDIO_STEPS.find((item) => item.key === value)
+  if (direct) return direct.key
+  return PROJECT_STEP_TO_STUDIO_STEP[value] ?? STUDIO_STEPS[0].key
+}
+
+/** 某个步骤允许显示的页签集合（含共享页签）。 */
+function allowedTabsForStudioStep(step: StudioStepKey): InspectorTabKey[] {
+  return [...STUDIO_SHARED_TABS, ...getStudioStepMeta(step).tabs]
+}
+
+const STUDIO_STEP_INDEX_OFFSET = 4 // 工作室三步 = 项目第 4/5/6 步
 
 const LAYOUT_STORAGE_KEY = 'jellyfish_chapter_studio_layout_v1'
 type PromptFrameType = 'first' | 'key' | 'last'
+
+/**
+ * 读取镜头的声音绑定（``shot_detail.audio_file_id``）。
+ *
+ * 该列是本次新增的，而 ``src/services/generated/**`` 是 openapi 生成产物
+ * （本环境没有 pnpm，不能重新生成），因此这里做一次显式读取，避免用 any 到处撒。
+ */
+function readBoundAudioFileId(detail: ShotDetailRead | null | undefined): string | null {
+  const raw = (detail as unknown as { audio_file_id?: string | null } | null | undefined)?.audio_file_id
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null
+}
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n))
@@ -496,6 +701,9 @@ const ChapterStudio: React.FC = () => {
   const [projectDefaultVideoRatio, setProjectDefaultVideoRatio] = useState<string>('')
   const { videoRatioOptions, defaultVideoRatio: capabilityDefaultVideoRatio } = useProjectStyleOptions()
   const [imageGenerationOptions, setImageGenerationOptions] = useState<ImageGenerationOptionsRead | null>(null)
+  // 关键帧出图模型：空 = 后端默认（image2 → 出图服务垫片）；选 gpt-image-2 = APIMart 直连
+  // （只有直连这条路会把参考图以公网地址真的送出去）。
+  const [keyframeImageModelId, setKeyframeImageModelId] = useState<string>('')
   const [shots, setShots] = useState<StudioShot[]>([])
   const [shotRuntimeMap, setShotRuntimeMap] = useState<Record<string, ShotRuntimeState>>({})
   const [selectedShotId, setSelectedShotId] = useState<string | null>(null)
@@ -1112,8 +1320,16 @@ const ChapterStudio: React.FC = () => {
     }
   }, [fetchBatchVideoReadiness])
 
+  // 批量关键帧生成的进度计数（内联执行是分钟级的，必须让用户看到走到哪了）
+  const batchDoneRef = useRef(0)
+  const batchSucceededRef = useRef(0)
+  const batchFailedRef = useRef(0)
+
   const runBatchGenerate = useCallback(
     async (targetShotIds: string[]) => {
+      batchDoneRef.current = 0
+      batchSucceededRef.current = 0
+      batchFailedRef.current = 0
       for (const id of targetShotIds) {
         const framesRes = await StudioShotFrameImagesService.listShotFrameImagesApiV1StudioShotFrameImagesGet({
           shotDetailId: id,
@@ -1170,20 +1386,38 @@ const ChapterStudio: React.FC = () => {
           .filter(Boolean)
         const targetRatio = resolveShotVideoRatio(d)
         if (!targetRatio) continue
-        await StudioImageTasksService.createShotFrameImageGenerationTaskApiV1StudioImageTasksShotShotIdFrameImageTasksPost({
-          shotId: id,
-          requestBody: {
-            frame_type: target.frame_type as any,
-            model_id: null,
-            prompt,
-            images: imagesPayload,
+        // 同进程内联执行（队列那条路本机没有 broker/worker，只会留一条永不执行的 pending）。
+        // 单张关键帧通常要 1–2 分钟，所以逐镜串行 + 进度提示，并在每次成功后刷新该镜的帧图。
+        try {
+          const result = await submitFrameImage({
+            shot_id: id,
+            frame_type: target.frame_type as 'first' | 'key' | 'last',
+            prompt: String(prompt),
+            images: (imagesPayload as Array<{ file_id?: string }>).map((x) => String(x?.file_id ?? '')).filter(Boolean),
             target_ratio: targetRatio,
             resolution_profile: keyframeResolutionProfile,
-          } as any,
-        })
+            model_id: keyframeImageModelId || null,
+          })
+          if (result.status === 'succeeded' && result.file_id) {
+            batchSucceededRef.current += 1
+          } else if (!result.dry_run) {
+            batchFailedRef.current += 1
+          }
+          batchDoneRef.current += 1
+          message.info(`关键帧批量生成进度：${batchDoneRef.current}/${targetShotIds.length}（成功 ${batchSucceededRef.current}，失败 ${batchFailedRef.current}）`)
+        } catch (error) {
+          batchFailedRef.current += 1
+          batchDoneRef.current += 1
+          message.warning(`镜头 ${id} 关键帧生成失败：${error instanceof Error ? error.message : String(error)}`)
+        }
       }
+      if (selectedShot?.id && targetShotIds.includes(selectedShot.id)) {
+        // 立刻把该镜头的帧图列表刷新到最新（结果已经写进 shot_frame_images.file_id）
+        await refreshShotFrameImages()
+      }
+      message.info(`批量关键帧生成结束：成功 ${batchSucceededRef.current}，失败 ${batchFailedRef.current}`)
     },
-    [keyframeResolutionProfile, resolveShotVideoRatio],
+    [keyframeImageModelId, keyframeResolutionProfile, refreshShotFrameImages, resolveShotVideoRatio, selectedShot?.id],
   )
 
   const updatePromptProps = async (propIds: string[]) => {
@@ -1350,20 +1584,27 @@ const ChapterStudio: React.FC = () => {
         message.warning('请先设置视频比例')
         return
       }
-      await StudioImageTasksService.createShotFrameImageGenerationTaskApiV1StudioImageTasksShotShotIdFrameImageTasksPost({
-        shotId: selectedShotId,
-        requestBody: {
-          frame_type: target.frame_type as any,
-          model_id: null,
-          prompt,
-          images: imagesPayload,
-          target_ratio: targetRatio,
-          resolution_profile: keyframeResolutionProfile,
-        } as any,
+      // 快捷键（Cmd/Ctrl+Enter）走的也是**同进程内联**端点：
+      // 老端点只建 Celery 任务行，本机没有 broker/worker，按了等于没按。
+      const result = await submitFrameImage({
+        shot_id: selectedShotId,
+        frame_type: target.frame_type as 'first' | 'key' | 'last',
+        prompt,
+        images: (imagesPayload as Array<{ file_id?: string }>).map((x) => String(x?.file_id ?? '')).filter(Boolean),
+        target_ratio: targetRatio,
+        resolution_profile: keyframeResolutionProfile,
+        model_id: keyframeImageModelId || null,
       })
-      message.success('已创建生成任务')
-    } catch {
-      message.error('创建生成任务失败')
+      if (result.dry_run) {
+        message.info('演练模式：未真实出图（DRY_RUN 开着）。')
+      } else if (result.status === 'succeeded' && result.file_id) {
+        await refreshShotFrameImages()
+        message.success(`帧图已生成并落库（${target.frame_type}，file_id=${result.file_id}）`)
+      } else {
+        message.error(result.error || `生成未成功（status=${result.status || 'unknown'}）`)
+      }
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '生成失败')
     } finally {
       setGenerating(false)
     }
@@ -1445,6 +1686,23 @@ const ChapterStudio: React.FC = () => {
     }
   }, [prefs.autoOpenInspector, prefs.inspectorOpen, selectedShot, setPrefs])
 
+  /**
+   * 进入工作室时，如果检查器是折叠的，先自动展开一次。
+   *
+   * 为什么：现在工作室的**步骤内容全在右侧检查器里**（视频提示词 / 关联绑定 / 生成与交付
+   * 的页签与按钮），而上面那条「无视频才展开」的规则在镜头都达到 ready、且已生成视频后会
+   * 判定为"不需要展开"——结果用户进来只看到主预览，找不到提示词编辑与绑定入口，
+   * 只能点别处乱跳。这里保证首次进入一定看得到本步骤的界面；用户之后仍可手动收起。
+   */
+  const studioStepAutoOpenedRef = useRef(false)
+  useEffect(() => {
+    if (studioStepAutoOpenedRef.current) return
+    studioStepAutoOpenedRef.current = true
+    if (!prefs.inspectorOpen) {
+      setPrefs((p) => ({ ...p, inspectorOpen: true }))
+    }
+  }, [prefs.inspectorOpen, setPrefs])
+
   const lastSavedDetailRef = useRef<ShotDetailRead | null>(null)
 
   const patchShotDetailLocal = (patch: Partial<ShotDetailRead>) => {
@@ -1471,7 +1729,7 @@ const ChapterStudio: React.FC = () => {
       }
     } catch {
       if (seq !== cameraPatchSeqRef.current) return
-      message.error('镜头语言更新失败')
+      message.error('镜头参数更新失败')
     } finally {
       if (seq === cameraPatchSeqRef.current) setCameraUpdating(false)
     }
@@ -2713,6 +2971,13 @@ const ChapterStudio: React.FC = () => {
                 onPatchShotDetailImmediate={patchShotDetailImmediate}
                 onSelectPreviewVideo={setPreviewVideoFileId}
                 onRefreshShotFrameImages={refreshShotFrameImages}
+                keyframeImageModelId={keyframeImageModelId}
+                onChangeKeyframeImageModelId={setKeyframeImageModelId}
+                selectedShotIds={selectedShotIds}
+                onAutoLocateShot={(shotId) => {
+                  setSelectedShotId(shotId)
+                  setSelectedShotIds([shotId])
+                }}
                 onClose={() => setPrefs((p) => ({ ...p, inspectorOpen: false }))}
               />
             </Sider>
@@ -2787,6 +3052,13 @@ const ChapterStudio: React.FC = () => {
                     onPatchShotDetailImmediate={patchShotDetailImmediate}
                     onSelectPreviewVideo={setPreviewVideoFileId}
                     onRefreshShotFrameImages={refreshShotFrameImages}
+                    keyframeImageModelId={keyframeImageModelId}
+                    onChangeKeyframeImageModelId={setKeyframeImageModelId}
+                    selectedShotIds={selectedShotIds}
+                onAutoLocateShot={(shotId) => {
+                  setSelectedShotId(shotId)
+                  setSelectedShotIds([shotId])
+                }}
                     onClose={() => setPrefs((p) => ({ ...p, inspectorOpen: false }))}
                   />
                 </div>
@@ -2906,6 +3178,9 @@ function Inspector(props: {
   imageGenerationOptions: ImageGenerationOptionsRead | null
   keyframeResolutionProfile: KeyframeResolutionProfile
   onChangeKeyframeResolutionProfile: (value: KeyframeResolutionProfile) => void
+  /** 关键帧用哪个图片模型（空 = 后端默认，通常是出图服务垫片的 image2）。 */
+  keyframeImageModelId: string
+  onChangeKeyframeImageModelId: (value: string) => void
   loadingDetail: boolean
   shotDetail: ShotDetailRead | null
   dialogLines: ShotDialogLineRead[]
@@ -2933,6 +3208,10 @@ function Inspector(props: {
   onSelectPreviewVideo: (fileId: string) => void
   /** 下拉展开时拉取最新分镜帧图，用于「参考」关键帧类型选项动态更新 */
   onRefreshShotFrameImages?: () => Promise<void>
+  /** 工作室里勾选的分镜（第 4 步「只处理选中项」批量生成用） */
+  selectedShotIds?: string[]
+  /** 进入工作台时自动定位到"当前步骤下第一个未完成镜头"（由外层执行选择） */
+  onAutoLocateShot?: (shotId: string) => void
 }) {
   const {
     projectId,
@@ -2945,6 +3224,8 @@ function Inspector(props: {
     imageGenerationOptions,
     keyframeResolutionProfile,
     onChangeKeyframeResolutionProfile,
+    keyframeImageModelId,
+    onChangeKeyframeImageModelId,
     loadingDetail,
     shotDetail,
     dialogLines,
@@ -2971,7 +3252,10 @@ function Inspector(props: {
     onPatchShotDetailImmediate,
     onSelectPreviewVideo,
     onRefreshShotFrameImages,
+    selectedShotIds,
+    onAutoLocateShot,
   } = props
+  const navigate = useNavigate()
   const currentChapterId = chapterId ?? null
   const [imageVersion, setImageVersion] = useState('v1')
   const [refImageType, setRefImageType] = useState<string | undefined>(undefined)
@@ -2979,7 +3263,38 @@ function Inspector(props: {
   const [useBoneDepth, setUseBoneDepth] = useState(false)
   const [audioMode, setAudioMode] = useState<'none' | 'prompt' | 'upload'>('none')
   const [hideShot, setHideShot] = useState(false)
-  const [inspectorTabKey, setInspectorTabKey] = useState<InspectorTabKey>('camera')
+  // 工作室三步（视频提示词 / 关联绑定 / 生成与交付）。初始步骤来自 URL 的
+  // `?studio=`（项目工作台第 4-6 步会带上），因此从项目列表进来直接落在对应步骤，
+  // 刷新后也停在同一步；没有参数时落在第一步。
+  const [studioStepKey, setStudioStepKey] = useState<StudioStepKey>(() =>
+    resolveStudioStepFromParam(new URLSearchParams(window.location.search).get(STUDIO_STEP_PARAM)),
+  )
+  const [inspectorTabKey, setInspectorTabKey] = useState<InspectorTabKey>(() =>
+    getStudioStepMeta(
+      resolveStudioStepFromParam(new URLSearchParams(window.location.search).get(STUDIO_STEP_PARAM)),
+    ).defaultTab,
+  )
+  /** 切步骤只改「工作室步骤」与 URL：当前分镜不动，已选镜头集合也不动。 */
+  const handleStudioStepChange = (next: StudioStepKey) => {
+    if (next === studioStepKey) return
+    setStudioStepKey(next)
+    setInspectorTabKey((current) =>
+      allowedTabsForStudioStep(next).includes(current) ? current : getStudioStepMeta(next).defaultTab,
+    )
+    // 写回 URL（replace）：刷新后仍停在这一步，也不污染浏览器返回栈。
+    const params = new URLSearchParams(window.location.search)
+    params.set(STUDIO_STEP_PARAM, next)
+    navigate({ pathname: window.location.pathname, search: params.toString() }, { replace: true })
+  }
+
+  // 当前页签不属于本步骤时自动归位（覆盖页签被条件隐藏等情况）。
+  useEffect(() => {
+    // 只在"当前页签不属于本步骤"时归位；切换镜头不会改变 studioStepKey，
+    // 因此用户停在哪一页签就停在哪一页签（本轮修复：以前切镜头会被重置）。
+    if (allowedTabsForStudioStep(studioStepKey).includes(inspectorTabKey)) return
+    setInspectorTabKey(getStudioStepMeta(studioStepKey).defaultTab)
+  }, [inspectorTabKey, studioStepKey])
+
   const [sceneNameMap, setSceneNameMap] = useState<Record<string, string>>({})
   const [characterNameMap, setCharacterNameMap] = useState<Record<string, string>>({})
   const [linkRoleOpen, setLinkRoleOpen] = useState(false)
@@ -3023,6 +3338,31 @@ function Inspector(props: {
   const opsTitleSaveTimerRef = useRef<number | null>(null)
   const opsNoteSaveTimerRef = useRef<number | null>(null)
   const [keyframePromptPreviewOpen, setKeyframePromptPreviewOpen] = useState(false)
+  const [keyframePlanPreview, setKeyframePlanPreview] = useState<FramePlanResult | null>(null)
+  // 第二部分：进入工作台只自动定位**一次**（当前步骤下第一个未完成镜头），之后尊重用户主动选择
+  const autoLocatedShotRef = useRef(false)
+  // 第二部分：导出前的范围检查（列出可导出/缺提示词/缺绑定文件），确认后再调既有 TXT 接口
+  const [exportScopeOpen, setExportScopeOpen] = useState(false)
+  const [scopeRows, setScopeRows] = useState<PromptDeliveryRow[]>([])
+  /** 集级**真实**就绪数据（后端一次批量读取：每镜提示词/绑定/参考帧/声音） */
+  const [readinessRows, setReadinessRows] = useState<Array<Record<string, any>>>([])
+  // 关键帧走哪条出图通道的**可选列表**（选中值由外层持有，和分辨率档位同一口径）
+  const [imageModelOptions, setImageModelOptions] = useState<ImageModelOption[]>([])
+
+  useEffect(() => {
+    let active = true
+    void (async () => {
+      try {
+        const items = await fetchImageModels()
+        if (active) setImageModelOptions(items)
+      } catch {
+        if (active) setImageModelOptions([])
+      }
+    })()
+    return () => {
+      active = false
+    }
+  }, [])
   const [keyframePromptPreviewLoading, setKeyframePromptPreviewLoading] = useState(false)
   const [keyframePromptActionLoading, setKeyframePromptActionLoading] = useState(false)
   const [keyframePromptPreviewFrameType, setKeyframePromptPreviewFrameType] = useState<PromptFrameType>('key')
@@ -3035,6 +3375,10 @@ function Inspector(props: {
   const [videoPromptPreviewLoading, setVideoPromptPreviewLoading] = useState(false)
   const [videoPromptPreviewSubmitting, setVideoPromptPreviewSubmitting] = useState(false)
   const [videoPromptContextCollapsed, setVideoPromptContextCollapsed] = useState(true)
+  const [videoPromptSaving, setVideoPromptSaving] = useState(false)
+  const [videoPinnedPlan, setVideoPinnedPlan] = useState<VideoPinnedPlanView | null>(null)
+  /** 本次打开弹窗时 LLM 生成的原样结果，用于区分「人工编辑」与「原样接受生成结果」。 */
+  const [videoLlmDerivedPrompt, setVideoLlmDerivedPrompt] = useState('')
   const resolveVideoRatioForRequest = useCallback(() => {
     const shotRatio = String(shotDetail?.override_video_ratio ?? '').trim()
     const projectRatio = String(projectDefaultVideoRatio ?? '').trim()
@@ -3087,17 +3431,37 @@ function Inspector(props: {
       if (!ratio) {
         throw new Error('video ratio is required')
       }
-      const created = await FilmService.createVideoGenerationTaskApiV1FilmTasksVideoPost({
-        requestBody: {
-          shot_id: selectedShot.id,
-          reference_mode: context.referenceMode,
-          prompt: (derived.prompt || '').trim(),
-          images: derived.images,
-          ratio,
-        } as any,
+      // 为什么不再走 /film/tasks/video：那条链路把任务丢给 Celery 队列，而本机没有
+      // Redis / worker（task_always_eager=False），任务只会停在 pending —— 表现就是
+      // "点了生成没反应"。这里改走**同进程内联执行**的直提端点，并在拿到地址后
+      // 立刻落库挂到该镜头，界面刷新即可见。
+      const result = await submitVideo({
+        shot_id: selectedShot.id,
+        reference_mode: context.referenceMode,
+        prompt: (derived.prompt || '').trim(),
+        images: derived.images,
+        ratio,
+        duration_seconds: Math.max(5, Number(shotDetail?.duration ?? 5) || 5),
+        timeout_seconds: 900,
       })
+      if (result.status === 'dry_run') {
+        // 演练模式：守卫拦下了真实调用。这不是错误，要说清楚而不是报红。
+        message.info(
+          '演练模式（DRY_RUN）：未真实生成、未产生费用。要真实生成请在后端显式关闭守卫（JELLYFISH_DRY_RUN=0 且 JELLYFISH_REAL_LLM_CONFIRMED=1）后重试。',
+          8,
+        )
+        return { taskId: null }
+      }
+      if (result.status !== 'completed' || !result.url) {
+        throw new Error(result.error || `视频生成未完成（status=${result.status}）`)
+      }
+      const fileId = await persistGeneratedVideo(selectedShot.id, result.url, '镜头视频（直提）')
+      const refreshed = await StudioShotDetailsService.getShotDetailApiV1StudioShotDetailsShotIdGet({
+        shotId: selectedShot.id,
+      })
+      if (refreshed.data) onPatchShotDetail(refreshed.data)
       return {
-        taskId: created.data?.task_id ?? null,
+        taskId: fileId,
       }
     },
   })
@@ -3119,6 +3483,51 @@ function Inspector(props: {
     ? videoActionBeats.slice(0, 2)
     : videoActionBeats
   const hiddenVideoActionBeatCount = Math.max(0, videoActionBeats.length - videoVisibleActionBeats.length)
+  // 已持久化到 shot_details.video_prompt 的内容（交付导出读的就是这一列）。
+  const savedVideoPrompt = (shotDetail?.video_prompt ?? '').trim()
+  const savedVideoPromptSource = String(shotDetail?.video_prompt_source ?? '').trim()
+  const savedVideoPromptDiffers = Boolean(savedVideoPrompt) && savedVideoPrompt !== (videoPromptPreviewDraft || '').trim()
+
+  /**
+   * 「4. 视频提示词」步骤里的就地编辑器。
+   *
+   * 之前这条内容只存在于「6. 生成与交付 → 视频生成」页签的弹窗里，第 4 步看不到它，
+   * 用户只能去别处找 —— 现在本步骤直接可看可改可保存，不跳页。
+   */
+  const [videoPromptTabDraft, setVideoPromptTabDraft] = useState('')
+  const [videoPromptTabSaving, setVideoPromptTabSaving] = useState(false)
+  useEffect(() => {
+    // 切换分镜 / 外部保存后回填（用户正在输入时不要覆盖：只在内容与已保存值不同且草稿为空或等于上一次已保存值时同步）
+    setVideoPromptTabDraft(savedVideoPrompt)
+  }, [selectedShot?.id, savedVideoPrompt])
+
+  const saveVideoPromptTab = async (source: 'manual' | 'llm') => {
+    if (!selectedShot?.id) {
+      message.warning('请先选择一个分镜')
+      return
+    }
+    const text = videoPromptTabDraft.trim()
+    if (!text) {
+      message.warning('提示词为空，无法保存')
+      return
+    }
+    setVideoPromptTabSaving(true)
+    try {
+      await saveShotVideoPrompt(selectedShot.id, text, source)
+      const refreshed = await StudioShotDetailsService.getShotDetailApiV1StudioShotDetailsShotIdGet({
+        shotId: selectedShot.id,
+      })
+      if (refreshed.data) onPatchShotDetail(refreshed.data)
+      message.success(`视频提示词已保存到镜头（来源：${videoPromptSourceLabel(source)}）`)
+    } catch (err) {
+      message.error(`保存视频提示词失败：${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setVideoPromptTabSaving(false)
+    }
+  }
+  const videoLlmDerivedPromptTrimmed = videoLlmDerivedPrompt.trim()
+  const videoLlmResultDiffers = Boolean(videoLlmDerivedPromptTrimmed) && videoLlmDerivedPromptTrimmed !== (videoPromptPreviewDraft || '').trim()
+  const videoPromptSaveSource = videoLlmDerivedPromptTrimmed && videoLlmDerivedPromptTrimmed === (videoPromptPreviewDraft || '').trim() ? 'llm' : 'internal'
   const [videoTaskPolling, setVideoTaskPolling] = useState(false)
   const [videoTaskStatus, setVideoTaskStatus] = useState<string | null>(null)
   const [videoTaskId, setVideoTaskId] = useState<string | null>(null)
@@ -3226,21 +3635,9 @@ function Inspector(props: {
   const showGenRefParams = false
   const showGenRefVersions = false
 
-  const getInspectorTabForSelectedShot = useCallback(
-    (shot: StudioShot | null): InspectorTabKey => {
-      if (!shot) return 'camera'
-      if (shot.hasProblem) return 'ops'
-      if (!(shot.script_excerpt ?? '').trim() || shot.status !== 'ready') return 'prompt_image'
-      if (shot.status === 'ready') return 'gen_ref'
-      if (!shot.hasSpeech) return 'dialogue'
-      return 'camera'
-    },
-    [],
-  )
-
-  useEffect(() => {
-    setInspectorTabKey(getInspectorTabForSelectedShot(selectedShot))
-  }, [getInspectorTabForSelectedShot, selectedShot?.id])
+  // 注意：这里**故意不再**"按镜头自动挑页签"。
+  // 以前每次切镜头都会 setInspectorTabKey(camera/gen_ref/ops…)，把用户停在的
+  // 「本镜生产卡」顶掉；页签只应在**步骤切换**且当前页签不属于新步骤时才归位。
 
   useEffect(() => {
     setHideShot(Boolean(selectedShot?.hidden))
@@ -3842,19 +4239,20 @@ function Inspector(props: {
       if (!ratio) {
         throw new Error('video ratio is required')
       }
-      const created = await StudioImageTasksService.createShotFrameImageGenerationTaskApiV1StudioImageTasksShotShotIdFrameImageTasksPost({
-        shotId: selectedShot.id,
-        requestBody: {
-          frame_type: base.frameType,
-          model_id: null,
-          prompt: (base.prompt || '').trim(),
-          images: resolvedItems as any,
-          target_ratio: ratio,
-          resolution_profile: keyframeResolutionProfile,
-        } as any,
+      // 默认生成路径也走**同进程内联**端点（老端点只建 Celery 任务行，本机不会被执行）。
+      // 界面上的「生成」按钮目前走 confirmGenerateKeyframeWithPrompt，这里保持一致，
+      // 避免将来有人再调用 draft.submitNow() 时又踩回死队列。
+      const result = await submitFrameImage({
+        shot_id: selectedShot.id,
+        frame_type: base.frameType,
+        prompt: (base.prompt || '').trim(),
+        images: (resolvedItems as Array<{ file_id?: string }>).map((x) => String(x?.file_id ?? '')).filter(Boolean),
+        target_ratio: ratio,
+        resolution_profile: keyframeResolutionProfile,
+        model_id: keyframeImageModelId || null,
       })
       return {
-        taskId: created.data?.task_id ?? null,
+        taskId: result.task_id ?? null,
       }
     },
   })
@@ -3976,9 +4374,20 @@ function Inspector(props: {
     }
     setLinkRoleLoading(true)
     try {
-      const res = await StudioEntitiesApi.list('character', { page: 1, pageSize: 20, q: null })
-      const items = (res.data?.items ?? []).filter((x: any) => x?.project_id === projectId)
-      const opts = items.map((c: any) => {
+      /**
+       * 角色选项：实体列表接口**不支持按项目过滤**，只能取全局角色再按 `project_id` 过滤。
+       * 以前只取第 1 页 20 条，于是「全局角色超过 20 个」的项目里下拉恒为空 ——
+       * 关联角色这一步在页面上等于做不了。这里分页拉取（一次 100 条，最多 5 页）
+       * 直到不够一页为止，与工作台 `useProjectStepSignals` 的口径保持一致。
+       */
+      const collected: any[] = []
+      for (let page = 1; page <= 5; page += 1) {
+        const res = await StudioEntitiesApi.list('character', { page, pageSize: 100, q: null, isDesc: true })
+        const batch = (res.data?.items ?? []) as any[]
+        collected.push(...batch.filter((x: any) => x?.project_id === projectId))
+        if (batch.length < 100) break
+      }
+      const opts = collected.map((c: any) => {
         const id = String(c?.id ?? '')
         const name = String(c?.name ?? id)
         const thumb = typeof c?.thumbnail === 'string' ? c.thumbnail : ''
@@ -4252,33 +4661,120 @@ function Inspector(props: {
     }
     const { referenceMode, images } = buildVideoRefSelection()
     const nextContext = { referenceMode, images }
+    const savedPrompt = (shotDetail?.video_prompt ?? '').trim()
+    const savedSource = String(shotDetail?.video_prompt_source ?? '').trim()
+    // 已保存的提示词优先回填到输入框，避免 LLM 结果把它静默覆盖掉。
     videoPromptDraft.hydrate({
-      base: { prompt: '' },
+      base: { prompt: savedPrompt },
       context: nextContext,
     })
     setVideoPromptContextCollapsed(true)
+    setVideoPinnedPlan(null)
     setVideoPromptPreviewOpen(true)
     setVideoPromptPreviewLoading(true)
+    // 计划预览用到的提示词与参考图（带提示词请求时后端只做本地组装，不会触发 LLM 出词）。
+    let planPrompt = savedPrompt
+    let planImages = images
     try {
       const derived = await videoPromptDraft.deriveNow({
         base: { prompt: '' },
         context: nextContext,
       })
       if (derived) {
+        const llmPrompt = (derived.prompt ?? '').trim()
+        setVideoLlmDerivedPrompt(llmPrompt)
+        const initialPrompt = savedPrompt || derived.prompt
+        planPrompt = initialPrompt
+        planImages = derived.images
         videoPromptDraft.hydrate({
-          base: { prompt: derived.prompt },
+          base: { prompt: initialPrompt },
           context: {
             referenceMode,
             images: derived.images,
           },
-          derived,
+          derived: {
+            ...derived,
+            prompt: initialPrompt,
+          },
         })
+        if (savedPrompt) {
+          if (savedPrompt !== llmPrompt) {
+            message.warning(
+              `已载入该镜头已保存的视频提示词（来源：${videoPromptSourceLabel(savedSource)}），本次 LLM 生成结果未覆盖它；` +
+                '如需改用本次生成结果，请在弹窗内点击「使用本次 LLM 结果」。',
+            )
+          } else {
+            message.info('已载入该镜头已保存的视频提示词')
+          }
+        }
       }
     } catch {
       message.error('获取视频提示词预览失败')
     } finally {
       setVideoPromptPreviewLoading(false)
     }
+    if (planPrompt) {
+      // 固定模型直提计划：只预览（不提交、不触网），用于如实展示后端固定策略与 DRY_RUN 守卫状态。
+      void previewVideoSubmitPlan({
+        shot_id: selectedShot.id,
+        reference_mode: referenceMode,
+        prompt: planPrompt,
+        images: planImages,
+        ratio: resolveVideoRatioForRequest(),
+      })
+        .then((plan) => setVideoPinnedPlan(normalizeVideoPinnedPlan(plan)))
+        .catch(() => setVideoPinnedPlan(null))
+    }
+  }
+
+  /**
+   * 保存视频提示词到镜头（`shot_details.video_prompt` + `video_prompt_source`）。
+   *
+   * 来源判定：与本次 LLM 生成结果完全一致 → `llm`；被人工改过 → `internal`。
+   * 保存后回读一次详情，让 inspector 立刻显示已持久化的值（与 patchShotDetailImmediate 同款做法）。
+   */
+  const saveVideoPromptToShot = async () => {
+    if (!selectedShot?.id) {
+      message.warning('请先选择一个分镜')
+      return
+    }
+    const prompt = (videoPromptPreviewDraft || '').trim()
+    if (!prompt) {
+      message.warning('提示词为空，无法保存')
+      return
+    }
+    const llmPrompt = videoLlmDerivedPrompt.trim()
+    const source = llmPrompt && prompt === llmPrompt ? 'llm' : 'internal'
+    const shotId = selectedShot.id
+    setVideoPromptSaving(true)
+    try {
+      await saveShotVideoPrompt(shotId, prompt, source)
+      const refreshed = await StudioShotDetailsService.getShotDetailApiV1StudioShotDetailsShotIdGet({ shotId })
+      if (refreshed.data) onPatchShotDetail(refreshed.data)
+      message.success(`视频提示词已保存到镜头（来源：${videoPromptSourceLabel(source)}）`)
+    } catch (err) {
+      message.error(`保存视频提示词失败：${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setVideoPromptSaving(false)
+    }
+  }
+
+  /** 放弃已保存/人工编辑内容，改用本次 LLM 生成结果（保存时会标记为 llm 来源）。 */
+  const applyVideoLlmDerivedPrompt = () => {
+    const llmPrompt = videoLlmDerivedPrompt.trim()
+    if (!llmPrompt) {
+      message.warning('本次没有可用的 LLM 生成结果')
+      return
+    }
+    const currentDerived = videoPromptDraft.derived
+    videoPromptDraft.hydrate({
+      base: { prompt: llmPrompt },
+      context: videoPromptDraft.context,
+      derived: currentDerived
+        ? { ...currentDerived, prompt: llmPrompt }
+        : { prompt: llmPrompt, images: videoPromptDraft.context.images, pack: null },
+    })
+    message.info('已切换为本次 LLM 生成结果')
   }
 
   const submitVideoGeneration = async () => {
@@ -4599,6 +5095,217 @@ function Inspector(props: {
     renderShotPromptToTextarea,
   ])
 
+  /**
+   * 后端「这一帧到底会用哪条提示词 / 哪些参考图」的计划预览（只读、不触网、不写库）。
+   *
+   * 为什么要多这一份：界面上的草稿和真正提交的入参是两回事 —— 用户要能一眼看到
+   * 提交读的是**镜头里已保存的**帧提示词（来源标签），而不是"我以为的"。
+   */
+  const loadKeyframePlanPreview = useCallback(
+    async (frameType: PromptFrameType) => {
+      if (!selectedShot?.id) return
+      const ratio = resolveVideoRatioForRequest()
+      const refFileIds =
+        keyframePromptPreviewRefFileIds.length > 0 ? keyframePromptPreviewRefFileIds : autoKeyframeRefFileIds
+      try {
+        const plan = await previewFramePlan({
+          shot_id: selectedShot.id,
+          frame_type: frameType,
+          images: refFileIds,
+          target_ratio: ratio,
+          resolution_profile: keyframeResolutionProfile,
+          model_id: keyframeImageModelId || null,
+        })
+        setKeyframePlanPreview(plan)
+      } catch (error) {
+        setKeyframePlanPreview(null)
+        message.warning(error instanceof Error ? error.message : '读取关键帧提交计划失败')
+      }
+    },
+    [
+      autoKeyframeRefFileIds,
+      keyframeImageModelId,
+      keyframePromptPreviewRefFileIds,
+      keyframeResolutionProfile,
+      resolveVideoRatioForRequest,
+      selectedShot?.id,
+    ],
+  )
+
+  useEffect(() => {
+    if (!keyframePromptPreviewOpen || !selectedShot?.id) {
+      setKeyframePlanPreview(null)
+      return
+    }
+    const timer = window.setTimeout(() => {
+      void loadKeyframePlanPreview(keyframePromptPreviewFrameType)
+    }, 300)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [
+    keyframePromptPreviewFrameType,
+    keyframePromptPreviewOpen,
+    loadKeyframePlanPreview,
+    selectedShot?.id,
+  ])
+
+  /**
+   * 把弹窗里的提示词保存到镜头（`shot_details.first/key/last_frame_prompt`）。
+   *
+   * 为什么必须有这一步：关键帧提交时"没填 prompt"的兜底读的就是这几个字段。
+   * 只改了输入框不保存，下一次打开又是空的，也就谈不上"保存内容被下一步实际使用"。
+   */
+  const saveKeyframePromptToShot = async () => {
+    if (!selectedShot?.id) return
+    const frameType = keyframePromptPreviewFrameType
+    const prompt = (keyframePromptPreviewDraft || '').trim()
+    if (!prompt) {
+      message.warning('提示词为空，未保存')
+      return
+    }
+    const field = framePromptField(frameType)
+    setKeyframePromptActionLoading(true)
+    try {
+      await onPatchShotDetailImmediate({ [field]: prompt } as Partial<ShotDetailRead>)
+      keyframePromptDraft.setState('submitted')
+      message.success(`已保存到镜头（shot_details.${field}，${prompt.length} 字）`)
+      await loadKeyframePlanPreview(frameType)
+    } catch (error) {
+      message.error(`保存失败：${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setKeyframePromptActionLoading(false)
+    }
+  }
+
+  /** 范围内每镜的就绪结果（命中范围：勾选优先，否则当前集） */
+  const scopeReadiness: ShotReadiness[] = useMemo(() => {
+    const byId = new Map(readinessRows.map((item) => [String(item.shot_id), item]))
+    const rows = scopeRows.length
+      ? scopeRows
+      : readinessRows.map((item) => ({
+          shot_id: String(item.shot_id),
+          shot_code: String(item.code ?? ''),
+          shot_title: String(item.title ?? ''),
+          video_prompt: String(item.video_prompt ?? ''),
+          video_prompt_source: String(item.video_prompt_source ?? ''),
+          exportable: Boolean(item.has_prompt),
+          bound_files: [],
+        }))
+    return rows.map((row) => {
+      const real = byId.get(row.shot_id)
+      return evaluateShotReadiness({
+        row,
+        // 关键：用**真实**的必需帧 / 可用帧，不再传空数组把缺帧镜头算成可生成
+        requiredFrameTypes: (real?.required_frame_types as string[]) ?? [],
+        usableFrameTypes: (real?.usable_frame_types as string[]) ?? [],
+        // 有 file_id 但供应商取不到（本机地址只能变 data URL）→ 与缺帧一样阻断，
+        // 但提示要区分开："已上传但供应商无法访问"，不是"没上传"。
+        unusableFrameTypes: (real?.unusable_frame_types as string[]) ?? [],
+        frameBlockReasons: (real?.frame_block_reasons as string[]) ?? [],
+        planReady: true,
+        extraBlockers: [],
+      })
+    })
+  }, [readinessRows, scopeRows])
+
+  useEffect(() => {
+    let active = true
+    void (async () => {
+      if (!projectId) return
+      try {
+        const data = await previewPromptDelivery(projectId, chapterId ?? null, 'episode', selectedShotIds ?? [])
+        if (active) setScopeRows(data?.rows ?? [])
+      } catch {
+        if (active) setScopeRows([])
+      }
+    })()
+    return () => {
+      active = false
+    }
+  }, [chapterId, projectId, selectedShotIds])
+
+  const scopeState = summarizeStepState(scopeReadiness.map((item) => item.stepState))
+
+  // 本集每镜的就绪输入（整集，不受勾选范围影响）——用于"第一个未完成镜头"定位
+  const [episodeRows, setEpisodeRows] = useState<PromptDeliveryRow[]>([])
+  useEffect(() => {
+    let active = true
+    void (async () => {
+      if (!projectId || !chapterId) return
+      try {
+        const data = await previewPromptDelivery(projectId, chapterId, 'episode')
+        if (active) setEpisodeRows(data?.rows ?? [])
+      } catch {
+        if (active) setEpisodeRows([])
+      }
+      try {
+        const readiness = await fetchBoardReadiness(chapterId, 'first')
+        if (active) setReadinessRows(readiness.rows ?? [])
+      } catch {
+        if (active) setReadinessRows([])
+      }
+    })()
+    return () => {
+      active = false
+    }
+  }, [chapterId, projectId])
+
+  /** 各步骤对该镜的要求（判定口径只有这一份，见 shotReadiness.ts） */
+  /** 同一份就绪数据 → 按当前步骤取状态（口径只此一处） */
+  const shotSatisfiesStep = useCallback(
+    (state: ReturnType<typeof evaluateShotReadiness>): boolean => {
+      if (studioStepKey === 'video_prompt') return state.canExport // 有效提示词（来源白名单内）
+      if (studioStepKey === 'binding') return state.hasBoundFiles
+      return state.canGenerate // 生成步骤：提示词 + 参考帧 + 阻断项
+    },
+    [studioStepKey],
+  )
+
+  /** 进入工作台/切换步骤时，自动落到**该步骤下第一个未完成镜头**（只做一次，之后尊重用户选择） */
+  useEffect(() => {
+    if (autoLocatedShotRef.current || !episodeRows.length) return
+    const byId = new Map(readinessRows.map((item) => [String(item.shot_id), item]))
+    const states = episodeRows.map((row) => {
+      const real = byId.get(row.shot_id)
+      return evaluateShotReadiness({
+        row,
+        requiredFrameTypes: (real?.required_frame_types as string[]) ?? [],
+        usableFrameTypes: (real?.usable_frame_types as string[]) ?? [],
+        // 有 file_id 但供应商取不到（本机地址只能变 data URL）→ 与缺帧一样阻断，
+        // 但提示要区分开："已上传但供应商无法访问"，不是"没上传"。
+        unusableFrameTypes: (real?.unusable_frame_types as string[]) ?? [],
+        frameBlockReasons: (real?.frame_block_reasons as string[]) ?? [],
+        planReady: true,
+      })
+    })
+    const firstIncomplete = states.find((state) => !shotSatisfiesStep(state))
+    autoLocatedShotRef.current = true
+    if (firstIncomplete && firstIncomplete.shotId !== selectedShot?.id) {
+      onAutoLocateShot?.(firstIncomplete.shotId)
+    }
+  }, [episodeRows, onAutoLocateShot, readinessRows, selectedShot?.id, shotSatisfiesStep])
+
+  /** 导出范围：多选时按选中，否则按**当前集**（一镜的选择不该被当成"导出范围只有一镜"） */
+  const exportReadiness: ShotReadiness[] = useMemo(() => {
+    if ((selectedShotIds ?? []).length > 1) return scopeReadiness
+    const byId = new Map(readinessRows.map((item) => [String(item.shot_id), item]))
+    return episodeRows.map((row) => {
+      const real = byId.get(row.shot_id)
+      return evaluateShotReadiness({
+        row,
+        requiredFrameTypes: (real?.required_frame_types as string[]) ?? [],
+        usableFrameTypes: (real?.usable_frame_types as string[]) ?? [],
+        // 有 file_id 但供应商取不到（本机地址只能变 data URL）→ 与缺帧一样阻断，
+        // 但提示要区分开："已上传但供应商无法访问"，不是"没上传"。
+        unusableFrameTypes: (real?.unusable_frame_types as string[]) ?? [],
+        frameBlockReasons: (real?.frame_block_reasons as string[]) ?? [],
+        planReady: true,
+      })
+    })
+  }, [episodeRows, readinessRows, scopeReadiness, (selectedShotIds ?? []).length])
+
+
   const confirmGenerateKeyframeWithPrompt = async () => {
     if (!selectedShot?.id) {
       message.warning('请先选择一个分镜')
@@ -4610,65 +5317,132 @@ function Inspector(props: {
       message.warning('请输入提示词')
       return
     }
+    const ratio = resolveVideoRatioForRequest()
+    if (!ratio) {
+      message.warning('请先在项目设置或镜头里配置视频比例（关键帧要跟视频同画幅）')
+      return
+    }
 
     setKeyframePromptActionLoading(true)
-    updateCardState(frameType, { loading: true, taskStatus: 'pending', taskId: null })
+    updateCardState(frameType, { loading: true, taskStatus: 'running', taskId: null })
     try {
       const refFileIds = keyframePromptPreviewRefFileIds.length > 0 ? keyframePromptPreviewRefFileIds : autoKeyframeRefFileIds
       keyframePromptDraft.replaceContext({ refFileIds })
-      const submitted = await keyframePromptDraft.submitNow()
-      const taskId = submitted?.taskId
-      if (!taskId) {
-        message.error('生成任务创建失败：缺少任务 ID')
-        updateCardState(frameType, { loading: false, taskStatus: 'failed' })
+
+      // 关键帧走**同进程内联**端点：队列那条路本机没有 broker/worker，
+      // 只会留下一条永远 pending 的任务行（用户看到的就是「点了生成没反应」）。
+      const result = await submitFrameImage({
+        shot_id: selectedShot.id,
+        frame_type: frameType,
+        prompt: basePrompt,
+        images: refFileIds,
+        target_ratio: ratio,
+        resolution_profile: keyframeResolutionProfile,
+        model_id: keyframeImageModelId || null,
+      })
+
+      updateCardState(frameType, {
+        taskId: result.task_id ?? null,
+        taskStatus: result.status,
+        lastFileId: result.file_id ?? null,
+        lastPromptSource: result.prompt_source ?? null,
+        lastReferenceFileIds: result.reference_file_ids ?? [],
+        lastProviderNotes: result.provider_notes ?? [],
+        lastElapsedMs: result.elapsed_ms ?? null,
+      })
+
+      if (result.task_id) {
+        const snapshot: RelationTaskState = {
+          taskId: result.task_id,
+          status: result.status === 'succeeded' ? 'succeeded' : result.status === 'timeout' ? 'running' : 'failed',
+          progress: result.status === 'succeeded' ? 100 : 0,
+          cancelRequested: false,
+        }
+        setFrameImageTask(snapshot)
+        setFrameImageSettledTask(snapshot)
+      }
+
+      const notes = result.provider_notes ?? []
+      if (notes.length) {
+        // 供应商/适配层的如实说明必须让用户看到（例如垫片「参考图未透传」）
+        message.warning(notes[0], 6)
+      }
+
+      if (result.dry_run) {
+        message.info('演练模式：未真实出图。以上是本次会用的提示词与参考图（来源已标注）。', 6)
         return
       }
-      updateCardState(frameType, { taskId })
-      setFrameImageTask({
-        taskId,
-        status: 'pending',
-        progress: 0,
-        cancelRequested: false,
-      })
-      setFrameImageSettledTask(null)
-
-      let finalStatus = 'pending'
-      let finalTaskState: RelationTaskState | null = null
-      for (let i = 0; i < 30; i += 1) {
-        await sleep(2000)
-        const statusRes = await FilmService.getTaskStatusApiV1FilmTasksTaskIdStatusGet({ taskId })
-        const status = statusRes.data?.status
-        if (!status) continue
-        finalStatus = status
-        if (statusRes.data) {
-          finalTaskState = toRelationTaskStateFromStatusRead(statusRes.data)
-          setFrameImageTask(finalTaskState)
-        }
-        updateCardState(frameType, { taskStatus: status })
-        if (status === 'succeeded' || status === 'failed' || status === 'cancelled') break
-      }
-      if (
-        finalTaskState &&
-        (finalTaskState.status === 'succeeded' ||
-          finalTaskState.status === 'failed' ||
-          finalTaskState.status === 'cancelled')
-      ) {
-        setFrameImageTask(null)
-        setFrameImageSettledTask(finalTaskState)
-      }
-      if (finalStatus === 'succeeded') {
-        const latestSlotId = await getLatestFrameSlotId(frameType)
-        await loadCardThumbs(frameType, latestSlotId, 5)
+      if (result.status === 'succeeded' && result.file_id) {
+        const seconds = ((result.elapsed_ms ?? 0) / 1000).toFixed(1)
+        message.success(`${frameLabel[frameType]}已生成并落库（${seconds}s，file_id=${result.file_id}）`)
+        // 帧图列表由上层（ChapterStudio）持有：用它的刷新入口，避免本地 state 与库里脱节
+        await onRefreshShotFrameImages?.()
+        await loadCardThumbs(frameType, result.image_slot_id ?? null, 3)
         setKeyframePromptPreviewOpen(false)
-      } else if (finalStatus !== 'failed' && finalStatus !== 'cancelled') {
-        message.warning('生成任务仍在执行，请稍后刷新')
+        return
       }
-    } catch {
+      message.error(result.error || `${frameLabel[frameType]}生成未成功（status=${result.status || 'unknown'}）`)
+    } catch (error) {
       updateCardState(frameType, { taskStatus: 'failed' })
-      message.error(`${frameLabel[frameType]}生成失败`)
+      message.error(error instanceof Error ? error.message : `${frameLabel[frameType]}生成失败`)
     } finally {
       updateCardState(frameType, { loading: false })
       setKeyframePromptActionLoading(false)
+    }
+  }
+
+  /**
+   * 上传本地图片作为某一帧（首帧/关键帧/尾帧），走 `POST /studio/files/upload`
+   * 拿 file_id，再写进 `shot_frame_images`（已有槽位 PATCH，没槽位则先 POST 建槽）。
+   *
+   * 为什么需要它：这一页此前只有「AI 生成 → 落库」一条路，缺帧时除了花钱生成
+   * 没有任何办法把已有图片填进槽位（缺帧门禁就永远补不上）。上传不触发生图、
+   * 不产生付费调用，也不改动作战的参考模式与提交参数。
+   */
+  const uploadKeyframeImage = async (frameType: PromptFrameType, file: File) => {
+    if (!selectedShot?.id) return
+    if (!/\.(jpe?g|png|webp|gif)$/i.test(file.name)) {
+      message.error('请上传图片文件（jpg / jpeg / png / webp / gif）')
+      return
+    }
+    updateCardState(frameType, { uploading: true })
+    try {
+      const uploaded = await StudioFilesService.uploadFileApiApiV1StudioFilesUploadPost({
+        formData: {
+          file: file as unknown as string,
+          project_id: projectId ?? null,
+          chapter_id: chapterId ?? null,
+          shot_id: selectedShot.id,
+          usage_kind: projectId ? 'shot_frame' : null,
+        },
+        name: file.name.replace(/\.[^.]+$/, ''),
+      })
+      const fileId = String((uploaded.data as unknown as { id?: string } | undefined)?.id ?? '').trim()
+      if (!fileId) {
+        message.error('上传成功但没有拿到 file_id，请刷新后重试')
+        return
+      }
+      const slot = frameImages.find((x) => x.frame_type === frameType)
+      if (slot) {
+        await StudioShotFrameImagesService.updateShotFrameImageApiV1StudioShotFrameImagesImageIdPatch({
+          imageId: slot.id,
+          requestBody: { file_id: fileId } as never,
+        })
+      } else {
+        await StudioShotFrameImagesService.createShotFrameImageApiV1StudioShotFrameImagesPost({
+          requestBody: {
+            shot_detail_id: selectedShot.id,
+            frame_type: frameType,
+            file_id: fileId,
+          } as never,
+        })
+      }
+      await onRefreshShotFrameImages?.()
+      message.success(`${frameLabel[frameType]}已上传并写入槽位（file_id=${fileId}）`)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : `${frameLabel[frameType]}上传失败`)
+    } finally {
+      updateCardState(frameType, { uploading: false })
     }
   }
 
@@ -4714,6 +5488,57 @@ function Inspector(props: {
         </Space>
       </div>
 
+      {/* 工作室三步（＝项目第 4-6 步）：视频提示词 → 关联绑定 → 生成与交付。
+          只切换页签分组，当前分镜与已选镜头集合都不受影响。 */}
+      <div className="px-3 pb-2 border-b border-gray-100">
+        <Segmented
+          block
+          size="small"
+          value={studioStepKey}
+          onChange={(value) => handleStudioStepChange(value as StudioStepKey)}
+          options={STUDIO_STEPS.map((item, index) => ({
+            value: item.key,
+            label: `${STUDIO_STEP_INDEX_OFFSET + index}. ${item.label}`,
+          }))}
+        />
+        <div className="mt-1 text-xs text-gray-500">{getStudioStepMeta(studioStepKey).hint}</div>
+      </div>
+
+      {/* 本集进度（只读）：把「还差什么」放在干活的地方，而不是只留在工作台的深链页面里。 */}
+      <div className="px-3 pb-1">
+        <Space size={6} wrap>
+          <Tag color={STEP_STATE_META[scopeState].color}>
+            {`${(selectedShotIds ?? []).length ? '选中范围' : '本集'}：${STEP_STATE_META[scopeState].label}`}
+          </Tag>
+          <Typography.Text type="secondary" className="text-[11px]">
+            {`范围 ${scopeReadiness.length} 镜 · 可生成 ${scopeReadiness.filter((item) => item.canGenerate).length} · 可导出 ${scopeReadiness.filter((item) => item.canExport).length}`}
+          </Typography.Text>
+        </Space>
+      </div>
+      <ExportScopeModal
+        open={exportScopeOpen}
+        onClose={() => setExportScopeOpen(false)}
+        readiness={exportReadiness}
+        chapterLabel={chapterId ?? undefined}
+        onConfirm={async (shotIds) => {
+          if (!projectId) return
+          try {
+            // 复用既有 TXT 导出接口，只传最终选中的镜头范围；失败时提示错误而不是打开 404 页面
+            const result = await downloadDeliveryTxt(projectId, chapterId ?? null, shotIds)
+            message.success(`已下载交付提示词：${result.filename}（${result.bytes} 字节，${shotIds.length} 镜）`)
+            setExportScopeOpen(false)
+          } catch (error) {
+            message.error(error instanceof Error ? error.message : '导出失败')
+          }
+        }}
+      />
+      <StudioStepProgressStrip
+        projectId={projectId}
+        chapterId={chapterId ?? null}
+        step={studioStepKey}
+        selectedShotIds={selectedShotIds}
+      />
+
       <div className="cs-inspector flex-1 min-h-0 overflow-auto">
         <Tabs
           tabPosition="left"
@@ -4750,6 +5575,126 @@ function Inspector(props: {
                     })
                   }}
                 />
+              ),
+            },
+              {
+              key: 'video_prompt_text',
+              label: '视频提示词',
+              children: (
+                <div>
+                  <div className="cs-group-title">
+                    <FileTextOutlined /> 视频提示词
+                  </div>
+                  {!selectedShot ? (
+                    <div className="text-xs text-gray-500">请先在左侧选择一条分镜。</div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div
+                        className={`rounded-lg border px-3 py-2 text-[11px] leading-5 ${
+                          savedVideoPrompt
+                            ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                            : 'border-slate-200 bg-slate-50 text-slate-600'
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium">
+                            {savedVideoPrompt ? '该镜头已保存视频提示词' : '该镜头尚未保存视频提示词'}
+                          </span>
+                          {savedVideoPrompt ? (
+                            <>
+                              <Tag color="green">{`来源：${videoPromptSourceLabel(savedVideoPromptSource)}`}</Tag>
+                              <Tag>{`${savedVideoPrompt.length} 字`}</Tag>
+                            </>
+                          ) : null}
+                        </div>
+                        <div className="mt-1">
+                          交付导出读的就是这一列 <span className="font-mono">shot_details.video_prompt</span>；
+                          来源必须是 大模型生成 / 巨日禄导入 / 人工编辑 / 一键技能生成，模板拼装不算来源。
+                          这里保存的固定记为「人工编辑」。
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="text-xs text-gray-500 mb-1">
+                          {savedVideoPrompt ? '修改后保存（不会自动覆盖你写的内容）' : '在这里直接写提示词'}
+                        </div>
+                        <Input.TextArea
+                          rows={8}
+                          value={videoPromptTabDraft}
+                          placeholder="例：3s，中景，韩虹把节目邀请函放到桌上并推向许晨，镜头固定，室内办公室，真人短剧风格"
+                          onChange={(e) => setVideoPromptTabDraft(e.target.value)}
+                        />
+                      </div>
+
+                      <Space wrap size={8}>
+                        <Button
+                          type="primary"
+                          loading={videoPromptTabSaving}
+                          disabled={!videoPromptTabDraft.trim()}
+                          onClick={() => void saveVideoPromptTab('manual')}
+                        >
+                          保存到镜头
+                        </Button>
+                        <Button
+                          disabled={!videoLlmDerivedPrompt.trim() || videoPromptTabSaving}
+                          onClick={() => setVideoPromptTabDraft(videoLlmDerivedPrompt.trim())}
+                        >
+                          填入本次生成结果
+                        </Button>
+                        <Button
+                          disabled={videoPromptTabSaving || !videoPromptTabDraft}
+                          onClick={() => setVideoPromptTabDraft(savedVideoPrompt)}
+                        >
+                          还原为已保存内容
+                        </Button>
+                        <span className="text-[11px] text-gray-400">
+                          {`草稿 ${videoPromptTabDraft.trim().length} 字`}
+                          {savedVideoPrompt && videoPromptTabDraft.trim() !== savedVideoPrompt
+                            ? '（与已保存内容不一致）'
+                            : ''}
+                        </span>
+                      </Space>
+
+                      {videoLlmDerivedPrompt ? (
+                        <Alert
+                          type="info"
+                          showIcon
+                          message="本次生成上下文里有可用的拼装结果"
+                          description={
+                            <div className="space-y-1 text-[11px]">
+                              <div>
+                                点「填入本次生成结果」会把下面这段填进编辑器（**仍需要你确认后再保存**）：
+                              </div>
+                              <div className="max-h-28 overflow-auto rounded bg-white/60 p-2 whitespace-pre-wrap font-mono">
+                                {videoLlmDerivedPrompt}
+                              </div>
+                            </div>
+                          }
+                        />
+                      ) : null}
+
+                      {/* 大模型批量生成（单项 / 选中项 / 只补缺失 / 可停止与重试） */}
+                      <div className="rounded-lg border border-slate-200 bg-white p-3">
+                        <VideoPromptLlmPanel
+                          projectId={projectId}
+                          chapterId={chapterId}
+                          currentShotId={selectedShot?.id ?? null}
+                          selectedShotIds={selectedShotIds ?? []}
+                          onSaved={async (shotId, prompt) => {
+                            // 保存的若是当前镜头，同步刷新本页「已保存内容」（读的是 shot_details），
+                            // 避免界面显示与库里不一致 —— 与「保存到镜头」按钮同一套刷新方式。
+                            if (shotId !== selectedShot?.id) return
+                            setVideoPromptTabDraft(prompt)
+                            const refreshed = await StudioShotDetailsService.getShotDetailApiV1StudioShotDetailsShotIdGet({
+                              shotId,
+                            })
+                            if (refreshed.data) onPatchShotDetail(refreshed.data)
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
               ),
             },
               {
@@ -4915,6 +5860,61 @@ function Inspector(props: {
               ),
             },
               {
+              key: 'binding',
+              label: '资产绑定',
+              children: (
+                <div>
+                  <div className="cs-group-title">
+                    <LinkOutlined /> 关联绑定
+                  </div>
+                  {selectedShot?.id && projectId && chapterId ? (
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50/70 px-3 py-3">
+                      <ChapterShotAssetBindingSection
+                        projectId={projectId}
+                        chapterId={chapterId}
+                        shotId={selectedShot.id}
+                        onReloadPreparationState={async () => {
+                          await loadShotAssetsOverview(selectedShot.id)
+                        }}
+                      />
+                      <div className="mt-4 border-t border-slate-200 pt-4">
+                        {/* 实际使用的文件：图片逐个给出 file_id/定版状态，声音给出绑定的音频文件 */}
+                        <ShotBoundFilesPanel
+                          projectId={projectId}
+                          chapterId={chapterId}
+                          shotId={selectedShot.id}
+                        />
+                      </div>
+                      <div className="mt-4 border-t border-slate-200 pt-4">
+                        <ShotAudioBindingSection
+                          shotId={selectedShot.id}
+                          audioFileId={readBoundAudioFileId(shotDetail)}
+                          audioOptOut={Boolean((shotDetail as unknown as { audio_opt_out?: boolean } | null)?.audio_opt_out)}
+                          projectId={projectId}
+                          chapterId={chapterId}
+                          onSave={async (fileId) => {
+                            // 走既有的镜头详情写入路径：它写完用服务端返回体刷新，
+                            // 因此刷新页面后绑定仍在（不是只改了本地 state）。
+                            await onPatchShotDetailImmediate({
+                              audio_file_id: fileId,
+                            } as Partial<ShotDetailRead>)
+                          }}
+                          onSaveOptOut={async (optOut) => {
+                            // 后端保证互斥：标记无需声音会解绑音频，反之亦然
+                            await onPatchShotDetailImmediate({
+                              audio_opt_out: optOut,
+                            } as Partial<ShotDetailRead>)
+                          }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-500">请先在左侧选择一条分镜。</div>
+                  )}
+                </div>
+              ),
+            },
+              {
               key: 'dialogue',
               label: '对白状态',
               children: (
@@ -4999,6 +5999,29 @@ function Inspector(props: {
               ),
             },
               {
+              key: 'production',
+              label: '本镜生产卡',
+              children: selectedShot?.id ? (
+                <ShotProductionCard
+                  projectId={projectId}
+                  chapterId={chapterId}
+                  shotId={selectedShot.id}
+                  savedPrompt={String((shotDetail as unknown as { video_prompt?: string } | null)?.video_prompt ?? '')}
+                  savedPromptSource={String((shotDetail as unknown as { video_prompt_source?: string } | null)?.video_prompt_source ?? '')}
+                  onSavedPrompt={async () => {
+                    const refreshed = await StudioShotDetailsService.getShotDetailApiV1StudioShotDetailsShotIdGet({
+                      shotId: selectedShot.id,
+                    })
+                    if (refreshed.data) onPatchShotDetail(refreshed.data)
+                  }}
+                  onGenerateDraft={() => setInspectorTabKey('video_prompt_text')}
+                  onOpenExport={() => setExportScopeOpen(true)}
+                />
+              ) : (
+                <div className="text-xs text-gray-500">请先在左侧选择一条分镜。</div>
+              ),
+            },
+              {
               key: 'keyframe_gen',
               label: '关键帧与参考图',
               children: (
@@ -5034,6 +6057,29 @@ function Inspector(props: {
                         {imageGenerationOptions?.model_name ? ` / ${imageGenerationOptions.model_name}` : ''}
                       </div>
                     </div>
+                    <div className="mt-2 flex items-center gap-3">
+                      <div className="min-w-[96px] text-xs text-gray-500">出图通道</div>
+                      <Select
+                        size="small"
+                        value={keyframeImageModelId}
+                        style={{ width: 260 }}
+                        onChange={(value) => onChangeKeyframeImageModelId(value)}
+                        options={[
+                          {
+                            value: '',
+                            label: `后端默认${imageGenerationOptions?.model_name ? `（${imageGenerationOptions.model_name}）` : ''}`,
+                          },
+                          ...imageModelOptions.map((item) => ({
+                            value: item.id,
+                            label: `${item.name}（${item.provider_id}）`,
+                          })),
+                        ]}
+                      />
+                    </div>
+                    <div className="mt-1 text-[11px] leading-5 text-gray-500">
+                      「后端默认」（出图服务垫片）不会把参考图透传给上游；选 APIMart 直连的模型才会以
+                      image_urls（公网地址）真的把参考图送出去 —— 生成的响应里会写明送了几张。
+                    </div>
                   </div>
                   {(['first', 'key', 'last'] as PromptFrameType[]).map((ft) => {
                     const st = keyframeCards[ft]
@@ -5056,6 +6102,20 @@ function Inspector(props: {
                         <div className="cs-group-title flex items-center justify-between gap-2">
                           <span>{frameLabel[ft]}图片</span>
                           <Space size={8}>
+                            <Tooltip title="上传手头已有的图片作为该帧（写进 shot_frame_images，不触发生图、不消耗额度）">
+                              <Upload
+                                showUploadList={false}
+                                accept=".jpg,.jpeg,.png,.webp,.gif,image/*"
+                                beforeUpload={(file) => {
+                                  void uploadKeyframeImage(ft, file as unknown as File)
+                                  return false
+                                }}
+                              >
+                                <Button size="small" icon={<UploadOutlined />} loading={Boolean(st.uploading)}>
+                                  上传
+                                </Button>
+                              </Upload>
+                            </Tooltip>
                             <Button size="small" type="link" onClick={() => updateCardState(ft, { modalOpen: true })}>
                               更多
                             </Button>
@@ -5583,15 +6643,22 @@ function Inspector(props: {
 
             const order: Record<string, number> = {
               gen_ref: 0,
+              production: 0,
               keyframe_gen: 1,
-              camera: 2,
-              prompt_image: 3,
-              dialogue: 4,
-              ops: 5,
-              av: 6,
+              video_prompt_text: 2,
+              camera: 3,
+              prompt_image: 4,
+              binding: 5,
+              dialogue: 6,
+              ops: 7,
+              av: 8,
             }
 
-            return items.sort((a, b) => (order[String(a.key)] ?? 999) - (order[String(b.key)] ?? 999))
+            // 只显示当前步骤的页签（外加共享的「维护设置」），把平铺页签收成三步。
+            const allowed = allowedTabsForStudioStep(studioStepKey)
+            return items
+              .filter((item) => allowed.includes(String(item.key) as InspectorTabKey))
+              .sort((a, b) => (order[String(a.key)] ?? 999) - (order[String(b.key)] ?? 999))
           })()}
         />
 
@@ -5697,6 +6764,59 @@ function Inspector(props: {
                 <div className="rounded-xl border border-slate-200 bg-white p-4">
                   <div className="mb-2 flex items-center justify-between">
                     <div>
+                      <div className="text-sm font-medium text-slate-900">本次提交计划（后端只读预览）</div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        这是提交时后端实际会用的提示词来源、参考图与画幅；不触网、不写库。
+                      </div>
+                    </div>
+                    <Tag color={keyframePlanPreview ? 'green' : 'default'}>
+                      {keyframePlanPreview ? '已核对' : '读取中'}
+                    </Tag>
+                  </div>
+                  {keyframePlanPreview ? (
+                    <div className="space-y-2 text-xs text-slate-700">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Tag color={keyframePlanPreview.prompt_source === 'saved' ? 'blue' : 'default'}>
+                          提示词来源：{framePromptSourceLabel(keyframePlanPreview.prompt_source)}
+                        </Tag>
+                        <Tag>{keyframePlanPreview.prompt.length} 字</Tag>
+                        <Tag>{`参考图 ${keyframePlanPreview.reference_count} 张`}</Tag>
+                        <Tag>{`画幅 ${keyframePlanPreview.target_ratio}（${keyframePlanPreview.target_ratio_source}）`}</Tag>
+                        <Tag>{`${keyframePlanPreview.provider || '未识别供应商'} / ${keyframePlanPreview.model_name || '未识别模型'}`}</Tag>
+                      </div>
+                      <div className="rounded bg-slate-50 px-3 py-2 text-[11px] leading-5 text-slate-600">
+                        <div className="line-clamp-3 break-all">{keyframePlanPreview.prompt || '（空）'}</div>
+                      </div>
+                      <div
+                        className={`rounded px-3 py-2 text-[11px] ${
+                          !keyframePlanPreview.prompt
+                            ? 'bg-amber-50 text-amber-700'
+                            : keyframePlanPreview.prompt === keyframePromptPreviewDraft.trim()
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : 'bg-amber-50 text-amber-700'
+                        }`}
+                      >
+                        {!keyframePlanPreview.prompt
+                          ? '镜头里还没有保存过这帧的提示词：本次会用下面输入框里的文本提交（来源＝本次输入），提交后建议保存一次。'
+                          : keyframePlanPreview.prompt === keyframePromptPreviewDraft.trim()
+                            ? '下面输入框里的文本与镜头里保存的内容完全一致：提交读的就是这条。'
+                            : '下面输入框的文本与镜头里保存的内容不同：本次按输入框提交（来源＝本次输入），不会自动改镜头里的保存值。'}
+                      </div>
+                      {keyframePlanPreview.warnings.length ? (
+                        <ul className="list-disc pl-5 text-[11px] text-amber-600">
+                          {keyframePlanPreview.warnings.slice(0, 4).map((item, index) => (
+                            <li key={`plan-warning-${index}`}>{item}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <div className="text-xs text-gray-400">正在读取提交计划…</div>
+                  )}
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-white p-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <div>
                       <div className="text-sm font-medium text-slate-900">参考图映射</div>
                       <div className="mt-1 text-xs text-slate-500">
                         图片顺序会直接决定最终提示词中的图1、图2映射关系，并影响模型生成结果。
@@ -5765,6 +6885,16 @@ function Inspector(props: {
                   </div>
                   <Space size="small">
                     <Tag color={hasBasePrompt ? 'blue' : 'default'}>{hasBasePrompt ? '可编辑' : '未生成'}</Tag>
+                    <Tooltip title={`保存到 shot_details.${framePromptField(keyframePromptPreviewFrameType)}：之后不填提示词直接点「生成」时，读的就是这条已保存内容`}>
+                      <Button
+                        size="small"
+                        loading={keyframePromptActionLoading}
+                        disabled={!hasBasePrompt}
+                        onClick={() => void saveKeyframePromptToShot()}
+                      >
+                        保存到镜头
+                      </Button>
+                    </Tooltip>
                     <Button
                       size="small"
                       type={hasBasePrompt ? 'default' : 'primary'}
@@ -6266,10 +7396,35 @@ function Inspector(props: {
             if (videoPromptPreviewSubmitting) return
             setVideoPromptPreviewOpen(false)
           }}
-          okText="生成"
-          cancelText="取消"
-          onOk={() => void submitVideoGeneration()}
-          confirmLoading={videoPromptPreviewSubmitting}
+          footer={[
+            <Button
+              key="cancel"
+              disabled={videoPromptPreviewSubmitting || videoPromptSaving}
+              onClick={() => {
+                if (videoPromptPreviewSubmitting || videoPromptSaving) return
+                setVideoPromptPreviewOpen(false)
+              }}
+            >
+              取消
+            </Button>,
+            <Button
+              key="save-prompt"
+              loading={videoPromptSaving}
+              disabled={videoPromptPreviewSubmitting || videoPromptPreviewLoading}
+              onClick={() => void saveVideoPromptToShot()}
+            >
+              保存提示词
+            </Button>,
+            <Button
+              key="submit"
+              type="primary"
+              loading={videoPromptPreviewSubmitting}
+              disabled={videoPromptSaving}
+              onClick={() => void submitVideoGeneration()}
+            >
+              生成
+            </Button>,
+          ]}
           width={900}
           destroyOnClose
         >
@@ -6279,6 +7434,81 @@ function Inspector(props: {
             </div>
           ) : (
             <div className="space-y-3">
+              <div
+                className={`rounded-lg border px-3 py-2 text-[11px] leading-5 ${
+                  savedVideoPrompt
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                    : 'border-slate-200 bg-slate-50 text-slate-600'
+                }`}
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">
+                    {savedVideoPrompt ? '该镜头已有保存的视频提示词' : '该镜头尚未保存视频提示词'}
+                  </span>
+                  {savedVideoPrompt ? (
+                    <>
+                      <Tag color="green">{`来源：${videoPromptSourceLabel(savedVideoPromptSource)}`}</Tag>
+                      <Tag>{`长度 ${savedVideoPrompt.length} 字`}</Tag>
+                      {savedVideoPromptDiffers ? <Tag color="orange">与当前编辑内容不一致</Tag> : null}
+                    </>
+                  ) : (
+                    <Tag>交付导出读取 shot_details.video_prompt</Tag>
+                  )}
+                </div>
+                <div className="mt-1">
+                  {savedVideoPrompt
+                    ? '打开弹窗时已回填该已保存内容，并且不会被 LLM 结果自动覆盖；点击「保存提示词」才会写回。'
+                    : '当前草稿尚未落库，交付（PromptFlowPage）读不到；点击「保存提示词」可写入该镜头。'}
+                </div>
+                <div className="mt-1">
+                  {`本次保存将标记来源为：${videoPromptSourceLabel(videoPromptSaveSource)}`}
+                  {videoLlmResultDiffers ? '（与本次 LLM 生成结果不一致）' : '（与本次 LLM 生成结果一致）'}
+                </div>
+              </div>
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
+                <div className="font-medium">生成路径：直提（同进程内联执行）</div>
+                <div className="mt-1">
+                  「生成」走 <span className="font-mono">POST /api/v1/studio/image-pipeline/video-submit</span>：
+                  它在本进程内真实执行并等到结果，成功后自动把产物登记成素材并挂到本镜头
+                  （刷新后仍可见、交付也能读到）。
+                </div>
+                <div className="mt-1">
+                  不再走 <span className="font-mono">POST /api/v1/film/tasks/video</span>：那条链路把任务丢给
+                  Celery 队列，本机没有 Redis / worker 时任务只会停在 pending（表现为"点了生成没反应"）。
+                </div>
+                <div className="mt-1">
+                  固定策略 <span className="font-mono">seedance-2.0-mini · 480p · 最短 5s</span> 在直提端点强制生效；
+                  参考音频（若该镜头绑定）与参考图也会一并带上。DRY_RUN 下返回占位结果、不花钱。
+                </div>
+                {videoPinnedPlan ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <Tag color={videoPinnedPlan.modelPinned ? 'green' : 'red'}>
+                      {`固定模型：${videoPinnedPlan.modelName || '未知'}`}
+                    </Tag>
+                    <Tag>{`分辨率：${videoPinnedPlan.resolution || '未知'}`}</Tag>
+                    <Tag>{`最短时长：${videoPinnedPlan.seconds || 0}s`}</Tag>
+                    {videoPinnedPlan.provider ? <Tag>{`供应商：${videoPinnedPlan.provider}`}</Tag> : null}
+                    {videoPinnedPlan.providerSupported ? null : <Tag color="red">供应商不在适配器白名单</Tag>}
+                  </div>
+                ) : (
+                  <div className="mt-2">固定模型直提计划预览不可用（参考图数量或镜头数据暂不满足直提契约）。</div>
+                )}
+                <div className="mt-1">
+                  {videoPinnedPlan?.guardStatus
+                    ? `直提端点守卫状态：${videoPinnedPlan.guardStatus}`
+                    : '直提端点守卫状态未知（未取到计划预览）。'}
+                </div>
+                {videoPinnedPlan && videoPinnedPlan.warnings.length > 0 ? (
+                  <ul className="mt-1 list-disc pl-4">
+                    {videoPinnedPlan.warnings.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                <div className="mt-1">
+                  DRY_RUN 守卫只作用于直提端点；既有任务链路不经过该守卫，请在任务状态 / 「已生成视频」里核对真实结果。
+                </div>
+              </div>
               <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -6396,13 +7626,23 @@ function Inspector(props: {
                 )}
               </div>
               <div>
-                <div className="text-xs text-gray-500 mb-2">提示词（可编辑）</div>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <div className="text-xs text-gray-500">提示词（可编辑）</div>
+                  <div className="flex items-center gap-2">
+                    {videoLlmDerivedPromptTrimmed && videoLlmResultDiffers ? (
+                      <Button type="link" size="small" className="px-0" onClick={applyVideoLlmDerivedPrompt}>
+                        使用本次 LLM 结果
+                      </Button>
+                    ) : null}
+                    <span className="text-[11px] text-gray-400">{`保存来源：${videoPromptSourceLabel(videoPromptSaveSource)}`}</span>
+                  </div>
+                </div>
                 <Input.TextArea
                   rows={10}
                   value={videoPromptPreviewDraft}
                   onChange={(e) => videoPromptDraft.setBase({ prompt: e.target.value })}
                   placeholder="请输入视频提示词…"
-                  disabled={videoPromptPreviewSubmitting}
+                  disabled={videoPromptPreviewSubmitting || videoPromptSaving}
                 />
               </div>
             </div>

@@ -56,13 +56,6 @@ export const assetAdapters = {
         images: (data?.images ?? []) as string[],
       }
     },
-    createGenerationTask: async (id: string, imageId: number, payload: { prompt: string; images: string[] }) => {
-      const res = await StudioImageTasksService.createCharacterImageGenerationTaskApiV1StudioImageTasksCharactersCharacterIdImageTasksPost({
-        characterId: id,
-        requestBody: { image_id: imageId, model_id: null, prompt: payload.prompt, images: payload.images } as any,
-      })
-      return res.data?.task_id ?? null
-    },
   } satisfies AdapterConfig<any, any>,
   actor: {
     missingAssetIdText: '缺少 actor_id',
@@ -97,13 +90,6 @@ export const assetAdapters = {
         prompt: (data?.prompt ?? '') as string,
         images: (data?.images ?? []) as string[],
       }
-    },
-    createGenerationTask: async (id: string, imageId: number, payload: { prompt: string; images: string[] }) => {
-      const res = await StudioImageTasksService.createActorImageGenerationTaskApiV1StudioImageTasksActorsActorIdImageTasksPost({
-        actorId: id,
-        requestBody: { image_id: imageId, model_id: null, prompt: payload.prompt, images: payload.images } as any,
-      })
-      return res.data?.task_id ?? null
     },
   } satisfies AdapterConfig<any, any>,
   scene: {
@@ -141,14 +127,6 @@ export const assetAdapters = {
         images: (data?.images ?? []) as string[],
       }
     },
-    createGenerationTask: async (id: string, imageId: number, payload: { prompt: string; images: string[] }) => {
-      const res = await StudioImageTasksService.createAssetImageGenerationTaskApiV1StudioImageTasksAssetsAssetTypeAssetIdImageTasksPost({
-        assetType: 'scene',
-        assetId: id,
-        requestBody: { image_id: imageId, prompt: payload.prompt, images: payload.images } as any,
-      })
-      return res.data?.task_id ?? null
-    },
   } satisfies AdapterConfig<any, any>,
   prop: {
     missingAssetIdText: '缺少 prop_id',
@@ -185,14 +163,6 @@ export const assetAdapters = {
         images: (data?.images ?? []) as string[],
       }
     },
-    createGenerationTask: async (id: string, imageId: number, payload: { prompt: string; images: string[] }) => {
-      const res = await StudioImageTasksService.createAssetImageGenerationTaskApiV1StudioImageTasksAssetsAssetTypeAssetIdImageTasksPost({
-        assetType: 'prop',
-        assetId: id,
-        requestBody: { image_id: imageId, prompt: payload.prompt, images: payload.images } as any,
-      })
-      return res.data?.task_id ?? null
-    },
   } satisfies AdapterConfig<any, any>,
   costume: {
     missingAssetIdText: '缺少 costume_id',
@@ -228,14 +198,6 @@ export const assetAdapters = {
         prompt: (data?.prompt ?? '') as string,
         images: (data?.images ?? []) as string[],
       }
-    },
-    createGenerationTask: async (id: string, imageId: number, payload: { prompt: string; images: string[] }) => {
-      const res = await StudioImageTasksService.createAssetImageGenerationTaskApiV1StudioImageTasksAssetsAssetTypeAssetIdImageTasksPost({
-        assetType: 'costume',
-        assetId: id,
-        requestBody: { image_id: imageId, prompt: payload.prompt, images: payload.images } as any,
-      })
-      return res.data?.task_id ?? null
     },
   } satisfies AdapterConfig<any, any>,
 }

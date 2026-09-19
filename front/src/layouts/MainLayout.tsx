@@ -9,6 +9,8 @@ import {
   PictureOutlined,
   FileTextOutlined,
   ApiOutlined,
+  CloudSyncOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAppStore } from '../store/useAppStore'
@@ -34,9 +36,11 @@ const MainLayout: React.FC = () => {
     if (location.pathname === '/projects' || location.pathname.startsWith('/projects/')) return ['projects']
     if (location.pathname.startsWith('/assets')) return ['assets']
     if (location.pathname.startsWith('/prompts')) return ['prompts']
+    if (location.pathname.startsWith('/prompt-flow')) return ['prompt-flow']
     if (location.pathname.startsWith('/files')) return ['files']
     if (location.pathname.startsWith('/agents')) return ['agents']
     if (location.pathname.startsWith('/models')) return ['models']
+    if (location.pathname.startsWith('/llm-pipeline')) return ['llm-pipeline']
     if (location.pathname.startsWith('/settings')) return ['settings']
     return []
   }, [location.pathname])
@@ -49,9 +53,11 @@ const MainLayout: React.FC = () => {
       projects: '项目列表',
       assets: '资产管理',
       prompts: '提示词模板',
+      'prompt-flow': '提示词导入/交付',
       files: '文件管理',
       agents: 'Agent管理',
       models: '模型管理',
+      'llm-pipeline': 'LLM 调试台（开发）',
       settings: t('menu.settings'),
       chapters: '章节管理',
       studio: '分镜工作室',
@@ -116,6 +122,11 @@ const MainLayout: React.FC = () => {
       label: <Link to="/prompts">提示词模板</Link>,
     },
     {
+      key: 'prompt-flow',
+      icon: <CloudSyncOutlined />,
+      label: <Link to="/prompt-flow">提示词导入/交付</Link>,
+    },
+    {
       key: 'models',
       icon: <ApiOutlined />,
       label: <Link to="/models">模型管理</Link>,
@@ -124,6 +135,12 @@ const MainLayout: React.FC = () => {
       key: 'settings',
       icon: <SettingOutlined />,
       label: <Link to="/settings">{t('menu.settings')}</Link>,
+    },
+    // 开发调试入口：LLM 能力已嵌入生产流程的各步骤页面，此项仅供排查用
+    {
+      key: 'llm-pipeline',
+      icon: <ThunderboltOutlined />,
+      label: <Link to="/llm-pipeline">LLM 调试台（开发）</Link>,
     },
   ]
 

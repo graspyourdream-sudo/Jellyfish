@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
+  Alert,
   Button,
   Card,
   Col,
@@ -13,18 +14,36 @@ import {
   Space,
   Spin,
   Tag,
+  Tooltip,
   Typography,
+  Upload,
   message,
 } from 'antd'
-import { ArrowLeftOutlined, CloseCircleOutlined, EditOutlined, ReloadOutlined } from '@ant-design/icons'
-import { FilmService, ScriptProcessingService } from '../../../../services/generated'
-import type { TaskStatus } from '../../../../services/generated'
+import {
+  ArrowLeftOutlined,
+  CloseCircleOutlined,
+  EditOutlined,
+  ReloadOutlined,
+  RobotOutlined,
+  SafetyCertificateOutlined,
+  UploadOutlined,
+} from '@ant-design/icons'
+import { ScriptProcessingService, StudioFilesService } from '../../../../services/generated'
+import {
+  adoptGeneratedImage,
+  getAssetImagePrompts,
+  previewImagePrompts,
+  saveAssetImagePrompts,
+  setEntityImagePrimary,
+  submitImagePlan,
+  type ImagePromptPreviewResult,
+} from '../../../../services/llmPipelineApi'
 import { listTaskLinksNormalized } from '../../../../services/filmTaskLinks'
 import { buildFileDownloadUrl } from '../utils'
 import { DisplayImageCard } from './DisplayImageCard'
 import { ProjectVisualStyleAndStyleFields } from '../../project/ProjectVisualStyleAndStyleFields'
 import { useProjectStyleOptions } from '../../project/useProjectStyleOptions'
-import { defaultTaskActionErrorMessage, executeAsyncTaskCreate, executeTaskCancel, notifyExistingTask } from '../../components/taskActionHelpers'
+import { defaultTaskActionErrorMessage, executeTaskCancel } from '../../components/taskActionHelpers'
 import { handleTaskResultSafely } from '../../components/taskResultHelpers'
 import { useRelationTaskNotification } from '../../components/taskNotificationHelpers'
 import { useTaskPageContext } from '../../components/taskPageContext'
@@ -36,8 +55,6 @@ import {
   COSTUME_INFO_ANALYSIS_RELATION_TYPE,
   PROP_INFO_ANALYSIS_RELATION_TYPE,
   SCENE_INFO_ANALYSIS_RELATION_TYPE,
-  type RelationTaskState,
-  toRelationTaskStateFromStatusRead,
   useCancelableRelationTask,
 } from '../../project/ProjectWorkbench/chapterDivisionTasks'
 
@@ -90,6 +107,8 @@ export type BaseAssetImage = {
   width?: number | null
   height?: number | null
   format?: string | null
+  /** 定版主图标记（`PATCH /studio/entities/{type}/{id}/images/{image_id}`，同一资产下唯一） */
+  is_primary?: boolean
 }
 
 export type AssetEditPageBaseProps<TAsset extends BaseAsset, TImage extends BaseAssetImage> = {
@@ -104,7 +123,6 @@ export type AssetEditPageBaseProps<TAsset extends BaseAsset, TImage extends Base
   createImageSlot: (assetId: string, angle: AssetViewAngle) => Promise<void>
   updateImage: (assetId: string, imageId: number, payload: { file_id: string; width?: number | null; height?: number | null; format?: string | null }) => Promise<void>
   renderPrompt: (assetId: string, imageId: number) => Promise<{ prompt: string; images: string[] }>
-  createGenerationTask: (assetId: string, imageId: number, payload: { prompt: string; images: string[] }) => Promise<string | null>
   onNavigate: (to: string, replace?: boolean) => void
 }
 
@@ -119,6 +137,30 @@ type HistoryCandidate<TImage extends BaseAssetImage> = {
   originalImage?: TImage
 }
 
+/** 资产编辑页当前对应的实体类型（同时是 `llmPipelineApi` 里的 entity/asset_type 取值）。 */
+export type AssetEntityType = 'character' | 'scene' | 'prop' | 'costume' | 'actor'
+
+const ENTITY_TYPE_BY_RELATION: Record<string, AssetEntityType> = {
+  actor_image: 'actor',
+  character_image: 'character',
+  scene_image: 'scene',
+  prop_image: 'prop',
+  costume_image: 'costume',
+}
+
+/**
+ * 出图服务 V0（`image_pipeline`）只接受 character/scene/prop：
+ * 后端 `external_image_client.SERVICE_ASSET_TYPES` 明确不含 costume/actor，
+ * 传过去会被 400 拒绝，所以这两种资产的批量出图按钮直接禁用。
+ */
+const IMAGE_SERVICE_ASSET_TYPES: AssetEntityType[] = ['character', 'scene', 'prop']
+
+function supportsImageServiceAssetType(entityType: AssetEntityType | null): boolean {
+  return !!entityType && IMAGE_SERVICE_ASSET_TYPES.includes(entityType)
+}
+
+type ReferenceBatchSubmitResult = Awaited<ReturnType<typeof submitImagePlan>>
+
 function normalizeTags(input: string): string[] {
   return input
     .split(/[,，\n]/g)
@@ -131,14 +173,6 @@ function clampViewCount(value?: number | null): number {
   return Math.max(1, Math.min(MAX_VIEW_COUNT, Math.trunc(next)))
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
-}
-
-function isTerminalStatus(status: TaskStatus): boolean {
-  return status === 'succeeded' || status === 'failed' || status === 'cancelled'
-}
-
 function getSmartDetectRelationType(relationType: string): string | null {
   if (relationType === 'actor_image' || relationType === 'character_image') return CHARACTER_PORTRAIT_ANALYSIS_RELATION_TYPE
   if (relationType === 'scene_image') return SCENE_INFO_ANALYSIS_RELATION_TYPE
@@ -147,13 +181,24 @@ function getSmartDetectRelationType(relationType: string): string | null {
   return null
 }
 
-function getAssetNavigateRelationType(relationType: string): string | null {
-  if (relationType === 'actor_image') return 'actor'
-  if (relationType === 'character_image') return 'character'
-  if (relationType === 'scene_image') return 'scene'
-  if (relationType === 'prop_image') return 'prop'
-  if (relationType === 'costume_image') return 'costume'
-  return null
+function getAssetNavigateRelationType(relationType: string): AssetEntityType | null {
+  return ENTITY_TYPE_BY_RELATION[relationType] ?? null
+}
+
+/** 项目 ID 兜底来源：资产本身 / 查询参数 / 路径 / returnTo 参数（从项目工作台跳来时）。 */
+function resolveProjectIdFromLocation(pathname: string, search: string): string {
+  const searchParams = new URLSearchParams(search)
+  const fromQuery = (searchParams.get('projectId') ?? '').trim()
+  if (fromQuery) return fromQuery
+
+  const fromPath = /^\/projects\/([^/?#]+)/.exec(pathname)
+  if (fromPath?.[1]) return decodeURIComponent(fromPath[1])
+
+  const returnTo = (searchParams.get('returnTo') ?? '').trim()
+  const fromReturnTo = /^\/projects\/([^/?#]+)/.exec(returnTo)
+  if (fromReturnTo?.[1]) return decodeURIComponent(fromReturnTo[1])
+
+  return ''
 }
 
 export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseAssetImage>({
@@ -168,7 +213,6 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   createImageSlot,
   updateImage,
   renderPrompt,
-  createGenerationTask,
   onNavigate,
 }: AssetEditPageBaseProps<TAsset, TImage>) {
   const { options: projectStyleOptions, defaultVisualStyle, getDefaultStyle } = useProjectStyleOptions()
@@ -192,8 +236,6 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   const [smartDetectOptimizedDesc, setSmartDetectOptimizedDesc] = useState('')
 
   const [generatingByImageId, setGeneratingByImageId] = useState<Record<number, boolean>>({})
-  const [generationTask, setGenerationTask] = useState<RelationTaskState | null>(null)
-  const [generationSettledTask, setGenerationSettledTask] = useState<RelationTaskState | null>(null)
 
   const [promptPreviewOpen, setPromptPreviewOpen] = useState(false)
   const [promptPreviewLoading, setPromptPreviewLoading] = useState(false)
@@ -202,7 +244,8 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     { prompt: string },
     { imageId: number | null; images: string[] },
     { prompt: string; images: string[] },
-    { taskId: string | null }
+    /** 提交结果：P3 内联出图会连地址一起回来，便于立刻采纳/设版 */
+    { taskId: string | null; url: string; dryRun: boolean; status: string; message: string }
   >({
     initialBase: { prompt: '' },
     initialContext: { imageId: null, images: [] },
@@ -220,11 +263,35 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       if (!assetId || !context.imageId) {
         throw new Error('asset image slot is required')
       }
-      const taskId = await createGenerationTask(assetId, context.imageId, {
-        prompt: (derived.prompt || '').trim(),
-        images: derived.images,
+      if (!supportsImageServiceAssetType(assetNavigateRelationType)) {
+        throw new Error('出图服务只支持角色/场景/道具；演员/服装请用别的通道（本页已禁用该按钮）')
+      }
+      const projectId = resolvedProjectId.trim()
+      if (!projectId) {
+        throw new Error('缺少项目 ID：请从项目工作台进入本页，或先填写一次项目 ID')
+      }
+      // 为什么改走 P3 直提端点：老的 `/studio/image-tasks/...` 只建一条 Celery 任务行，
+      // 本机没有 broker/worker（且 DRY_RUN 下建行前就被守卫拦住），表现为"点了生成没反应"。
+      // P3 端点在同进程内联执行并等到结果，拿到地址后就能让用户采纳/设版。
+      const data = await submitImagePlan({
+        project_id: projectId,
+        asset_type: assetNavigateRelationType as 'character' | 'scene' | 'prop',
+        stage: 'character_sheet',
+        asset_ids: [assetId],
+        prompt_overrides: [{ asset_id: assetId, prompt: (derived.prompt || '').trim() }],
+        use_primary_reference: false,
+        aspect_ratio: '16:9',
+        image_model: 'image2',
+        wait_seconds: 120,
       })
-      return { taskId }
+      const row = data?.results?.[0]
+      return {
+        taskId: row?.service_task_id ?? null,
+        url: row ? adoptableUrl(row) : '',
+        dryRun: Boolean(data?.summary?.dry_run),
+        status: row?.status ?? '',
+        message: row?.message ?? '',
+      }
     },
   })
   const promptPreviewDraft = promptDraft.base.prompt
@@ -235,6 +302,34 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   const [historyCandidates, setHistoryCandidates] = useState<HistoryCandidate<TImage>[]>([])
   const [editingSlotImage, setEditingSlotImage] = useState<TImage | null>(null)
   const [adoptingImageId, setAdoptingImageId] = useState<string | null>(null)
+
+  // 九槽位图片提示词（LLM 预览 → 合并保存到资产 image_prompts）
+  const [imagePromptOpen, setImagePromptOpen] = useState(false)
+  const [imagePromptLoading, setImagePromptLoading] = useState(false)
+  const [imagePromptSaving, setImagePromptSaving] = useState(false)
+  const [imagePromptResult, setImagePromptResult] = useState<ImagePromptPreviewResult | null>(null)
+  const [imagePromptDraftByCategory, setImagePromptDraftByCategory] = useState<Record<string, string>>({})
+  const [savedPromptMap, setSavedPromptMap] = useState<Record<string, string>>({})
+
+  // 定版主图
+  const [settingPrimaryImageId, setSettingPrimaryImageId] = useState<number | null>(null)
+
+  /** 上传本地图片写入槽位时，正在上传的槽位 id（同一时刻只允许一个）。 */
+  const [uploadingImageId, setUploadingImageId] = useState<number | null>(null)
+
+  // 垫图批量出图
+  const [referenceBatchLoading, setReferenceBatchLoading] = useState(false)
+  const [referenceBatchOpen, setReferenceBatchOpen] = useState(false)
+  /** 单张生成的结果（P3 内联出图返回的地址），用于"采纳 / 采纳并设版" */
+  const [singleGenResult, setSingleGenResult] = useState<{ url: string; prompt: string; status: string } | null>(null)
+  const [singleGenAdopting, setSingleGenAdopting] = useState<'' | 'slot' | 'primary'>('')
+  const [referenceBatchResult, setReferenceBatchResult] = useState<ReferenceBatchSubmitResult | null>(null)
+  // 断点③：把生成结果采纳进资产槽位（落库，刷新后仍在）
+  const [adoptingKey, setAdoptingKey] = useState<string | null>(null)
+  const [manualProjectId, setManualProjectId] = useState('')
+  const [projectIdModalOpen, setProjectIdModalOpen] = useState(false)
+  const [projectIdDraft, setProjectIdDraft] = useState('')
+
   const smartDetectRelationType = useMemo(() => getSmartDetectRelationType(relationType), [relationType])
   const smartDetectRelationEntityId = useMemo(
     () => (assetId && smartDetectRelationType ? `${relationType}:${assetId}` : null),
@@ -244,21 +339,38 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     () => getAssetNavigateRelationType(relationType),
     [relationType],
   )
+  /**
+   * 当前项目 ID：角色读资产自身的 `project_id`；场景/道具/服装/演员的读模型不带该字段，
+   * 因此退回 URL（`?projectId=`、`/projects/<id>/...` 路径、工作台带过来的 `returnTo`），
+   * 最后才是用户手动补填。
+   */
+  const resolvedProjectId = useMemo(() => {
+    const assetProjectId = String(
+      ((asset ?? null) as unknown as { project_id?: string | null } | null)?.project_id ?? '',
+    ).trim()
+    if (assetProjectId) return assetProjectId
+    const fromLocation = resolveProjectIdFromLocation(location.pathname, location.search)
+    if (fromLocation) return fromLocation
+    return manualProjectId.trim()
+  }, [asset, location.pathname, location.search, manualProjectId])
+  const applySmartDetectResultValue = useCallback((resultValue: unknown) => {
+    const result = (resultValue ?? {}) as Record<string, unknown>
+    const issues = Array.isArray(result.issues)
+      ? result.issues.filter((it: unknown): it is string => typeof it === 'string' && it.trim().length > 0)
+      : []
+    const optimizedDesc = String(result.optimized_description ?? '').trim()
+    setSmartDetectIssues(issues)
+    setSmartDetectOptimizedDesc(optimizedDesc)
+    setSmartDetectOpen(true)
+    if (issues.length > 0) message.warning(`发现 ${issues.length} 项可能缺失信息`)
+    else message.success('未发现缺失信息')
+  }, [])
   const applySmartDetectResult = useCallback(async (taskId: string) => {
     await handleTaskResultSafely(taskId, {
       readErrorMessage: '读取智能检测结果失败',
       failedFallbackMessage: '智能检测失败',
       onSucceeded: (resultValue) => {
-        const result = resultValue as Record<string, any>
-        const issues = Array.isArray(result.issues)
-          ? result.issues.filter((it: unknown): it is string => typeof it === 'string' && it.trim().length > 0)
-          : []
-        const optimizedDesc = String(result.optimized_description ?? '').trim()
-        setSmartDetectIssues(issues)
-        setSmartDetectOptimizedDesc(optimizedDesc)
-        setSmartDetectOpen(true)
-        if (issues.length > 0) message.warning(`发现 ${issues.length} 项可能缺失信息`)
-        else message.success('未发现缺失信息')
+        applySmartDetectResultValue(resultValue)
       },
       onFailed: (errorMessage) => {
         message.error(errorMessage)
@@ -267,8 +379,8 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         message.error('读取智能检测结果失败')
       },
     })
-  }, [])
-  const { task: smartDetectTask, settledTask: smartDetectSettledTask, trackTaskData: trackSmartDetectTaskData, applyCancelData: applySmartDetectCancelData } = useCancelableRelationTask({
+  }, [applySmartDetectResultValue])
+  const { task: smartDetectTask, settledTask: smartDetectSettledTask, applyCancelData: applySmartDetectCancelData } = useCancelableRelationTask({
     enabled: !!assetId && !!smartDetectRelationType && !!smartDetectRelationEntityId,
     relationType: smartDetectRelationType || '',
     relationEntityId: smartDetectRelationEntityId,
@@ -420,19 +532,15 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       return
     }
 
-    if (notifyExistingTask(smartDetectTask, {
-      cancellingMessage: taskCopy.cancellingMessage,
-      runningMessage: taskCopy.runningMessage,
-    })) {
-      return
-    }
-
     setSmartDetectLoading(true)
+    message.info('已开始智能检测：同步调用大模型，通常需要 10~120 秒，请保持页面打开')
     try {
+      // 同步接口在请求内直接跑完 LLM，不写任务表；本环境没有 Celery worker / Redis，
+      // 所以不再走 `-async` 变体（那个只会写一条永远不会被执行的任务）。
       const request = () => {
         if (relationType === 'actor_image') {
           const character_context = asset?.name ? `角色名：${formName}\n演员标签：${formTags}` : `演员标签：${formTags}`
-          return ScriptProcessingService.analyzeCharacterPortraitAsyncApiV1ScriptProcessingAnalyzeCharacterPortraitAsyncPost({
+          return ScriptProcessingService.analyzeCharacterPortraitApiV1ScriptProcessingAnalyzeCharacterPortraitPost({
             requestBody: {
               relation_entity_id: smartDetectRelationEntityId,
               character_description: description,
@@ -442,7 +550,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         }
         if (relationType === 'scene_image') {
           const scene_context = asset?.name ? `场景名：${formName}\n标签：${formTags}` : `标签：${formTags}`
-          return ScriptProcessingService.analyzeSceneInfoAsyncApiV1ScriptProcessingAnalyzeSceneInfoAsyncPost({
+          return ScriptProcessingService.analyzeSceneInfoApiV1ScriptProcessingAnalyzeSceneInfoPost({
             requestBody: {
               relation_entity_id: smartDetectRelationEntityId,
               scene_description: description,
@@ -452,7 +560,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         }
         if (relationType === 'prop_image') {
           const prop_context = asset?.name ? `道具名：${formName}\n标签：${formTags}` : `标签：${formTags}`
-          return ScriptProcessingService.analyzePropInfoAsyncApiV1ScriptProcessingAnalyzePropInfoAsyncPost({
+          return ScriptProcessingService.analyzePropInfoApiV1ScriptProcessingAnalyzePropInfoPost({
             requestBody: {
               relation_entity_id: smartDetectRelationEntityId,
               prop_description: description,
@@ -461,7 +569,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
           })
         }
         const costume_context = asset?.name ? `服装名：${formName}\n标签：${formTags}` : `标签：${formTags}`
-        return ScriptProcessingService.analyzeCostumeInfoAsyncApiV1ScriptProcessingAnalyzeCostumeInfoAsyncPost({
+        return ScriptProcessingService.analyzeCostumeInfoApiV1ScriptProcessingAnalyzeCostumeInfoPost({
           requestBody: {
             relation_entity_id: smartDetectRelationEntityId,
             costume_description: description,
@@ -470,23 +578,21 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         })
       }
 
-      await executeAsyncTaskCreate({
-        request,
-        trackTaskData: trackSmartDetectTaskData,
-        startedMessage: taskCopy.startedMessage,
-        reusedMessage: taskCopy.reusedMessage,
-        fallbackErrorMessage: '智能检测失败',
-        getErrorMessage: (error, fallbackMessage) => {
-          const maybeAny = error as { response?: { status?: number }; status?: number }
-          const status = maybeAny?.response?.status ?? maybeAny?.status
-          if (status === 404) {
-            return '接口未找到：请运行 `pnpm run openapi:update` 生成客户端代码后重试'
-          }
-          return defaultTaskActionErrorMessage(error, fallbackMessage)
-        },
-      })
-    } catch {
-      // executeAsyncTaskCreate 已统一处理错误提示
+      const response = await request()
+      const result = response.data
+      if (!result) {
+        message.error('智能检测未返回结果')
+        return
+      }
+      applySmartDetectResultValue(result)
+    } catch (error) {
+      const maybeAny = error as { response?: { status?: number }; status?: number }
+      const status = maybeAny?.response?.status ?? maybeAny?.status
+      if (status === 404) {
+        message.error('接口未找到：请运行 `pnpm run openapi:update` 生成客户端代码后重试')
+      } else {
+        message.error(defaultTaskActionErrorMessage(error, '智能检测失败'))
+      }
     } finally {
       setSmartDetectLoading(false)
     }
@@ -521,43 +627,6 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     onCancel: smartDetectTask ? () => void handleCancelSmartDetectTask() : null,
     onNavigate: () => onNavigate(location.pathname),
   })
-  useRelationTaskNotification({
-    task: generationTask,
-    settledTask: generationSettledTask,
-    title: TASK_COPY.imageGeneration.title,
-    sourceLabel: formName?.trim() ? `${assetDisplayName}：${formName.trim()}` : `${assetDisplayName}编辑页`,
-    runningDescription: TASK_COPY.imageGeneration.runningDescription,
-    cancellingDescription: TASK_COPY.imageGeneration.cancellingDescription,
-    successDescription: TASK_COPY.imageGeneration.successDescription,
-    cancelledDescription: TASK_COPY.imageGeneration.cancelledDescription,
-    failedDescription: TASK_COPY.imageGeneration.failedDescription,
-    onCancel:
-      generationTask?.taskId
-        ? () =>
-            void executeTaskCancel({
-              taskId: generationTask.taskId,
-              reason: `用户在${assetDisplayName}资产编辑页取消图片生成任务`,
-              applyCancelData: (data) => {
-                setGenerationTask((current) =>
-                  current
-                    ? {
-                        ...current,
-                        taskId: data?.task_id || current.taskId,
-                        status: (data?.status ?? current.status) as TaskStatus,
-                        cancelRequested: data?.cancel_requested ?? true,
-                      }
-                    : current,
-                )
-                return null
-              },
-              cancelledImmediatelyMessage: TASK_COPY.imageGeneration.cancelledImmediatelyMessage,
-              cancelRequestedMessage: TASK_COPY.imageGeneration.cancelRequestedMessage,
-              fallbackErrorMessage: '取消图片生成任务失败',
-            })
-        : null,
-    onNavigate: () => onNavigate(location.pathname),
-  })
-
   const openPromptPreview = async (image: TImage) => {
     if (!assetId) return
 
@@ -598,50 +667,47 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
 
     setGeneratingByImageId((prev) => ({ ...prev, [promptPreviewImage.id]: true }))
     try {
+      // P3 端点同进程内联执行：这里**直接拿到结果**（不再靠轮询一个永远不会被执行的任务行）
       const submitted = await promptDraft.submitNow()
-      const taskId = submitted?.taskId
-      if (!taskId) {
-        message.error('生成任务创建失败：缺少任务 ID')
+      if (submitted?.dryRun) {
+        message.info('演练模式：未真实出图（DRY_RUN 开着），因此没有可采纳的图片。')
         return
       }
-      setGenerationTask({
-        taskId,
-        status: 'pending',
-        progress: 0,
-        cancelRequested: false,
-      })
-      setGenerationSettledTask(null)
-
-      let finalStatus: TaskStatus = 'pending'
-      let finalTaskState: RelationTaskState | null = null
-      for (let i = 0; i < 30; i += 1) {
-        await sleep(2000)
-        const statusRes = await FilmService.getTaskStatusApiV1FilmTasksTaskIdStatusGet({ taskId })
-        const status = statusRes.data?.status
-        if (!status) continue
-        finalStatus = status
-        if (statusRes.data) {
-          finalTaskState = toRelationTaskStateFromStatusRead(statusRes.data)
-          setGenerationTask(finalTaskState)
-        }
-        if (isTerminalStatus(status)) break
+      const url = String(submitted?.url ?? '').trim()
+      if (!url) {
+        message.error(submitted?.message || `出图未返回可用图片地址（status=${submitted?.status || 'unknown'}）`)
+        return
       }
-      if (finalTaskState && isTerminalStatus(finalTaskState.status)) {
-        setGenerationTask(null)
-        setGenerationSettledTask(finalTaskState)
-      }
-
-      if (finalStatus === 'succeeded') {
-        setPromptPreviewOpen(false)
-        setPromptPreviewImage(null)
-        await loadData()
-      } else if (finalStatus !== 'failed' && finalStatus !== 'cancelled') {
-        message.warning('生成任务仍在执行，请稍后刷新')
-      }
-    } catch {
-      message.error('发起生成失败')
+      setSingleGenResult({ url, prompt, status: String(submitted?.status ?? '') })
+      setPromptPreviewOpen(false)
+      setPromptPreviewImage(null)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '发起生成失败')
     } finally {
       setGeneratingByImageId((prev) => ({ ...prev, [promptPreviewImage.id]: false }))
+    }
+  }
+
+  /** 采纳生成结果到资产图片槽位；`asPrimary` 决定是否同时设为定版（同一资产下唯一）。 */
+  const adoptSingleGenResult = async (asPrimary: boolean) => {
+    if (!assetId || !singleGenResult || !assetNavigateRelationType) return
+    setSingleGenAdopting(asPrimary ? 'primary' : 'slot')
+    try {
+      await adoptGeneratedImage({
+        entity_type: assetNavigateRelationType,
+        entity_id: assetId,
+        url: singleGenResult.url,
+        image_id: promptPreviewImage?.id,
+        set_primary: asPrimary,
+        name: `${formName || asset?.name || assetId} 生成图`,
+      })
+      message.success(asPrimary ? '已采纳并设为定版（刷新后仍在，后续出图会用它当垫图）' : '已采纳到该槽位（刷新后仍在）')
+      setSingleGenResult(null)
+      await loadData()
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '采纳失败')
+    } finally {
+      setSingleGenAdopting('')
     }
   }
 
@@ -730,6 +796,232 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     }
   }
 
+  /** T2：调用 LLM 九槽位图片提示词预览（只读，不写库），已保存的类别用于预填。 */
+  const loadImagePromptPreview = async () => {
+    if (!assetId) return
+    const name = (formName || asset?.name || '').trim()
+    const profile = (formDesc || asset?.description || '').trim()
+    const shotText = [name, profile].filter(Boolean).join('\n')
+    if (!shotText) {
+      message.warning('请先填写名称或描述，再生成图片提示词')
+      return
+    }
+
+    setImagePromptOpen(true)
+    setImagePromptLoading(true)
+    try {
+      const saved = getAssetImagePrompts(asset)
+      setSavedPromptMap(saved)
+      const data = await previewImagePrompts({
+        shot_text: shotText,
+        project_id: resolvedProjectId || undefined,
+        entity_profiles: [{ name, entity_type: assetNavigateRelationType ?? 'character', profile }],
+        style_hint: formStyle.trim() || undefined,
+      })
+      setImagePromptResult(data)
+      const nextDraft: Record<string, string> = {}
+      ;(data?.slots ?? []).forEach((slot) => {
+        const alreadySaved = String(saved[slot.category] ?? '').trim()
+        nextDraft[slot.category] = alreadySaved || slot.prompt
+      })
+      setImagePromptDraftByCategory(nextDraft)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '生成图片提示词失败')
+    } finally {
+      setImagePromptLoading(false)
+    }
+  }
+
+  /** T2：把确认后的槽位提示词合并写入资产 `image_prompts`（不覆盖其它已保存类别）。 */
+  const handleSaveImagePrompts = async () => {
+    if (!assetId || !assetNavigateRelationType) return
+
+    const edited: Record<string, string> = {}
+    Object.entries(imagePromptDraftByCategory).forEach(([category, value]) => {
+      const text = String(value ?? '').trim()
+      if (text) edited[category] = text
+    })
+    if (Object.keys(edited).length === 0) {
+      message.warning('没有可保存的提示词')
+      return
+    }
+
+    setImagePromptSaving(true)
+    try {
+      let currentSaved = getAssetImagePrompts(asset)
+      try {
+        const fresh = await getAsset(assetId)
+        if (fresh) currentSaved = getAssetImagePrompts(fresh)
+      } catch {
+        // 读不到最新资产时退回页面已加载的 image_prompts
+      }
+      const merged = { ...currentSaved, ...edited }
+      await saveAssetImagePrompts(assetNavigateRelationType, assetId, merged)
+      setSavedPromptMap(merged)
+      setImagePromptOpen(false)
+      message.success(`已保存 ${Object.keys(edited).length} 个槽位提示词`)
+      await loadData()
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '保存图片提示词失败')
+    } finally {
+      setImagePromptSaving(false)
+    }
+  }
+
+  /** T3：设为定版（后端会自动清掉同一资产其它行的 is_primary）。 */
+  const handleSetPrimaryImage = async (image: TImage) => {
+    if (!assetId || !assetNavigateRelationType) return
+
+    setSettingPrimaryImageId(image.id)
+    try {
+      await setEntityImagePrimary(assetNavigateRelationType, assetId, image.id, true)
+      message.success('已设为定版')
+      await loadData()
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '设为定版失败')
+    } finally {
+      setSettingPrimaryImageId(null)
+    }
+  }
+
+  /**
+   * 上传本地图片文件，写入该角度槽位的 `file_id`（走 `POST /studio/files/upload`）。
+   *
+   * 为什么需要它：资产图片此前**只有**「AI 生成 → 采纳」这一条入口，缺图时无法用
+   * 手头已有的图把槽位补上（第 3 步「上传测试图片并设为定版」在页面上无处可点）。
+   * 上传与「设为定版」保持两个独立动作：上传只写槽位 file_id，定版仍由
+   * `handleSetPrimaryImage` 显式触发，避免上传即隐式改定版。
+   */
+  const handleUploadImage = async (target: TImage, file: File) => {
+    if (!assetId) return
+    if (!/\.(jpe?g|png|webp|gif)$/i.test(file.name)) {
+      message.error('请上传图片文件（jpg / jpeg / png / webp / gif）')
+      return
+    }
+    setUploadingImageId(target.id)
+    try {
+      const res = await StudioFilesService.uploadFileApiApiV1StudioFilesUploadPost({
+        formData: { file: file as unknown as string },
+        name: file.name.replace(/\.[^.]+$/, ''),
+      })
+      const created = res.data as unknown as { id?: string } | undefined
+      const fileId = String(created?.id ?? '').trim()
+      if (!fileId) {
+        message.error('上传成功但没有拿到 file_id，请刷新后重试')
+        return
+      }
+      await updateImage(assetId, target.id, { file_id: fileId, format: 'png' })
+      message.success(`已上传并写入槽位（file_id=${fileId}）`)
+      await loadData()
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '图片上传失败')
+    } finally {
+      setUploadingImageId(null)
+    }
+  }
+
+  /** T4：用定版主图做垫图提交批量出图（受 DRY_RUN 守卫，本页不落库）。 */
+  const runReferenceBatch = async (projectId: string) => {
+    if (!assetId) return
+    const assetType = assetNavigateRelationType
+    if (assetType !== 'character' && assetType !== 'scene' && assetType !== 'prop') {
+      message.warning('出图服务 V0 只支持角色/场景/道具，当前资产类型无法垫图批量出图')
+      return
+    }
+
+    setReferenceBatchLoading(true)
+    try {
+      const data = await submitImagePlan({
+        project_id: projectId,
+        asset_type: assetType,
+        stage: 'reference_batch',
+        asset_ids: [assetId],
+        use_primary_reference: true,
+        aspect_ratio: '16:9',
+        image_model: 'image2',
+      })
+      setReferenceBatchResult(data)
+      setReferenceBatchOpen(true)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '提交垫图批量出图失败')
+    } finally {
+      setReferenceBatchLoading(false)
+    }
+  }
+
+  const handleSubmitReferenceBatch = async () => {
+    if (!assetId) return
+    if (!supportsImageServiceAssetType(assetNavigateRelationType)) return
+    const projectId = resolvedProjectId.trim()
+    if (!projectId) {
+      // 场景/道具/服装的读模型没有 project_id，从资产库直接打开时也拿不到 URL 线索
+      setProjectIdDraft('')
+      setProjectIdModalOpen(true)
+      return
+    }
+    await runReferenceBatch(projectId)
+  }
+
+  const handleConfirmProjectId = async () => {
+    const next = projectIdDraft.trim()
+    if (!next) {
+      message.warning('请输入项目 ID')
+      return
+    }
+    setManualProjectId(next)
+    setProjectIdModalOpen(false)
+    await runReferenceBatch(next)
+  }
+
+  const imagePromptDryRun = imagePromptResult?.meta?.dry_run === true
+  const imagePromptDryRunReason = String(imagePromptResult?.meta?.dry_run_reason ?? '').trim()
+  const imagePromptWarnings = imagePromptResult?.warnings ?? []
+  const imagePromptSlots = imagePromptResult?.slots ?? []
+  const imagePromptSavedOnlyCategories = Object.keys(savedPromptMap).filter(
+    (category) => !imagePromptSlots.some((slot) => slot.category === category),
+  )
+  /** 采纳结果里可用的图片地址（DRY_RUN 占位地址不算）。 */
+  const adoptableUrl = (row: ReferenceBatchSubmitResult['results'][number]): string => {
+    const candidate = (row.oss_url || row.image_url || '').trim()
+    if (!candidate) return ''
+    if (!/^https?:\/\//i.test(candidate)) return ''
+    if (candidate.includes('dry-run.invalid')) return '' // 演练占位，后端也会拒
+    return candidate
+  }
+
+  const handleAdoptResult = async (row: ReferenceBatchSubmitResult['results'][number]) => {
+    const url = adoptableUrl(row)
+    if (!assetId || !url || !assetNavigateRelationType) return
+    const key = `${row.source_asset_id}_${row.service_task_id}`
+    setAdoptingKey(key)
+    try {
+      await adoptGeneratedImage({
+        entity_type: assetNavigateRelationType,
+        entity_id: assetId,
+        url,
+        set_primary: true,
+        name: `${formName || asset?.name || assetId} 生成图`,
+      })
+      message.success('已采纳到资产并设为定版，刷新后仍在')
+      await loadData()
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '采纳失败')
+    } finally {
+      setAdoptingKey(null)
+    }
+  }
+
+  const referenceBatchResults = referenceBatchResult?.results ?? []
+  const referenceBatchWarnings = referenceBatchResult?.warnings ?? []
+  const referenceBatchDryRun = referenceBatchResults.some((row) => row.dry_run)
+  const referenceBatchSupported = supportsImageServiceAssetType(assetNavigateRelationType)
+  const hasPrimaryImage = images.some((img) => img.is_primary === true)
+  const referenceBatchTooltip = referenceBatchSupported
+    ? '用该资产已设为定版的主图做垫图，提交 reference_batch 批量出图（受 DRY_RUN 守卫）'
+    : assetNavigateRelationType === 'costume'
+      ? '出图服务 V0 不支持服装（costume），无法垫图批量出图'
+      : '出图服务 V0 只支持角色 / 场景 / 道具，当前资产类型无法垫图批量出图'
+
   if (!assetId) {
     return (
       <Card>
@@ -781,15 +1073,17 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                       relationType === 'prop_image' ||
                       relationType === 'costume_image' ? (
                         <>
-                          <Button
-                            type="primary"
-                            size="small"
-                            onClick={() => void handleSmartDetectMissing()}
-                            loading={smartDetectLoading}
-                            disabled={Boolean(loading) || !!smartDetectTask}
-                          >
-                            {smartDetectTask ? '检测中' : '智能检测'}
-                          </Button>
+                          <Tooltip title="同步调用大模型分析缺失信息，通常需要 10~120 秒，期间请勿关闭页面">
+                            <Button
+                              type="primary"
+                              size="small"
+                              onClick={() => void handleSmartDetectMissing()}
+                              loading={smartDetectLoading}
+                              disabled={Boolean(loading) || smartDetectLoading}
+                            >
+                              {smartDetectLoading ? '检测中…' : '智能检测'}
+                            </Button>
+                          </Tooltip>
                           {smartDetectTask ? (
                             <Button
                               size="small"
@@ -849,42 +1143,128 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             key: 'views',
             label: '多镜头图片',
             children: (
-              <Row gutter={[16, 16]}>
-                {slotItems.map((slot) => (
-                  <Col xs={24} sm={12} lg={8} xl={6} key={slot.angle}>
-                    <DisplayImageCard
-                      title={`照片角度：${ANGLE_LABEL_MAP[slot.angle]}`}
-                      imageUrl={slot.imageUrl}
-                      imageAlt={slot.angle}
-                      placeholder="暂无图片"
-                      hoverable={false}
-                      imageHeightClassName="h-44"
-                      extra={slot.image ? <Tag color="blue">ID {slot.image.id}</Tag> : null}
-                      footer={
-                        <div className="flex items-center gap-2">
-                          <Button
-                            type="primary"
-                            size="small"
-                            disabled={!slot.image}
-                            loading={Boolean(slot.image && generatingByImageId[slot.image.id])}
-                            onClick={() => slot.image && void openPromptPreview(slot.image)}
-                          >
-                            生成
-                          </Button>
-                          <Button
-                            size="small"
-                            icon={<EditOutlined />}
-                            disabled={!slot.image}
-                            onClick={() => slot.image && void openHistoryModal(slot.image)}
-                          >
-                            编辑
-                          </Button>
-                        </div>
-                      }
-                    />
-                  </Col>
-                ))}
-              </Row>
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Space wrap>
+                    <Tooltip title="调用大模型生成九类槽位的图片提示词；真实调用可能需要 10~120 秒，期间请勿关闭页面">
+                      <Button
+                        size="small"
+                        icon={<RobotOutlined />}
+                        loading={imagePromptLoading}
+                        onClick={() => void loadImagePromptPreview()}
+                      >
+                        AI 生成图片提示词
+                      </Button>
+                    </Tooltip>
+                    <Tooltip title={referenceBatchTooltip}>
+                      <span className="inline-block">
+                        <Button
+                          size="small"
+                          type="primary"
+                          ghost
+                          disabled={!referenceBatchSupported || referenceBatchLoading}
+                          loading={referenceBatchLoading}
+                          onClick={() => void handleSubmitReferenceBatch()}
+                        >
+                          用定版垫图批量出图
+                        </Button>
+                      </span>
+                    </Tooltip>
+                  </Space>
+                  <div className="text-xs text-gray-500">
+                    <span>{assetNavigateRelationType ? `资产类型：${assetNavigateRelationType}` : '资产类型：未知'}</span>
+                    <span className="ml-3">
+                      {resolvedProjectId ? `项目 ID：${resolvedProjectId}` : '项目 ID：未自动识别（提交前需填写）'}
+                    </span>
+                    {referenceBatchSupported && !hasPrimaryImage ? (
+                      <span className="ml-3 text-orange-500">未设置定版（垫图会退回正面视角图）</span>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="text-xs text-gray-400">
+                  图片提示词保存在资产的 `image_prompts`（按槽位类别合并）；批量出图结果本页不落库，
+                  请在对应角度卡片点「编辑」→ 选择历史生成图片 →「选中并更新当前角度」采纳。
+                </div>
+                <Row gutter={[16, 16]}>
+                  {slotItems.map((slot) => (
+                    <Col xs={24} sm={12} lg={8} xl={6} key={slot.angle}>
+                      <DisplayImageCard
+                        title={`照片角度：${ANGLE_LABEL_MAP[slot.angle]}`}
+                        imageUrl={slot.imageUrl}
+                        imageAlt={slot.angle}
+                        placeholder="暂无图片"
+                        hoverable={false}
+                        imageHeightClassName="h-44"
+                        extra={
+                          slot.image ? (
+                            <Space size={4}>
+                              {slot.image.is_primary ? <Tag color="gold">定版</Tag> : null}
+                              <Tag color="blue">ID {slot.image.id}</Tag>
+                            </Space>
+                          ) : null
+                        }
+                        footer={
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Button
+                              type="primary"
+                              size="small"
+                              disabled={!slot.image}
+                              loading={Boolean(slot.image && generatingByImageId[slot.image.id])}
+                              onClick={() => slot.image && void openPromptPreview(slot.image)}
+                            >
+                              生成
+                            </Button>
+                            <Button
+                              size="small"
+                              icon={<EditOutlined />}
+                              disabled={!slot.image}
+                              onClick={() => slot.image && void openHistoryModal(slot.image)}
+                            >
+                              编辑
+                            </Button>
+                            {slot.image ? (
+                              <Tooltip title="上传手头已有的图片文件，直接写入该角度槽位（不触发生图、不消耗额度）">
+                                <Upload
+                                  showUploadList={false}
+                                  accept=".jpg,.jpeg,.png,.webp,.gif,image/*"
+                                  beforeUpload={(file) => {
+                                    void handleUploadImage(slot.image as TImage, file as unknown as File)
+                                    return false
+                                  }}
+                                >
+                                  <Button
+                                    size="small"
+                                    icon={<UploadOutlined />}
+                                    loading={uploadingImageId === slot.image.id}
+                                    disabled={uploadingImageId !== null && uploadingImageId !== slot.image.id}
+                                  >
+                                    上传
+                                  </Button>
+                                </Upload>
+                              </Tooltip>
+                            ) : null}
+                            {slot.image ? (
+                              <Tooltip title={slot.image.is_primary ? '该图片已是当前定版' : '设为定版后，垫图批量出图会优先使用它'}>
+                                <span className="inline-block">
+                                  <Button
+                                    size="small"
+                                    icon={<SafetyCertificateOutlined />}
+                                    disabled={slot.image.is_primary === true || settingPrimaryImageId !== null}
+                                    loading={settingPrimaryImageId === slot.image.id}
+                                    onClick={() => slot.image && void handleSetPrimaryImage(slot.image)}
+                                  >
+                                    设为定版
+                                  </Button>
+                                </span>
+                              </Tooltip>
+                            ) : null}
+                          </div>
+                        }
+                      />
+                    </Col>
+                  ))}
+                </Row>
+              </div>
             ),
           },
         ]}
@@ -1046,6 +1426,297 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             </div>
           </div>
         )}
+      </Modal>
+
+      <Modal
+        title="AI 生成图片提示词（九槽位）"
+        open={imagePromptOpen}
+        onCancel={() => setImagePromptOpen(false)}
+        footer={
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Button loading={imagePromptLoading} disabled={imagePromptSaving} onClick={() => void loadImagePromptPreview()}>
+              重新生成
+            </Button>
+            <Space>
+              <Button disabled={imagePromptSaving} onClick={() => setImagePromptOpen(false)}>
+                取消
+              </Button>
+              <Button
+                type="primary"
+                loading={imagePromptSaving}
+                disabled={imagePromptLoading || Object.keys(imagePromptDraftByCategory).length === 0}
+                onClick={() => void handleSaveImagePrompts()}
+              >
+                保存到资产
+              </Button>
+            </Space>
+          </div>
+        }
+        destroyOnClose
+        width={960}
+      >
+        {imagePromptLoading ? (
+          <div className="py-8 text-center">
+            <Spin />
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {imagePromptDryRun ? (
+              <Alert
+                type="warning"
+                showIcon
+                message="当前处于 DRY_RUN 守卫：以下提示词由占位逻辑拼装，并未真实调用大模型"
+                description={
+                  imagePromptDryRunReason
+                    ? `拦截原因：${imagePromptDryRunReason}`
+                    : '守卫关闭后这里才是模型真实输出，请勿把占位内容当作最终提示词。'
+                }
+              />
+            ) : null}
+            {imagePromptWarnings.length > 0 ? (
+              <Alert
+                type="info"
+                showIcon
+                message={`提示（${imagePromptWarnings.length}）`}
+                description={
+                  <ul className="pl-4 list-disc space-y-1">
+                    {imagePromptWarnings.map((warning, idx) => (
+                      <li key={`${idx}_${warning}`}>{warning}</li>
+                    ))}
+                  </ul>
+                }
+              />
+            ) : null}
+            <div className="text-xs text-gray-500">
+              已保存过的类别会用已保存内容预填（下面标了「已保存」）；点「保存到资产」时会按类别合并写入
+              `image_prompts`，不会丢掉未出现在本次结果里的类别。
+            </div>
+            {imagePromptSavedOnlyCategories.length > 0 ? (
+              <div className="text-xs text-gray-500">
+                另有已保存但本次未生成的类别（保存时保留原值）：
+                {imagePromptSavedOnlyCategories.map((category) => (
+                  <Tag key={category} className="ml-1">
+                    {category}
+                  </Tag>
+                ))}
+              </div>
+            ) : null}
+            {imagePromptSlots.length === 0 ? (
+              <Empty description="没有返回任何槽位" />
+            ) : (
+              imagePromptSlots.map((slot) => (
+                <div key={slot.category} className="rounded-md border border-gray-200 p-3 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Tag color="blue">{slot.label || slot.category}</Tag>
+                    <span className="text-xs text-gray-500">{slot.category}</span>
+                    {slot.entity_name ? <Tag>主体：{slot.entity_name}</Tag> : null}
+                    {savedPromptMap[slot.category] ? <Tag color="green">已保存</Tag> : null}
+                  </div>
+                  <Input.TextArea
+                    rows={4}
+                    value={imagePromptDraftByCategory[slot.category] ?? slot.prompt}
+                    onChange={(e) =>
+                      setImagePromptDraftByCategory((prev) => ({ ...prev, [slot.category]: e.target.value }))
+                    }
+                  />
+                  {Object.keys(slot.layers ?? {}).length > 0 ? (
+                    <div className="rounded bg-gray-50 p-2 space-y-1">
+                      <div className="text-xs text-gray-500">分层结构</div>
+                      {Object.entries(slot.layers).map(([layerKey, layerValue]) => (
+                        <div key={layerKey} className="text-xs text-gray-600">
+                          <span className="text-gray-400">{layerKey}：</span>
+                          {layerValue}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  {slot.negative_prompt ? (
+                    <div className="text-xs text-gray-500">负面提示词：{slot.negative_prompt}</div>
+                  ) : null}
+                  {slot.warnings && slot.warnings.length > 0 ? (
+                    <div className="space-y-1">
+                      {slot.warnings.map((warning, idx) => (
+                        <div key={`${slot.category}_${idx}`} className="text-xs text-red-500">
+                          {warning}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </Modal>
+
+      {/* 单张生成结果：出图是内联执行的，拿到地址后由用户决定"采纳到槽位 / 采纳并设为定版"。
+          不自动写库：用户要求「结果可采纳、可设定版」，采纳这一步必须是显式动作。 */}
+      <Modal
+        title="生成结果"
+        open={Boolean(singleGenResult)}
+        onCancel={() => setSingleGenResult(null)}
+        footer={
+          <Space>
+            <Button onClick={() => setSingleGenResult(null)}>关闭</Button>
+            <Button loading={singleGenAdopting === 'slot'} onClick={() => void adoptSingleGenResult(false)}>
+              采纳到该槽位
+            </Button>
+            <Button type="primary" loading={singleGenAdopting === 'primary'} onClick={() => void adoptSingleGenResult(true)}>
+              采纳并设为定版
+            </Button>
+          </Space>
+        }
+        destroyOnClose
+        width={720}
+      >
+        <div className="space-y-3">
+          <Alert
+            type="success"
+            showIcon
+            message={`出图完成（${singleGenResult?.status || 'unknown'}）`}
+            description="采纳会把图片下载入库并写进资产图片槽位（刷新后仍在）；设为定版后，后续出图会用它当垫图、镜头也会读到它。"
+          />
+          {singleGenResult?.url ? (
+            <img src={singleGenResult.url} alt="" style={{ width: '100%', borderRadius: 8, border: '1px solid #e2e8f0' }} />
+          ) : null}
+          <div className="text-[11px] text-gray-500 break-all">{singleGenResult?.url}</div>
+          <div className="rounded bg-slate-50 px-3 py-2 text-[11px] leading-5 text-gray-600">
+            <div className="font-medium">本次使用的提示词</div>
+            <div className="whitespace-pre-wrap">{singleGenResult?.prompt}</div>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        title="垫图批量出图结果"
+        open={referenceBatchOpen}
+        onCancel={() => setReferenceBatchOpen(false)}
+        footer={<Button onClick={() => setReferenceBatchOpen(false)}>关闭</Button>}
+        destroyOnClose
+        width={880}
+      >
+        <div className="space-y-4">
+          <div className="text-xs text-gray-500">
+            <span>阶段：reference_batch</span>
+            <span className="ml-3">资产：{assetId ?? '-'}</span>
+            {referenceBatchResult?.project_id ? (
+              <span className="ml-3">项目：{referenceBatchResult.project_id}</span>
+            ) : null}
+            <span className="ml-3">守卫状态：{referenceBatchResult?.guard_status || '未知'}</span>
+          </div>
+          {referenceBatchDryRun ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="DRY_RUN 守卫为 ON：没有真的调用出图服务"
+              description="下面的 service_task_id 是占位值，oss_url 为空（DRY_RUN 不会调用出图服务、也不会上传 OSS）。"
+            />
+          ) : null}
+          {referenceBatchWarnings.length > 0 ? (
+            <Alert
+              type="info"
+              showIcon
+              message={`警告（${referenceBatchWarnings.length}）`}
+              description={
+                <ul className="pl-4 list-disc space-y-1">
+                  {referenceBatchWarnings.map((warning, idx) => (
+                    <li key={`${idx}_${warning}`}>{warning}</li>
+                  ))}
+                </ul>
+              }
+            />
+          ) : null}
+          {referenceBatchResults.length === 0 ? (
+            <Empty description="没有返回任何提交结果" />
+          ) : (
+            <div className="space-y-3">
+              <div className="text-sm text-gray-600">共 {referenceBatchResults.length} 个提交结果：</div>
+              {referenceBatchResults.map((row) => (
+                <div
+                  key={`${row.source_asset_id}_${row.service_task_id}`}
+                  className="rounded-md border border-gray-200 p-3 space-y-1 text-sm"
+                >
+                  <div>
+                    service_task_id：
+                    <span className="font-mono">{row.service_task_id || '（空）'}</span>
+                  </div>
+                  <div>
+                    status：
+                    <Tag color={row.status === 'succeeded' ? 'green' : row.status === 'dry_run' ? 'orange' : 'blue'}>
+                      {row.status || '未知'}
+                    </Tag>
+                    <span className="text-xs text-gray-400">{row.source_asset_id}</span>
+                  </div>
+                  <div>
+                    oss_url：
+                    {row.oss_url ? (
+                      <a href={row.oss_url} target="_blank" rel="noreferrer">
+                        {row.oss_url}
+                      </a>
+                    ) : (
+                      <span className="text-gray-400">
+                        （{row.dry_run ? 'DRY_RUN 下为空，未上传 OSS' : '未返回'}）
+                      </span>
+                    )}
+                  </div>
+                  {row.message ? <div className="text-xs text-gray-500">{row.message}</div> : null}
+                  <div className="pt-1">
+                    <Tooltip
+                      title={
+                        adoptableUrl(row)
+                          ? '下载入库并写入资产图片槽位（同时设为定版）'
+                          : 'DRY_RUN 下没有真实图片地址，无法采纳'
+                      }
+                    >
+                      <Button
+                        size="small"
+                        type="primary"
+                        disabled={!adoptableUrl(row)}
+                        loading={adoptingKey === `${row.source_asset_id}_${row.service_task_id}`}
+                        onClick={() => void handleAdoptResult(row)}
+                      >
+                        采纳到资产
+                      </Button>
+                    </Tooltip>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <Alert
+            type="info"
+            showIcon
+            message="出图结果需要人工采纳才落库"
+            description="点上面的「采纳到资产」会下载入库、写入资产图片槽位并设为定版（刷新后仍在）。也可以对目标角度点「编辑」→ 选择历史生成图片 →「选中并更新当前角度」。"
+          />
+        </div>
+      </Modal>
+
+      <Modal
+        title="需要项目 ID"
+        open={projectIdModalOpen}
+        onCancel={() => setProjectIdModalOpen(false)}
+        onOk={() => void handleConfirmProjectId()}
+        okText="继续提交"
+        cancelText="取消"
+        confirmLoading={referenceBatchLoading}
+        destroyOnClose
+      >
+        <div className="space-y-3">
+          <div className="text-sm text-gray-600">
+            当前页面拿不到该资产所属的项目（场景 / 道具 / 服装 / 演员的资产读模型不含 project_id，
+            直接打开资产编辑页时 URL 里也没有项目线索）。垫图批量出图需要项目 ID 才能定位资产。
+          </div>
+          <Input
+            value={projectIdDraft}
+            onChange={(e) => setProjectIdDraft(e.target.value)}
+            placeholder="请输入项目 ID"
+            onPressEnter={() => void handleConfirmProjectId()}
+          />
+          <div className="text-xs text-gray-400">
+            项目 ID 可在项目工作台地址栏 `/projects/&lt;项目 ID&gt;` 中看到；从工作台进入本页时会自动识别。
+          </div>
+        </div>
       </Modal>
     </div>
   )

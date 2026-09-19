@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
-import { Card, Button, Tag, Space, Table, Empty, Modal, Input, Dropdown, message } from 'antd'
+import { Card, Button, Tag, Space, Table, Empty, Modal, Input, Dropdown, Tooltip, message } from 'antd'
 import type { MenuProps, TableColumnsType } from 'antd'
 import {
   EditOutlined,
@@ -20,7 +20,7 @@ import { ChapterRawTextEditorModal } from '../../../chapter/components/ChapterRa
 import { ensureHasShotsBeforeShooting } from '../ensureHasShotsBeforeShooting'
 import { getChapterPreparationState } from '../chapterPreparation'
 import { loadChapterFlowStats, type ChapterFlowStats } from '../projectFlowStats'
-import { executeAsyncTaskCreate, executeTaskCancel } from '../../../components/taskActionHelpers'
+import { executeTaskCancel } from '../../../components/taskActionHelpers'
 import { TASK_COPY } from '../../../components/taskCopy'
 import { useTaskPageContext } from '../../../components/taskPageContext'
 import { useTaskUiStore } from '../../../components/taskUiStore'
@@ -33,6 +33,42 @@ import {
 const { TextArea } = Input
 const CREATE_PARAM = 'create'
 const EDIT_PARAM = 'edit'
+
+/**
+ * 分镜提取改为同步调用：本环境没有配置后台任务 worker
+ * （Celery broker 不可达、也没有 worker 进程），异步接口只会写一条任务记录后
+ * 无人执行。这里改用 `/api/v1/script-processing/divide`，AI 在本次 HTTP 请求内
+ * 跑完并直接返回结果，代价是请求会阻塞数十秒。
+ */
+const SYNC_DIVIDE_HINT =
+  '本环境未配置后台任务 worker，AI 会在本次请求内同步执行分镜提取，通常需要数十秒，请不要重复点击或关闭页面'
+const SYNC_DIVIDE_LOADING = 'AI 正在同步拆解本集分镜，通常需要数十秒，请不要重复点击…'
+const SYNC_DIVIDE_MESSAGE_KEY = 'chapter-sync-divide'
+
+/**
+ * 把后端统一错误信封 `{code, message, data, meta}` 解析成可读提示。
+ * 结构化细节优先取 `meta.error.message`，缺失时回退到信封 `message` / `detail`
+ * 与客户端 ApiError 自带的 message（与 PromptFlowPage 的处理约定一致）。
+ */
+function describeEnvelopeError(error: unknown, fallback: string): string {
+  if (!error) return fallback
+  if (typeof error === 'string') return error.trim() || fallback
+  const err = error as { body?: unknown; message?: unknown }
+  const body = err.body
+  if (body && typeof body === 'object') {
+    const envelope = body as Record<string, unknown>
+    const meta = (envelope.meta ?? {}) as Record<string, unknown>
+    const metaError = (meta.error ?? {}) as Record<string, unknown>
+    const metaMessage = metaError.message
+    if (typeof metaMessage === 'string' && metaMessage.trim()) return metaMessage
+    const envelopeMessage = envelope.message
+    if (typeof envelopeMessage === 'string' && envelopeMessage.trim()) return envelopeMessage
+    const detail = envelope.detail
+    if (typeof detail === 'string' && detail.trim()) return detail
+  }
+  if (typeof err.message === 'string' && err.message.trim()) return err.message
+  return fallback
+}
 
 export function ChaptersTab() {
   const taskCopy = TASK_COPY.chapterDivision
@@ -255,28 +291,25 @@ export function ChaptersTab() {
       message.warning('请先补章节原文')
       return
     }
+    // 同步请求会阻塞数十秒，这里显式挡住重复点击（按钮本身也在 loading）。
+    if (chapterDivisionActionId) return
     setChapterDivisionActionId(record.id)
+    message.loading({ content: SYNC_DIVIDE_LOADING, key: SYNC_DIVIDE_MESSAGE_KEY, duration: 0 })
     try {
-      await executeAsyncTaskCreate({
-        request: () =>
-          ScriptProcessingService.divideScriptAsyncApiV1ScriptProcessingDivideAsyncPost({
-            requestBody: {
-              chapter_id: record.id,
-              script_text: scriptText,
-              write_to_db: true,
-            },
-          }),
-        trackTaskData: (data) => {
-          const tracked = createRelationTaskState(data)
-          setChapterDivisionTaskMap(upsertRelationTaskStateInMap(chapterDivisionTaskMap, record.id, tracked))
-          return tracked
+      const res = await ScriptProcessingService.divideScriptApiV1ScriptProcessingDividePost({
+        requestBody: {
+          chapter_id: record.id,
+          script_text: scriptText,
+          write_to_db: true,
         },
-        startedMessage: taskCopy.startedMessage,
-        reusedMessage: taskCopy.reusedMessage,
-        fallbackErrorMessage: '启动分镜提取失败',
       })
-    } catch {
-      // executeAsyncTaskCreate 已统一处理错误提示
+      const totalShots = res.data?.total_shots ?? res.data?.shots?.length ?? 0
+      message.destroy(SYNC_DIVIDE_MESSAGE_KEY)
+      message.success(`分镜提取完成，共 ${totalShots} 个分镜`)
+      await refresh()
+    } catch (error) {
+      message.destroy(SYNC_DIVIDE_MESSAGE_KEY)
+      message.error(describeEnvelopeError(error, '分镜提取失败'))
     } finally {
       setChapterDivisionActionId(null)
     }
@@ -423,6 +456,16 @@ export function ChaptersTab() {
             </div>
           )
         }
+        if (chapterDivisionActionId === record.id) {
+          return (
+            <div className="space-y-1">
+              <Tag color="processing">同步提取中</Tag>
+              <div className="text-[11px] text-gray-500 leading-5">
+                本环境无后台 worker，AI 在本次请求内同步执行，通常数十秒
+              </div>
+            </div>
+          )
+        }
         const state = getChapterPreparationState(record)
         return (
           <div className="space-y-1">
@@ -479,27 +522,35 @@ export function ChaptersTab() {
           ? activeTask.cancelRequested
             ? '查看取消进度'
             : '查看提取进度'
-          : state.primaryAction
+          : chapterDivisionActionId === record.id && state.key === 'extract_shots'
+            ? '同步提取中…'
+            : state.primaryAction
         const primaryLoading = chapterDivisionActionId === record.id && state.key === 'extract_shots' && !activeTask
+        const showSyncHint = state.key === 'extract_shots' && !activeTask
 
         return (
           <Space size={8}>
-            <Button
-              type="primary"
-              size="small"
-              onClick={() => {
-                if (state.key === 'extract_shots' && !activeTask) {
-                  void handleDivideAsync(record)
-                  return
-                }
-                handlePrimaryAction(record)
-              }}
-              style={{ minWidth: 132, justifyContent: 'center' }}
-              icon={primaryIcon}
-              loading={primaryLoading}
-            >
-              {primaryText}
-            </Button>
+            <Tooltip title={showSyncHint ? SYNC_DIVIDE_HINT : undefined}>
+              <span>
+                <Button
+                  type="primary"
+                  size="small"
+                  onClick={() => {
+                    if (state.key === 'extract_shots' && !activeTask) {
+                      void handleDivideAsync(record)
+                      return
+                    }
+                    handlePrimaryAction(record)
+                  }}
+                  style={{ minWidth: 132, justifyContent: 'center' }}
+                  icon={primaryIcon}
+                  loading={primaryLoading}
+                  disabled={primaryLoading}
+                >
+                  {primaryText}
+                </Button>
+              </span>
+            </Tooltip>
             <Dropdown
               trigger={['click']}
               menu={{ items: buildActionMenuItems(record) }}

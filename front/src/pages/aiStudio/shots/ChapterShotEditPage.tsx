@@ -22,10 +22,11 @@ import {
   StudioShotDialogLinesService,
   StudioShotsService,
 } from '../../../services/generated'
-import { executeAsyncTaskCreate, executeTaskCancel, notifyExistingTask } from '../components/taskActionHelpers'
+import { defaultTaskActionErrorMessage, executeTaskCancel, notifyExistingTask } from '../components/taskActionHelpers'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { getChapterShotEditPath, getChapterShotsPath, getChapterStudioPath } from '../project/ProjectWorkbench/routes'
 import { DisplayImageCard } from '../assets/components/DisplayImageCard'
+import { ChapterShotAssetBindingSection } from './components/ChapterShotAssetBindingSection'
 import { ChapterShotAssetConfirmation } from './components/ChapterShotAssetConfirmation'
 import { ChapterShotBasicInfoSection } from './components/ChapterShotBasicInfoSection'
 import { ChapterShotDialogueConfirmation } from './components/ChapterShotDialogueConfirmation'
@@ -93,7 +94,7 @@ function getExtractionStateMeta(
     return {
       tone: 'gold',
       title: '当前镜头还没有执行过信息提取',
-      description: '点击“提取并刷新候选”后，系统会同时提取资产和对白候选。',
+      description: '点击“提取并刷新候选”后，系统会同步提取资产和对白候选（同步执行，通常需要 10-120 秒）。',
     }
   }
   if (state === 'extracted_empty') {
@@ -238,11 +239,11 @@ export function ChapterShotEditPage() {
   const [dialogAddingKeys, setDialogAddingKeys] = useState<Record<string, boolean>>({})
   const [batchDialogAdding, setBatchDialogAdding] = useState(false)
   const [candidateActionIds, setCandidateActionIds] = useState<Record<number, boolean>>({})
-  const [editorTabKey, setEditorTabKey] = useState<'basic' | 'confirm'>('basic')
+  const [editorTabKey, setEditorTabKey] = useState<'basic' | 'confirm' | 'binding'>('basic')
   const [shotListFilter, setShotListFilter] = useState<ShotListFilter>('all')
   const dialogDebounceTimersRef = useRef<Map<number, number>>(new Map())
   const tabAutoInitShotIdRef = useRef<string | null>(null)
-  const editorTabMemoryRef = useRef<Record<string, 'basic' | 'confirm'>>({})
+  const editorTabMemoryRef = useRef<Record<string, 'basic' | 'confirm' | 'binding'>>({})
 
   const shotsSorted = useMemo(
     () => [...shots].sort((a, b) => a.index - b.index),
@@ -450,7 +451,10 @@ export function ChapterShotEditPage() {
     createTaskSettledReloader(loadPage),
     [loadPage],
   )
-  const { task: extractTask, settledTask: extractSettledTask, trackTaskData: trackExtractTaskData, applyCancelData: applyExtractCancelData } = useCancelableRelationTask({
+  // 注意：提取按钮已改为同步接口（不再创建 async 任务），但这里保留了对本 chapter 的
+  // script_extraction 活跃任务轮询/取消能力：DB 里可能残留历史任务行，轮询仍是它的唯一入口，
+  // 因此不是死代码。见本次改动报告的说明。
+  const { task: extractTask, settledTask: extractSettledTask, applyCancelData: applyExtractCancelData } = useCancelableRelationTask({
     enabled: !!chapterId,
     relationType: SCRIPT_EXTRACTION_RELATION_TYPE,
     relationEntityId: chapterId,
@@ -809,6 +813,9 @@ export function ChapterShotEditPage() {
     [applyPreparationState, loadPreparationState, shotId],
   )
 
+  // 提取走同步接口：本环境没有 Celery worker / Redis，`*-async` 只写一条永远不会被执行的任务行，
+  // 按钮因此拿不到任何结果。同步接口在本进程内直接跑 LLM 并写回候选项，无需 worker；
+  // 代价是请求会挂 10-120 秒，用持续的 loading 提示把等待讲清楚。
   const extractAssets = useCallback(async () => {
     if (!projectId || !chapterId || !shot) return
     if (extractInFlightRef.current) return
@@ -820,6 +827,7 @@ export function ChapterShotEditPage() {
     }
     extractInFlightRef.current = true
     setExtractingAssets(true)
+    const hideLoading = message.loading('正在同步提取（通常需要 10-120 秒），请勿关闭或刷新页面…', 0)
     try {
       const scriptDivision = {
         total_shots: 1,
@@ -833,29 +841,25 @@ export function ChapterShotEditPage() {
           },
         ],
       }
-      await executeAsyncTaskCreate({
-        request: () =>
-          ScriptProcessingService.extractScriptAsyncApiV1ScriptProcessingExtractAsyncPost({
-            requestBody: {
-              project_id: projectId,
-              chapter_id: chapterId,
-              script_division: scriptDivision as any,
-              consistency: undefined,
-              refresh_cache: true,
-            } as any,
-          }),
-        trackTaskData: trackExtractTaskData,
-        startedMessage: extractTaskCopy.startedMessage,
-        reusedMessage: extractTaskCopy.reusedMessage,
-        fallbackErrorMessage: '提取失败',
+      await ScriptProcessingService.extractScriptApiV1ScriptProcessingExtractPost({
+        requestBody: {
+          project_id: projectId,
+          chapter_id: chapterId,
+          script_division: scriptDivision as any,
+          consistency: undefined,
+          refresh_cache: true,
+        } as any,
       })
-    } catch {
-      // executeAsyncTaskCreate 已统一处理错误提示
+      message.success('提取完成，候选已刷新')
+      await loadPreparationState({ silent: true })
+    } catch (error) {
+      message.error(defaultTaskActionErrorMessage(error, '提取失败'))
     } finally {
+      hideLoading()
       setExtractingAssets(false)
       extractInFlightRef.current = false
     }
-  }, [chapterId, extractTask, projectId, shot])
+  }, [chapterId, extractTask, loadPreparationState, projectId, shot])
 
   const batchExtractAssets = useCallback(async () => {
     if (!projectId || !chapterId || selectedShots.length === 0) return
@@ -878,6 +882,10 @@ export function ChapterShotEditPage() {
 
     extractInFlightRef.current = true
     setBatchExtractingAssets(true)
+    const hideLoading = message.loading(
+      `正在同步提取 ${actionableShots.length} 条镜头（通常需要 10-120 秒），请勿关闭或刷新页面…`,
+      0,
+    )
     try {
       const scriptDivision = {
         total_shots: actionableShots.length,
@@ -889,29 +897,25 @@ export function ChapterShotEditPage() {
           shot_name: item.title ?? '',
         })),
       }
-      await executeAsyncTaskCreate({
-        request: () =>
-          ScriptProcessingService.extractScriptAsyncApiV1ScriptProcessingExtractAsyncPost({
-            requestBody: {
-              project_id: projectId,
-              chapter_id: chapterId,
-              script_division: scriptDivision as any,
-              consistency: undefined,
-              refresh_cache: true,
-            } as any,
-          }),
-        trackTaskData: trackExtractTaskData,
-        startedMessage: actionableShots.length > 1 ? `已开始提取 ${actionableShots.length} 条镜头` : extractTaskCopy.startedMessage,
-        reusedMessage: extractTaskCopy.reusedMessage,
-        fallbackErrorMessage: '批量提取失败',
+      await ScriptProcessingService.extractScriptApiV1ScriptProcessingExtractPost({
+        requestBody: {
+          project_id: projectId,
+          chapter_id: chapterId,
+          script_division: scriptDivision as any,
+          consistency: undefined,
+          refresh_cache: true,
+        } as any,
       })
-    } catch {
-      // executeAsyncTaskCreate 已统一处理错误提示
+      message.success(`已完成 ${actionableShots.length} 条镜头的提取，候选已刷新`)
+      await loadPage()
+    } catch (error) {
+      message.error(defaultTaskActionErrorMessage(error, '批量提取失败'))
     } finally {
+      hideLoading()
       setBatchExtractingAssets(false)
       extractInFlightRef.current = false
     }
-  }, [chapterId, extractTask, projectId, selectedShots])
+  }, [chapterId, extractTask, loadPage, projectId, selectedShots])
 
   const cancelExtractTask = useCallback(async () => {
     if (!extractTask?.taskId) return
@@ -1054,33 +1058,42 @@ export function ChapterShotEditPage() {
         }
 
         if (!item.exists) {
+          // **就地新建并关联**：原来这里 window.open 一个带 create=1&name=… 的新标签页，
+          // 但资产页会把查询参数抹掉（实际打开的是 /assets?tab=xxx），预填的名称/项目/镜头全丢，
+          // 用户得在另一个标签里重新手填一遍再回来 —— 主流程被硬生生截断。
+          // 现在直接调实体新建接口（它本身支持带 chapter_id/shot_id 落关联），留在本页完成。
           Modal.confirm({
-            title: '当前无可关联资产，是否新建？',
-            okText: '新建',
+            title: `项目中还没有「${name}」，是否新建并关联到本镜？`,
+            okText: '新建并关联',
             cancelText: '取消',
-            onOk: () => {
-              pendingExternalAssetCreateRef.current = true
-              const open = (url: string) => window.open(url, '_blank', 'noopener,noreferrer')
-              const descQ = asset.description?.trim()
-                ? `&desc=${encodeURIComponent(asset.description.trim())}`
-                : ''
-              const styleQ =
-                `&visualStyle=${encodeURIComponent(projectVisualStyle)}` +
-                `&style=${encodeURIComponent(projectStyle)}`
-              const ctxQ =
-                `&projectId=${encodeURIComponent(projectId)}` +
-                `&chapterId=${encodeURIComponent(chapterId)}` +
-                `&shotId=${encodeURIComponent(shotId)}` +
-                styleQ
-              if (asset.kind === 'scene' || asset.kind === 'prop' || asset.kind === 'costume') {
-                open(
-                  `/assets?tab=${asset.kind}&create=1&name=${encodeURIComponent(name)}${descQ}${ctxQ}`,
-                )
+            onOk: async () => {
+              const entityType =
+                asset.kind === 'scene'
+                  ? 'scene'
+                  : asset.kind === 'prop'
+                    ? 'prop'
+                    : asset.kind === 'costume'
+                      ? 'costume'
+                      : 'character'
+              const created = await StudioEntitiesApi.create(entityType as 'character' | 'scene' | 'prop' | 'costume', {
+                id: `asset_${Date.now()}`,
+                name,
+                description: asset.description?.trim() || '',
+                tags: [],
+                thumbnail: '',
+                visual_style: projectVisualStyle,
+                style: projectStyle,
+                project_id: projectId,
+                chapter_id: chapterId,
+                shot_id: shotId,
+              })
+              const createdId = String((created.data as { id?: string } | undefined)?.id ?? '')
+              if (!createdId) {
+                message.error('新建资产失败：接口没有返回 id')
                 return
               }
-              open(
-                `/projects/${encodeURIComponent(projectId)}?tab=roles&create=1&name=${encodeURIComponent(name)}${descQ}${ctxQ}`,
-              )
+              message.success(`已新建「${name}」并关联到本镜`)
+              await loadPreparationState({ silent: true })
             },
           })
           return
@@ -1298,7 +1311,7 @@ export function ChapterShotEditPage() {
 
   const handleEditorTabChange = useCallback(
     (key: string) => {
-      const nextKey = key as 'basic' | 'confirm'
+      const nextKey = key as 'basic' | 'confirm' | 'binding'
       setEditorTabKey(nextKey)
       if (shotId) {
         editorTabMemoryRef.current[shotId] = nextKey
@@ -1389,15 +1402,17 @@ export function ChapterShotEditPage() {
               </div>
             </div>
             <div className="flex items-center gap-2">
-              <Button
-                type="primary"
-                size="small"
-                loading={extractingAssets || extractTaskActive}
-                disabled={extractTaskActive}
-                onClick={() => void extractAssets()}
-              >
-                提取并刷新候选
-              </Button>
+              <Tooltip title="同步执行提取，通常需要 10-120 秒，期间请勿关闭页面">
+                <Button
+                  type="primary"
+                  size="small"
+                  loading={extractingAssets || extractTaskActive}
+                  disabled={extractTaskActive}
+                  onClick={() => void extractAssets()}
+                >
+                  提取并刷新候选
+                </Button>
+              </Tooltip>
               {extractTask ? (
                 <Button
                   size="small"
@@ -1467,6 +1482,25 @@ export function ChapterShotEditPage() {
             onAddExtractedDialogLine={(line) => void addExtractedDialogLine(line)}
             onIgnoreExtractedDialogLine={(line) => void ignoreExtractedDialogLine(line)}
             onUpdateExtractedDialogText={updateExtractedDialogText}
+          />
+        </div>
+      ),
+    },
+    {
+      key: 'binding',
+      label: (
+        <div className="flex items-center gap-2">
+          <span className="inline-block h-2 w-2 rounded-full" style={{ background: '#93c5fd' }} />
+          <span>3 AI 推荐关联</span>
+        </div>
+      ),
+      children: (
+        <div className="rounded-2xl border border-slate-200 bg-slate-50/70 px-4 py-4">
+          <ChapterShotAssetBindingSection
+            projectId={projectId}
+            chapterId={chapterId}
+            shotId={shotId}
+            onReloadPreparationState={() => loadPreparationState({ silent: true })}
           />
         </div>
       ),
@@ -1560,7 +1594,7 @@ export function ChapterShotEditPage() {
                     </Space>
                     {multiSelectActive ? (
                       <Space size={6} className="shrink-0">
-                        <Tooltip title="批量提取并刷新">
+                        <Tooltip title="批量提取并刷新（同步执行，可能较慢）">
                           <Button
                             size="small"
                             type="primary"
