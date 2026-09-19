@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -25,12 +25,23 @@ from app.services.studio.file_usages import upsert_file_usage
 FILE_ORDER_FIELDS = {"name", "created_at", "updated_at"}
 
 
+# 后缀白名单。音频之前完全不在白名单里，导致「声音绑定」（shot_details.audio_file_id
+# 要求 files.type=audio）在接口层就不可达：用户上传 .mp3/.wav 只会拿到 400。
+IMAGE_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif"})
+VIDEO_EXTENSIONS: frozenset[str] = frozenset({".mp4", ".mov", ".mkv", ".avi", ".webm"})
+AUDIO_EXTENSIONS: frozenset[str] = frozenset(
+    {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".wma", ".aiff", ".aif"}
+)
+
+
 def _detect_file_type(filename: str) -> FileType:
     _, ext = os.path.splitext(filename.lower())
-    if ext in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+    if ext in IMAGE_EXTENSIONS:
         return FileType.image
-    if ext in {".mp4", ".mov", ".mkv", ".avi", ".webm"}:
+    if ext in VIDEO_EXTENSIONS:
         return FileType.video
+    if ext in AUDIO_EXTENSIONS:
+        return FileType.audio
     raise HTTPException(status_code=400, detail=f"不支持的文件类型: {ext or '未知后缀'}")
 
 
@@ -51,6 +62,17 @@ def _resolve_download_media_type(filename: str) -> str:
         ".gif": "image/gif",
         ".mp4": "video/mp4",
         ".mov": "video/quicktime",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".flac": "audio/flac",
+        ".ogg": "audio/ogg",
+        ".oga": "audio/ogg",
+        ".opus": "audio/opus",
+        ".wma": "audio/x-ms-wma",
+        ".aiff": "audio/aiff",
+        ".aif": "audio/aiff",
     }
     if ext in media_types:
         return media_types[ext]
@@ -129,6 +151,75 @@ async def update_file_meta(
     return await flush_and_refresh(db, obj)
 
 
+async def register_external_file(
+    db: AsyncSession,
+    *,
+    url: str,
+    name: str | None = None,
+    file_type: str | None = None,
+    project_id: str | None = None,
+    chapter_id: str | None = None,
+    shot_id: str | None = None,
+    usage_kind: str | None = None,
+    source_ref: str | None = None,
+) -> FileItem:
+    """把**外部公网 URL** 登记成素材（不下载、不在本地存副本）。
+
+    为什么需要：出图/出视频这类外部服务要求输入文件**公网可达**（例如 APIMart 的
+    ``audio_urls`` 只收公网 URL 或 ``asset://``）。而 Jellyfish 现有两条建文件的路都不合适：
+
+    - ``upload_file``：把字节传进本地存储 → 地址是相对的 ``/files/...``，供应商抓不到；
+    - ``adopt``（``create_file_from_url_or_b64``）：会**下载**到本地再存一份 → 地址又变回相对路径。
+
+    所以这里只登记 URL 本身：``storage_key`` 与 ``thumbnail`` 都写这个绝对地址，
+    ``resolve_file_url`` 对绝对地址是直通的，后续交付/生成请求拿到的就是公网地址。
+
+    边界：只接受 ``http(s)://``；不校验远端是否真的可访问（登记不等于可用），
+    需要真实验证时由调用方自己拉一次。
+    """
+    target = str(url or "").strip()
+    if not target.startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=400,
+            detail="只接受 http(s):// 开头的公网地址；本地或相对地址供应商抓不到，请改用上传接口。",
+        )
+
+    resolved_type = str(file_type or "").strip().lower()
+    if resolved_type and resolved_type not in {item.value for item in FileType}:
+        raise HTTPException(status_code=400, detail=f"不支持的素材类型：{file_type}")
+    if not resolved_type:
+        path = target.split("?", 1)[0]
+        _, ext = os.path.splitext(path.lower())
+        try:
+            resolved_type = _detect_file_type(f"x{ext}").value
+        except HTTPException:  # 未知后缀：按图片兜底（与既有推断口径一致）
+            resolved_type = FileType.image.value
+
+    display_name = (name or "").strip() or os.path.basename(target.split("?", 1)[0]) or target
+    file_item = await create_and_refresh(
+        db,
+        FileItem(
+            id=str(uuid.uuid4()),
+            type=resolved_type,
+            name=display_name,
+            thumbnail=target,
+            tags=["external"],
+            storage_key=target,
+        ),
+    )
+    if project_id and usage_kind:
+        await upsert_file_usage(
+            db,
+            file_id=file_item.id,
+            project_id=project_id,
+            chapter_id=chapter_id,
+            shot_id=shot_id,
+            usage_kind=usage_kind,
+            source_ref=source_ref,
+        )
+    return file_item
+
+
 async def upload_file(
     db: AsyncSession,
     *,
@@ -186,12 +277,22 @@ async def build_download_response(
     db: AsyncSession,
     *,
     file_id: str,
-) -> StreamingResponse:
-    """根据 file_id 构建下载响应。"""
-    file_item = await get_or_404(db, FileItem, file_id, detail=entity_not_found("File"))
-    content = await storage.download_file(key=file_item.storage_key)
+) -> StreamingResponse | RedirectResponse:
+    """根据 file_id 构建下载/播放响应。
 
-    filename = Path(file_item.storage_key).name or "download"
+    **外链素材**（``storage_key`` 是 http(s) 公网地址，例如用
+    ``POST /studio/files/external`` 登记的生成视频）不能走本地存储读取 ——
+    按本地路径去找必然 500。这类直接 307 重定向到源地址：浏览器/播放器自己拉，
+    也避免了把大文件代理进 Jellyfish。
+    """
+    file_item = await get_or_404(db, FileItem, file_id, detail=entity_not_found("File"))
+    storage_key = str(file_item.storage_key or "").strip()
+    if storage_key.startswith(("http://", "https://")):
+        return RedirectResponse(url=storage_key, status_code=307)
+
+    content = await storage.download_file(key=storage_key)
+
+    filename = Path(storage_key).name or "download"
     media_type = _resolve_download_media_type(filename)
     content_disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
     return StreamingResponse(

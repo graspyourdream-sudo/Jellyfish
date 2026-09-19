@@ -14,7 +14,10 @@ from celery.result import AsyncResult
 
 from app.core.celery_app import celery_app
 from app.core.db_sync import sync_session_maker
+from app.core.task_manager import SyncSqlAlchemyTaskStore
+from app.core.task_manager.types import TaskStatus
 from app.models.task import GenerationTask
+from app.services import paid_outlet_guard
 from app.services.worker.task_registry import task_executor_registry
 
 logger = logging.getLogger(__name__)
@@ -66,5 +69,17 @@ def run_task_celery(task_id: str) -> None:
         if row is None:
             return
         task_kind = (row.task_kind or "").strip() or str((row.payload or {}).get("task_kind") or "").strip()
+        # 出图 / 出视频出口兜底：即使有人绕过接口层先建了任务，也不允许它真花钱。
+        blocked_reason = paid_outlet_guard.task_kind_block_reason(
+            task_kind,
+            f"执行任务 task_kind={task_kind} task_id={task_id}",
+        )
+        if blocked_reason:
+            store = SyncSqlAlchemyTaskStore(db)
+            store.set_error(task_id, blocked_reason)
+            store.set_status(task_id, TaskStatus.failed)
+            db.commit()
+            logger.warning("任务被 DRY_RUN 守卫拦截：task_id=%s %s", task_id, blocked_reason)
+            return
     executor = task_executor_registry.resolve(task_kind)
     executor.run(task_id)

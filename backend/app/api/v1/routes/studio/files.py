@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import Response
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db
@@ -15,6 +17,7 @@ from app.services.studio.files import (
     get_file_detail as get_file_detail_service,
     get_storage_info,
     list_files_paginated,
+    register_external_file,
     update_file_meta as update_file_meta_service,
     upload_file,
 )
@@ -72,6 +75,47 @@ async def list_files_api(
     )
 
 
+class ExternalFileCreate(BaseModel):
+    """登记外部公网素材（不下载、不存副本）。"""
+
+    url: str = Field(..., min_length=1, description="公网可访问地址（http/https）")
+    name: str | None = Field(None, description="显示名（缺省取 URL 文件名）")
+    type: str | None = Field(None, description="素材类型：image / video / audio（缺省按后缀推断）")
+    project_id: str | None = Field(None, description="与 usage_kind 同时提供时写入 file_usages")
+    chapter_id: str | None = None
+    shot_id: str | None = None
+    usage_kind: str | None = None
+    source_ref: str | None = None
+
+
+@router.post(
+    "/external",
+    response_model=ApiResponse[FileRead],
+    status_code=status.HTTP_201_CREATED,
+    summary="登记外部公网素材（外链，不下载）",
+    description=(
+        "把外部公网地址登记成素材记录。用于「供应商要求公网可达」的场景（例如 APIMart 的 "
+        "audio_urls 只收公网 URL）；不下载内容、不在本地存储副本。"
+    ),
+)
+async def register_external_file_api(
+    body: ExternalFileCreate,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[FileRead]:
+    obj = await register_external_file(
+        db,
+        url=body.url,
+        name=body.name,
+        file_type=body.type,
+        project_id=body.project_id,
+        chapter_id=body.chapter_id,
+        shot_id=body.shot_id,
+        usage_kind=body.usage_kind,
+        source_ref=body.source_ref,
+    )
+    return created_response(FileRead.model_validate(obj))
+
+
 @router.post(
     "/upload",
     response_model=ApiResponse[FileRead],
@@ -103,7 +147,8 @@ async def upload_file_api(
 
 @router.get(
     "/{file_id}/download",
-    summary="下载文件二进制内容",
+    summary="下载文件二进制内容（外链素材会 307 重定向到源地址）",
+    response_class=Response,
 )
 async def download_file_api(
     file_id: str,

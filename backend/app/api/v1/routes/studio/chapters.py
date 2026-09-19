@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +24,7 @@ from app.services.common import (
     require_entity,
 )
 from app.schemas.studio.projects import ChapterCreate, ChapterRead, ChapterUpdate
+from app.services.studio.chapter_asset_candidates import build_chapter_asset_candidates
 
 router = APIRouter()
 
@@ -144,6 +147,26 @@ async def update_chapter(
     patch_model(obj, update)
     await flush_and_refresh(db, obj)
     return success_response(ChapterRead.model_validate(obj))
+
+
+@router.get(
+    "/{chapter_id}/asset-candidates",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="集级资产清单（六步流程·步骤2：聚合提取候选 + 是否已有同名资产）",
+)
+async def get_chapter_asset_candidates(
+    chapter_id: str,
+    include_ignored: bool = Query(False, description="是否把已忽略的候选也计入"),
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[dict[str, Any]]:
+    """把一章内各镜头的提取候选按「类型 + 归一化名称」聚合成可确认的资产清单。
+
+    只聚合与提示，**不建资产、不写库**；每条会给出 ``recommendation``：
+    已有同名资产 → ``link_existing``（选用已有），否则 → ``create_new``（新建）。
+    """
+    return success_response(
+        await build_chapter_asset_candidates(db, chapter_id=chapter_id, include_ignored=include_ignored)
+    )
 
 
 @router.delete(

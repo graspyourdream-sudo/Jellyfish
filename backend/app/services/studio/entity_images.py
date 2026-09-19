@@ -9,7 +9,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.utils import apply_order, paginate
-from app.models.studio import CharacterImage
 from app.services.common import entity_not_found
 from app.services.studio.entity_specs import entity_spec, normalize_entity_type
 
@@ -65,10 +64,13 @@ async def create_entity_image(
     await db.flush()
     await db.refresh(obj)
 
-    if entity_type_norm == "character" and getattr(obj, "is_primary", False):
+    if getattr(obj, "is_primary", False):
+        # 同一资产至多一张定版主图：把其余行清掉。对所有资产类型生效
+        # （此前只对 character 生效，其他四类图片表当时还没有 is_primary 列）。
+        parent_field = getattr(spec.image_model, spec.id_field)
         stmt = (
-            CharacterImage.__table__.update()
-            .where(CharacterImage.character_id == entity_id, CharacterImage.id != obj.id)
+            spec.image_model.__table__.update()
+            .where(parent_field == entity_id, spec.image_model.id != obj.id)
             .values(is_primary=False)
         )
         await db.execute(stmt)
@@ -97,13 +99,16 @@ async def update_entity_image(
     await db.flush()
     await db.refresh(obj)
 
-    if entity_type_norm == "character" and update_data.get("is_primary") is True:
+    if update_data.get("is_primary") is True:
+        parent_field = getattr(spec.image_model, spec.id_field)
         stmt = (
-            CharacterImage.__table__.update()
-            .where(CharacterImage.character_id == entity_id, CharacterImage.id != obj.id)
+            spec.image_model.__table__.update()
+            .where(parent_field == entity_id, spec.image_model.id != obj.id)
             .values(is_primary=False)
         )
         await db.execute(stmt)
+        await db.refresh(obj)
+    elif update_data.get("is_primary") is False:
         await db.refresh(obj)
 
     return spec.image_read_model.model_validate(obj).model_dump()

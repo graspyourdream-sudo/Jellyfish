@@ -11,10 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.utils import apply_keyword_filter, apply_order, paginate
 from app.models.studio import Actor, Chapter, Costume, Project, Shot, ShotCharacterLink
 from app.schemas.studio.cast import ShotCharacterLinkCreate
+from app.services.studio.product_guardrails import validate_product_text_fields
 from app.services.common import entity_already_exists, entity_not_found
 from app.services.studio.entity_specs import DEFAULT_VIEW_ANGLES, LINK_MODEL_BY_ENTITY, entity_spec, normalize_entity_type
 from app.services.studio.entity_thumbnails import resolve_thumbnails
 from app.services.studio.shot_character_links import upsert as upsert_shot_character_link
+from app.services.studio.shot_extracted_candidates import mark_linked_by_name
 from app.utils.project_links import upsert_project_link
 
 ENTITY_ORDER_FIELDS = {"name", "style", "visual_style", "created_at", "updated_at"}
@@ -91,6 +93,8 @@ async def create_entity(
     spec = entity_spec(entity_type_norm)
     parsed = spec.create_model.model_validate(body)
     data = parsed.model_dump()
+    # 资产级图片提示词属于正式产物字段：禁止把演练占位文本写进去
+    validate_product_text_fields(data)
 
     link_project_id: str | None = None
     link_chapter_id: str | None = None
@@ -160,6 +164,19 @@ async def create_entity(
             shot_id=link_shot_id,
         )
 
+    if link_shot_id is not None and entity_type_norm in {"scene", "prop", "costume"}:
+        # 就地新建（带 shot_id）也要把提取候选回写为 linked：
+        # character 走 upsert_shot_character_link → 内部已回写；scene/prop/costume 走的是通用
+        # upsert_project_link（纯业务关联，不管候选），于是"新建并关联"之后候选仍是 pending，
+        # 镜头就永远 ready 不了。
+        await mark_linked_by_name(
+            db,
+            shot_id=link_shot_id,
+            candidate_type=entity_type_norm,
+            candidate_name=str(getattr(obj, "name", "") or ""),
+            linked_entity_id=str(obj.id),
+        )
+
     if entity_type_norm == "character" and link_shot_id is not None:
         existing_indexes_stmt = (
             select(ShotCharacterLink.index)
@@ -225,6 +242,8 @@ async def update_entity(
         raise HTTPException(status_code=404, detail=entity_not_found(spec.model.__name__))
 
     update_data = spec.update_model.model_validate(body).model_dump(exclude_unset=True)
+    # 资产级图片提示词属于正式产物字段：禁止把演练占位文本写进去
+    validate_product_text_fields(update_data)
     if entity_type_norm == "character":
         if "project_id" in update_data and await db.get(Project, update_data["project_id"]) is None:
             raise HTTPException(status_code=400, detail=entity_not_found("Project"))

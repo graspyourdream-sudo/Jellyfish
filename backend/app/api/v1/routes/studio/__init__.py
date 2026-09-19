@@ -6,9 +6,15 @@ from app.api.v1.routes.studio import (
     chapters,
     entities,
     files,
+    image_pipeline,
     image_tasks,
+    jurilu_import,
+    llm_orchestration,
     projects,
+    prompt_board,
+    prompt_delivery,
     prompts,
+    quick_skill,
     shots,
     timeline,
     shot_character_links,
@@ -31,4 +37,10 @@ router.include_router(files.router, prefix="/files", tags=["studio/files"])
 router.include_router(timeline.router, prefix="/timeline", tags=["studio/timeline"])
 router.include_router(image_tasks.router, prefix="/image-tasks", tags=["studio/image-tasks"])
 router.include_router(shot_character_links.router, prefix="/shot-character-links", tags=["studio/shot-character-links"])
+router.include_router(prompt_delivery.router, prefix="/prompt-delivery", tags=["studio/prompt-delivery"])
+router.include_router(prompt_board.router, prefix="/prompt-board", tags=["studio/prompt-board"])
+router.include_router(jurilu_import.router, prefix="/jurilu-import", tags=["studio/jurilu-import"])
+router.include_router(quick_skill.router, prefix="/quick-skill", tags=["studio/quick-skill"])
+router.include_router(llm_orchestration.router, prefix="/llm", tags=["studio/llm"])
+router.include_router(image_pipeline.router, prefix="/image-pipeline", tags=["studio/image-pipeline"])
 
