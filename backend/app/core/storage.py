@@ -80,7 +80,17 @@ def _build_s3_client():
         region_name=settings.s3_region_name,
         aws_access_key_id=settings.s3_access_key_id,
         aws_secret_access_key=settings.s3_secret_access_key,
-        config=BotoConfig(s3={"addressing_style": "virtual"}),
+        config=BotoConfig(
+            s3={"addressing_style": "virtual"},
+            # 兼容非 AWS 的 S3 实现（实测：阿里云 OSS）：
+            # botocore 新版默认对 PutObject 启用 aws-chunked 校验算法，会发
+            # ``STREAMING-UNSIGNED-PAYLOAD-TRAILER``；OSS 对该模式直接返回
+            # ``400 NotImplemented: Aws MultiChunkedEncoding STREAMING-UNSIGNED-PAYLOAD-TRAILER
+            # is not supported.`` —— 这不是权限问题（同一请求去掉该默认即 200）。
+            # ``when_required`` 是 AWS 对第三方 S3 兼容服务推荐的取值，对 AWS 自身无副作用。
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        ),
     )
     return client
 
