@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -137,3 +137,41 @@ class CharacterImageRead(AssetImageBase):
     model_config = ConfigDict(from_attributes=True)
 
     character_id: str
+
+
+class ProjectAssetReadinessItem(BaseModel):
+    """项目内一项资产的准备状态（四类资产同一口径，见 `project_asset_readiness`）。"""
+
+    asset_type: Literal["character", "scene", "prop", "costume"] = Field(..., description="资产类型")
+    asset_id: str = Field(..., description="资产 ID")
+    name: str = Field("", description="资产名称")
+    has_pending_candidate: bool = Field(
+        False, description="本项目内是否还有同类型同名的未确认提取候选"
+    )
+    has_image_prompt: bool = Field(False, description="是否已保存图片提示词（image_prompts 有非空槽位）")
+    has_image: bool = Field(False, description="是否已有图片（*_images 里有 file_id 非空的行）")
+    has_primary: bool = Field(False, description="是否已设为定版（上述行里有 is_primary）")
+    thumbnail: str = Field("", description="当前首选图地址（空串 = 还没有图）")
+    image_id: int | None = Field(None, description="当前首选图的行 ID（「设为定版」的默认目标）")
+
+
+class ProjectAssetReadinessSummary(BaseModel):
+    """顶部统计用的汇总（与逐项标志同一份数据算出来）。"""
+
+    total: int = Field(0, description="参与准备的资产总数")
+    asset_counts: dict[str, int] = Field(default_factory=dict, description="按类型分组的数量")
+    with_image_prompt: int = Field(0, description="已保存图片提示词的资产数")
+    with_image: int = Field(0, description="已有图片的资产数")
+    with_primary: int = Field(0, description="已定版的资产数")
+    done: int = Field(0, description="提示词 / 图片 / 定版齐全且无待确认候选的资产数")
+    all_done: bool = Field(False, description="是否所有资产都已定版")
+
+
+class ProjectAssetReadinessRead(BaseModel):
+    """项目资产准备清单。"""
+
+    project_id: str = Field(..., description="项目 ID")
+    items: list[ProjectAssetReadinessItem] = Field(default_factory=list, description="逐资产准备状态")
+    summary: ProjectAssetReadinessSummary = Field(
+        default_factory=ProjectAssetReadinessSummary, description="汇总"
+    )

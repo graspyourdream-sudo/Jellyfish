@@ -23,6 +23,13 @@ ENTITY_ORDER_FIELDS = {"name", "style", "visual_style", "created_at", "updated_a
 
 
 def _asset_read_payload(obj: Any, thumbnail: str) -> dict[str, Any]:
+    """场景/道具/服装/演员的读模型。
+
+    这里显式下发 `image_prompts`：角色（`character_read_payload`）本来就有这一列，
+    但资产类此前没有，导致「资产准备」的状态判定在场景/道具/服装上永远读不到
+    图片提示词（只能显示「无法判定」）。补上之后，四类资产的
+    `has_image_prompt / has_image / has_primary` 可以走**同一套数据源**。
+    """
     return {
         "id": obj.id,
         "name": obj.name,
@@ -33,6 +40,7 @@ def _asset_read_payload(obj: Any, thumbnail: str) -> dict[str, Any]:
         "style": obj.style,
         "visual_style": obj.visual_style,
         "thumbnail": thumbnail,
+        "image_prompts": dict(getattr(obj, "image_prompts", None) or {}),
     }
 
 

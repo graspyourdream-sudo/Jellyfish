@@ -32,6 +32,8 @@ from app.schemas.studio.projects import (
     ProjectUpdate,
     StyleOption,
 )
+from app.schemas.studio.assets import ProjectAssetReadinessRead
+from app.services.studio.project_asset_readiness import build_project_asset_readiness
 
 router = APIRouter()
 
@@ -199,6 +201,26 @@ async def get_project(
 ) -> ApiResponse[ProjectRead]:
     obj = await get_or_404(db, Project, project_id, detail=entity_not_found("Project"))
     return success_response(ProjectRead.model_validate(obj))
+
+
+@router.get(
+    "/{project_id}/asset-readiness",
+    response_model=ApiResponse[ProjectAssetReadinessRead],
+    summary="项目资产准备清单（角色/场景/道具/服装同一口径）",
+)
+async def get_project_asset_readiness(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[ProjectAssetReadinessRead]:
+    """第 2 步「资产准备」的**唯一数据源**。
+
+    资产表格、顶部统计与步骤判定都读这一份清单，不再各自去看
+    `project_scene_links` / `project_prop_links` 之类关联行的读模型里
+    是否**偶然**带了 `image_prompts` —— 那正是「保存了提示词仍显示待完善」的根因。
+    """
+    await get_or_404(db, Project, project_id, detail=entity_not_found("Project"))
+    payload = await build_project_asset_readiness(db, project_id=project_id)
+    return success_response(ProjectAssetReadinessRead.model_validate(payload))
 
 
 @router.patch(

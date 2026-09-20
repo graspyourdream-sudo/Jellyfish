@@ -72,6 +72,36 @@ export type AssetPrepInput = {
   hasPrimary?: boolean | null
 }
 
+/** 统一数据源（`asset-readiness`）里的一行——四类资产字段完全一致。 */
+export type AssetReadinessFlags = {
+  /** 本项目内还有同类型同名的未确认提取候选 */
+  has_pending_candidate: boolean
+  /** 已保存图片提示词 */
+  has_image_prompt: boolean
+  /** 已有图片（图片表里有 `file_id` 非空的行） */
+  has_image: boolean
+  /** 已设为定版 */
+  has_primary: boolean
+}
+
+/**
+ * 统一数据源 → 业务状态入参。
+ *
+ * **表格的每一行、顶部统计、步骤判定都走这一个映射**，避免三处各写一套判定
+ * （此前场景/道具/服装因为读不到 `image_prompts` 而永远停在「待完善提示词」）。
+ *
+ * `linked` 恒为 true：能出现在项目资产清单里的资产，本身就意味着已经进了项目。
+ */
+export function assetPrepInputFromReadiness(flags: AssetReadinessFlags): AssetPrepInput {
+  return {
+    linked: true,
+    hasPendingCandidate: flags.has_pending_candidate,
+    hasImagePrompt: flags.has_image_prompt,
+    hasImage: flags.has_image,
+    hasPrimary: flags.has_primary,
+  }
+}
+
 /** 单个资产的业务状态。 */
 export function resolveAssetPrepStatus(input: AssetPrepInput): AssetPrepStatusMeta {
   if (input.hasPendingCandidate) return ASSET_PREP_STATUSES.pending_candidate

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { StudioEntitiesService, StudioPromptDeliveryService, StudioShotLinksService, StudioShotsService } from '../../../../../services/generated'
+import { StudioPromptDeliveryService, StudioShotLinksService, StudioShotsService } from '../../../../../services/generated'
+import { fetchProjectAssetReadiness } from '../../../../../services/projectAssetReadiness'
 import type { ProjectStepInput } from '../projectSteps'
 import { collectPrimaryLookupTargets } from '../assetPrepStatus'
 
@@ -22,8 +23,6 @@ const LINK_PAGE_SIZE = 100
 const LINK_PAGE_LIMIT = 3
 /** 角色绑定抽样镜头数：`shot_character_links` 只有按镜头查询的接口，只能抽样。 */
 const BINDING_SAMPLE_LIMIT = 5
-/** 定版状态查询的并发批大小（数量不截断，只限制同时在飞的请求数）。 */
-const PRIMARY_LOOKUP_BATCH = 8
 
 export type ProjectSignalAssetType = 'character' | 'scene' | 'prop' | 'costume'
 
@@ -31,20 +30,18 @@ export type ProjectSignalAsset = {
   id: string
   name: string
   type: ProjectSignalAssetType
-  /** 已有参考图片（后端 thumbnail 非空即视为已有图） */
+  /** 已有参考图片（图片表里有 `file_id` 非空的行） */
   hasImage: boolean
   /** 定版/缩略图地址（空串 = 还没有图）；第 2 步「查看定版图」用它。 */
   thumbnail: string
-  /**
-   * 是否已设为定版（`*_images.is_primary`）。
-   * 现有列表载荷不暴露这一列，只能按资产逐个查图片表（有界、并发、失败置 null）。
-   * null = 无法判定 —— 业务状态会停在「待设为定版」，不会误报「已定版」。
-   */
-  hasPrimary: boolean | null
-  /** 该资产的第一张图片 id（用于「设为定版」这个唯一主操作）；null = 没有图片 */
-  firstImageId?: number | null
-  /** 已保存图片提示词；null = 本接口载荷没有暴露 `image_prompts`，无法判定 */
-  hasImagePrompt: boolean | null
+  /** 是否已设为定版（`*_images.is_primary`，且该行有 `file_id`） */
+  hasPrimary: boolean
+  /** 当前首选图的行 ID（用于「设为定版」这个唯一主操作）；null = 没有图片 */
+  imageId: number | null
+  /** 已保存图片提示词（实体 `image_prompts` 里有非空槽位） */
+  hasImagePrompt: boolean
+  /** 本项目内还有同类型同名的未确认提取候选 → 业务状态停在「待确认」 */
+  hasPendingCandidate: boolean
 }
 
 export type ProjectStepSignalDetail = {
@@ -106,16 +103,6 @@ function toText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
-function hasImagePromptField(item: Record<string, unknown>): boolean {
-  return Object.prototype.hasOwnProperty.call(item, 'image_prompts')
-}
-
-function imagePromptCount(item: Record<string, unknown>): number {
-  const prompts = item['image_prompts']
-  if (!prompts || typeof prompts !== 'object') return 0
-  return Object.values(prompts as Record<string, unknown>).filter((value) => toText(value) !== '').length
-}
-
 /**
  * 拉取某类实体与项目/章节/镜头的全部关联行（分页，最多 3 页）。
  * 返回 null 表示接口失败（调用方降级处理）。
@@ -147,12 +134,6 @@ async function fetchProjectLinkRows(
     page += 1
   }
   return rows
-}
-
-function linkAssetId(entityType: LinkEntityType, row: Record<string, unknown>): string {
-  if (entityType === 'scene') return toText(row.scene_id)
-  if (entityType === 'prop') return toText(row.prop_id)
-  return toText(row.costume_id)
 }
 
 const ASSET_TYPE_LABEL: Record<ProjectSignalAssetType, string> = {
@@ -243,113 +224,45 @@ export function useProjectStepSignals(args: {
       const focusChapterShotsWithPrompt = focusRows.filter((row) => toText(row.video_prompt) !== '').length
       const focusShotIds = new Set(focusRows.map((row) => toText(row.shot_id)).filter(Boolean))
 
-      // —— 项目资产：角色挂在实体 project_id 上，场景/道具/服装挂在 project_*_links 上 ——
-      const characterRes = await safeRequest(
-        StudioEntitiesService.listEntitiesApiV1StudioEntitiesEntityTypeGet({
-          entityType: 'character',
-          q: null,
-          page: 1,
-          pageSize: 100,
-        }),
-      )
-      if (!characterRes) failedSources.push('角色列表接口')
+      // —— 项目资产：**唯一数据源** ——
+      // 一次 `asset-readiness` 拿到角色/场景/道具/服装的同一组标志
+      // （待确认候选 / 提示词 / 图片 / 定版），不再按资产逐个查详情与图片表，
+      // 也不再看关联行是否**偶然**带了 `image_prompts`。
+      const readinessRes = await safeRequest(fetchProjectAssetReadiness(projectId))
+      if (!readinessRes) failedSources.push('项目资产准备接口（资产 / 提示词 / 图片 / 定版状态）')
 
-      const characterItems = ((characterRes?.data?.items ?? []) as Record<string, unknown>[]).filter(
-        (item) => toText(item.project_id) === projectId,
+      const nextAssets: ProjectSignalAsset[] = collectPrimaryLookupTargets(
+        (readinessRes?.items ?? []).map((item) => ({
+          id: item.asset_id,
+          name: item.name || item.asset_id,
+          type: item.asset_type,
+          hasImage: item.has_image === true,
+          thumbnail: item.thumbnail ?? '',
+          hasPrimary: item.has_primary === true,
+          imageId: typeof item.image_id === 'number' ? item.image_id : null,
+          hasImagePrompt: item.has_image_prompt === true,
+          hasPendingCandidate: item.has_pending_candidate === true,
+        })),
       )
 
+      // —— 关联行只用于「镜头级关联」判定（`shot_id` 非空的行）——
+      // 资产清单本身已经由上面的准备接口给出，这里不再从关联行拼资产。
       const linkResults = await Promise.all(
         LINK_ENTITY_TYPES.map(async (entityType) => {
           const rows = await safeRequest(fetchProjectLinkRows(entityType, projectId))
           if (!rows) failedSources.push(`${ASSET_TYPE_LABEL[entityType]}关联接口`)
-          return [entityType, rows ?? []] as const
+          return rows ?? []
         }),
       )
 
-      const nextAssets: ProjectSignalAsset[] = []
-      let promptFieldExposed = false
-
-      characterItems.forEach((item) => {
-        const id = toText(item.id)
-        if (!id) return
-        const exposed = hasImagePromptField(item)
-        if (exposed) promptFieldExposed = true
-        nextAssets.push({
-          id,
-          name: toText(item.name) || id,
-          type: 'character',
-          hasImage: toText(item.thumbnail) !== '',
-          thumbnail: toText(item.thumbnail),
-          hasPrimary: null,
-          firstImageId: null,
-          hasImagePrompt: exposed ? imagePromptCount(item) > 0 : null,
-        })
-      })
-
       /** 镜头级关联（用于「关联绑定」判定）：shot_id 非空的行 */
       const shotIdsWithLinks = new Set<string>()
-
-      linkResults.forEach(([entityType, rows]) => {
-        const seen = new Set<string>()
+      linkResults.forEach((rows) => {
         rows.forEach((row) => {
           const shotId = toText(row.shot_id)
           if (shotId) shotIdsWithLinks.add(shotId)
-          // 资产口径：不论关联行挂在哪一层（项目级 shot_id 为空 / 镜头级），
-          // 只要被本项目引用过就算「项目已有该资产」，否则迁移项目会被误判成「还没提取资产」。
-          const assetId = linkAssetId(entityType, row)
-          if (!assetId || seen.has(assetId)) return
-          seen.add(assetId)
-          const exposed = hasImagePromptField(row)
-          if (exposed) promptFieldExposed = true
-          nextAssets.push({
-            id: assetId,
-            name: toText(row.name) || assetId,
-            type: entityType,
-            hasImage: toText(row.thumbnail) !== '',
-            thumbnail: toText(row.thumbnail),
-            hasPrimary: null,
-            firstImageId: null,
-            hasImagePrompt: exposed ? imagePromptCount(row) > 0 : null,
-          })
         })
       })
-
-      // —— 定版状态：现有列表载荷没有 is_primary，只能按资产查图片表 ——
-      // **覆盖范围内的每一个资产**（不截断，收口要求），分批并发控制请求量；
-      // 拿不到就是 null（业务状态不会跳到「已定版」，也不会阻塞步骤判定）。
-      const primaryLookupTargets = collectPrimaryLookupTargets(nextAssets)
-      let anyPrimaryLookupFailed = false
-      for (let start = 0; start < primaryLookupTargets.length; start += PRIMARY_LOOKUP_BATCH) {
-        const batch = primaryLookupTargets.slice(start, start + PRIMARY_LOOKUP_BATCH)
-        const imageRows = await Promise.all(
-          batch.map((asset) =>
-            safeRequest(
-              StudioEntitiesService.listEntityImagesApiV1StudioEntitiesEntityTypeEntityIdImagesGet({
-                entityType: asset.type,
-                entityId: asset.id,
-                page: 1,
-                pageSize: 20,
-                order: null,
-                isDesc: false,
-              }),
-            ),
-          ),
-        )
-        imageRows.forEach((res, index) => {
-          const asset = batch[index]
-          if (!res) {
-            anyPrimaryLookupFailed = true
-            return
-          }
-          const rows = (res.data?.items ?? []) as Record<string, unknown>[]
-          asset.hasPrimary = rows.some((row) => row.is_primary === true)
-          // 记下第一张图片 id：资产准备面板的「设为定版」直接用它是唯一主操作
-          const first = rows[0]
-          asset.firstImageId = typeof first?.id === 'number' ? first.id : null
-          if (rows.length > 0) asset.hasImage = true
-        })
-      }
-      if (anyPrimaryLookupFailed) failedSources.push('资产图片表接口（定版状态）')
 
       const assetCounts = {
         characters: nextAssets.filter((asset) => asset.type === 'character').length,
@@ -358,14 +271,13 @@ export function useProjectStepSignals(args: {
         costumes: nextAssets.filter((asset) => asset.type === 'costume').length,
       }
       const assetImageCount = nextAssets.filter((asset) => asset.hasImage).length
-      // 定版数量：只有真查过（非 null）才算，且不把「拿不到」当成「没有」
-      // 只要**有任何一个**资产的定版状态查到了，就按「全部资产」算数量；
-      // 拿不到的资产自然不计入已定版，不会出现虚假的「已就绪」。
-      const assetsWithPrimaryCount = primaryLookupTargets.some((asset) => asset.hasPrimary !== null)
-        ? nextAssets.filter((asset) => asset.hasPrimary === true).length
+      // 定版 / 提示词数量：准备接口成功返回才算（失败时保持 null，不冒充实数）
+      const readinessOk = readinessRes !== null
+      const assetsWithPrimaryCount = readinessOk
+        ? nextAssets.filter((asset) => asset.hasPrimary).length
         : null
-      const assetsWithImagePromptCount = promptFieldExposed
-        ? nextAssets.filter((asset) => asset.hasImagePrompt === true).length
+      const assetsWithImagePromptCount = readinessOk
+        ? nextAssets.filter((asset) => asset.hasImagePrompt).length
         : null
 
       // —— 角色绑定：后端只有按镜头查询的 shot_character_links，

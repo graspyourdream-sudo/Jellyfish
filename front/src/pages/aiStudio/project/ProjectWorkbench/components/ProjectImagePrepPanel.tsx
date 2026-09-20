@@ -47,13 +47,11 @@ import { classifyGenerationFailure, failureText } from '../../../components/gene
 import { StudioEntitiesService } from '../../../../../services/generated'
 import {
   ASSET_PREP_STATUSES,
+  assetPrepInputFromReadiness,
   describeAssetPrepSummary,
   resolveAssetPrepStatus,
   summarizeAssetPrep,
 } from '../assetPrepStatus'
-
-/** 待准备资产最多补抓多少个名称（场景/道具/服装的关联行只有 id，没有 name）。 */
-const NAME_LOOKUP_LIMIT = 20
 
 /** 提示词来源的展示口径（与后端 `prompt_source` 一一对应）。 */
 const PROMPT_SOURCE_META: Record<string, { label: string; color: string; hint: string }> = {
@@ -136,38 +134,35 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
     navigate(`/assets/${segment}/${asset.id}/edit${separator}returnTo=${returnTo}${options?.generate ? '&generate=1' : ''}`)
   }
 
-  /** 每行资产的业务状态（纯计算，不落库） */
-  const statusByAsset = useMemo(() => {
-    const map = new Map<string, ReturnType<typeof resolveAssetPrepStatus>>()
-    for (const asset of assets) {
-      map.set(
-        assetKey(asset),
-        resolveAssetPrepStatus({
-          linked: true, // 能出现在项目资产清单里就说明已进项目
-          hasImagePrompt: asset.hasImagePrompt,
-          hasImage: asset.hasImage,
-          hasPrimary: asset.hasPrimary,
-        }),
-      )
-    }
-    return map
-  }, [assets])
-
-  const prepSummary = useMemo(
+  /**
+   * 每行资产的业务状态与顶部统计**共用同一个映射**
+   * （`assetPrepInputFromReadiness` ← 统一数据源 `asset-readiness`）。
+   */
+  const prepInputs = useMemo(
     () =>
-      summarizeAssetPrep(
-        assets.map((asset) => ({
-          linked: true,
-          hasImagePrompt: asset.hasImagePrompt,
-          hasImage: asset.hasImage,
-          hasPrimary: asset.hasPrimary,
-        })),
+      assets.map((asset) =>
+        assetPrepInputFromReadiness({
+          has_pending_candidate: asset.hasPendingCandidate,
+          has_image_prompt: asset.hasImagePrompt,
+          has_image: asset.hasImage,
+          has_primary: asset.hasPrimary,
+        }),
       ),
     [assets],
   )
 
+  const statusByAsset = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof resolveAssetPrepStatus>>()
+    assets.forEach((asset, index) => {
+      map.set(assetKey(asset), resolveAssetPrepStatus(prepInputs[index]))
+    })
+    return map
+  }, [assets, prepInputs])
+
+  const prepSummary = useMemo(() => summarizeAssetPrep(prepInputs), [prepInputs])
+
   const pending = useMemo(
-    () => assets.filter((asset) => !asset.hasImage || asset.hasImagePrompt === false),
+    () => assets.filter((asset) => asset.hasPendingCandidate || !asset.hasImage || !asset.hasImagePrompt),
     [assets],
   )
 
@@ -193,9 +188,10 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
   /**
    * 「设为定版」：每个资产只有**唯一主操作**——把该资产已有图片里的一张设为 `is_primary`。
    * 复用既有的实体图片 PATCH 接口，不新建链路、不复制文件。
+   * 目标图片 ID 由统一数据源（`asset-readiness`）给出：它同时是缩略图用的那张。
    */
   const handleSetPrimary = async (asset: ProjectSignalAsset) => {
-    const imageId = asset.firstImageId
+    const imageId = asset.imageId
     if (!imageId) {
       message.warning('该资产还没有图片，请先上传或生成图片')
       return
@@ -370,45 +366,10 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
   }, [editorAsset, editorDraft, loadPlan, onReload])
 
   /**
-   * 场景/道具/服装的关联行只带 id（没有 name），表格直接显示 id 不可读。
-   * 这里只对「待准备」的资产补抓名称（最多 20 个，失败回退 id），
-   * 与现有 ScenesTab/PropsTab 的补详情方式一致。
+   * 表格里的资产名直接来自统一数据源（`asset-readiness`）：
+   * 四类资产都带 `name`，不再需要为场景/道具/服装补抓一次详情。
    */
-  const [nameById, setNameById] = useState<Record<string, string>>({})
-  const pendingKey = pending.map(assetKey).join('|')
-
-  useEffect(() => {
-    const targets = pending
-      .filter((asset) => asset.type !== 'character' && !nameById[assetKey(asset)])
-      .slice(0, NAME_LOOKUP_LIMIT)
-    if (targets.length === 0) return
-    let cancelled = false
-    void (async () => {
-      const entries = await Promise.all(
-        targets.map(async (asset) => {
-          try {
-            const res = await StudioEntitiesApi.get(asset.type, asset.id)
-            const name = (res.data as { name?: string } | null)?.name
-            return [assetKey(asset), typeof name === 'string' ? name.trim() : ''] as const
-          } catch {
-            return [assetKey(asset), ''] as const
-          }
-        }),
-      )
-      if (cancelled) return
-      setNameById((prev) => ({
-        ...prev,
-        ...Object.fromEntries(entries.filter(([, name]) => name !== '')),
-      }))
-    })()
-    return () => {
-      cancelled = true
-    }
-    // nameById 只用于「是否已抓过」，不参与依赖，避免重复请求。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingKey])
-
-  const displayName = (asset: ProjectSignalAsset) => nameById[assetKey(asset)] || asset.name || asset.id
+  const displayName = (asset: ProjectSignalAsset) => asset.name || asset.id
 
   const orderedAssets = useMemo(() => {
     const rest = assets.filter((asset) => !pending.includes(asset))
@@ -468,17 +429,8 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
       title: '图片提示词',
       key: 'prompt',
       width: 130,
-      render: (_, record) => {
-        if (record.hasImagePrompt === null) {
-          return (
-            <Tooltip title="当前接口载荷没有暴露 image_prompts，无法判定，请在资产编辑页确认">
-              <Tag bordered={false} className="text-gray-500">
-                无法判定
-              </Tag>
-            </Tooltip>
-          )
-        }
-        return record.hasImagePrompt ? (
+      render: (_, record) =>
+        record.hasImagePrompt ? (
           <Tag color="green" bordered={false}>
             已保存
           </Tag>
@@ -486,8 +438,7 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
           <Tag color="gold" bordered={false}>
             待生成
           </Tag>
-        )
-      },
+        ),
     },
     {
       title: '定版图',
@@ -562,7 +513,7 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
                   { key: 'edit', label: '编辑资产', onClick: () => openAssetEditor(record) },
                   { key: 'prompt', label: '填/改图片提示词', onClick: () => void openPromptEditor(record) },
                   { key: 'generate', label: '进入出图确认', onClick: () => openAssetEditor(record, { generate: true }) },
-                  { key: 'primary', label: '设为定版', disabled: !record.firstImageId, onClick: () => void handleSetPrimary(record) },
+                  { key: 'primary', label: '设为定版', disabled: !record.imageId, onClick: () => void handleSetPrimary(record) },
                 ],
               }}
             >
