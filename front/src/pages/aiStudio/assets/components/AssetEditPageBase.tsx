@@ -41,6 +41,7 @@ import {
 } from '../../../../services/llmPipelineApi'
 import { listTaskLinksNormalized } from '../../../../services/filmTaskLinks'
 import { buildFileDownloadUrl } from '../utils'
+import { ASSET_OUTCOME_TAG_COLOR, normalizeAssetResultRow, summarizeAssetResults } from '../assetResultSummary'
 import { DisplayImageCard } from './DisplayImageCard'
 import { ProjectVisualStyleAndStyleFields } from '../../project/ProjectVisualStyleAndStyleFields'
 import { useProjectStyleOptions } from '../../project/useProjectStyleOptions'
@@ -161,6 +162,9 @@ function supportsImageServiceAssetType(entityType: AssetEntityType | null): bool
   return !!entityType && IMAGE_SERVICE_ASSET_TYPES.includes(entityType)
 }
 
+/* 出图结果口径 → Tag 颜色 / 演练徽标等，统一在 `../assetResultSummary` 里，
+   llmPipeline 页复用同一套口径，这里不再重复定义。 */
+
 type ReferenceBatchSubmitResult = Awaited<ReturnType<typeof submitImagePlan>>
 
 function normalizeTags(input: string): string[] {
@@ -247,7 +251,18 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     { imageId: number | null; images: string[] },
     { prompt: string; images: string[] },
     /** 提交结果：P3 内联出图会连地址一起回来，便于立刻采纳/设版 */
-    { taskId: string | null; url: string; dryRun: boolean; status: string; message: string }
+    {
+      taskId: string | null
+      url: string
+      dryRun: boolean
+      status: string
+      message: string
+      /** 原始结果行：`ok` / `outcome` / `detail.error_message` 等字段一律留着，
+       *  交给 `assetResultSummary` 做防御性归一化（新字段有就用，没有就回退）。 */
+      row: unknown
+      /** 本次响应的汇总对象（可能同时含新旧字段），用于「成功 X / 失败 Y」 */
+      roundSummary: unknown
+    }
   >({
     initialBase: { prompt: '' },
     initialContext: { imageId: null, images: [] },
@@ -296,6 +311,10 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         dryRun: Boolean(data?.summary?.dry_run),
         status: row?.status ?? '',
         message: row?.message ?? '',
+        // 原始行与汇总都带上：页面要如实显示 partial_failed（图片已生成但 OSS 上传失败），
+        // 不能只靠 status 一个字符串，也不能丢掉 detail.error_message。
+        row: row ?? null,
+        roundSummary: data?.summary ?? null,
       }
     },
   })
@@ -342,8 +361,17 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   // 垫图批量出图
   const [referenceBatchLoading, setReferenceBatchLoading] = useState(false)
   const [referenceBatchOpen, setReferenceBatchOpen] = useState(false)
-  /** 单张生成的结果（P3 内联出图返回的地址），用于"采纳 / 采纳并设版" */
-  const [singleGenResult, setSingleGenResult] = useState<{ url: string; prompt: string; status: string } | null>(null)
+  /** 单张生成的结果（P3 内联出图返回的地址），用于"采纳 / 采纳并设版"。
+   *  这里同时保留原始结果行与汇总：`partial_failed` 这类「图片已生成但 OSS 上传失败」的结果
+   *  必须能显示真实失败原因，而不是被当成绿色成功。 */
+  const [singleGenResult, setSingleGenResult] = useState<{
+    url: string
+    prompt: string
+    status: string
+    message: string
+    row: unknown
+    roundSummary: unknown
+  } | null>(null)
   const [singleGenAdopting, setSingleGenAdopting] = useState<'' | 'slot' | 'primary'>('')
   const [referenceBatchResult, setReferenceBatchResult] = useState<ReferenceBatchSubmitResult | null>(null)
   // 断点③：把生成结果采纳进资产槽位（落库，刷新后仍在）
@@ -708,17 +736,36 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         return
       }
       const url = String(submitted?.url ?? '').trim()
-      if (!url) {
-        // 不再输出 status=unknown 这种空话：有后端 message 就用它，没有就把后端状态原样带上。
+      // 出图结果一律走同一套口径：`partial_failed`（图片已生成、但出图服务的 OSS 上传失败）
+      // 既不是成功也不能被吞掉，必须带着真实原因和「成功 X / 失败 Y」显示出来。
+      const roundSummary = summarizeAssetResults(submitted?.row ? [submitted.row] : [], {
+        summary: submitted?.roundSummary,
+        dryRun: submitted?.dryRun,
+      })
+      if (!url && !roundSummary.hasFailure) {
+        // 既没有可采纳地址、也没有任何失败证据（例如后端什么都没返回）：
+        // 不再输出 status=unknown 这种空话，有后端 message 就用它，没有就把后端状态原样带上。
         message.error(
           submitted?.message ||
             `出图没有返回可用图片地址（后端返回状态：${submitted?.status || '未提供'}）`,
         )
         return
       }
-      setSingleGenResult({ url, prompt, status: String(submitted?.status ?? '') })
+      setSingleGenResult({
+        url,
+        prompt,
+        status: String(submitted?.status ?? ''),
+        message: String(submitted?.message ?? ''),
+        row: submitted?.row ?? null,
+        roundSummary: submitted?.roundSummary ?? null,
+      })
       setPromptPreviewOpen(false)
       setPromptPreviewImage(null)
+      if (!url) {
+        // 部分失败 / 失败：只弹一句 toast 会让用户看不到原因和计数，
+        // 所以这里仍然打开结果弹窗（采纳按钮会被禁用），提示用户去看详情。
+        message.warning('本次出图没有拿到可采纳的图片地址，真实原因见弹出的结果窗口。')
+      }
     } catch (error) {
       // 真实原因照原样显示：缺项目作用域 / 被 DRY_RUN 拦住 / 参数缺失 / 服务错误都能一眼看出。
       const failure = classifyGenerationFailure(error, 'image')
@@ -1138,6 +1185,57 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   const referenceBatchResults = referenceBatchResult?.results ?? []
   const referenceBatchWarnings = referenceBatchResult?.warnings ?? []
   const referenceBatchDryRun = referenceBatchResults.some((row) => row.dry_run)
+
+  /**
+   * 单张生成结果的统一口径（成功 X / 失败 Y、真实失败原因、下一步、Alert 类型）。
+   *
+   * `partial_failed`（图片已生成、但出图服务 OSS 上传失败）在这里被归到失败档，
+   * 绝不会再拿到 `type="success"`。
+   * `row` 缺失时用页面已存的字段兜底造一行，保证不会退化成「没有出图结果」。
+   */
+  const singleGenSummary = useMemo(
+    () =>
+      summarizeAssetResults(
+        singleGenResult
+          ? [
+              singleGenResult.row ?? {
+                status: singleGenResult.status,
+                message: singleGenResult.message,
+                url: singleGenResult.url,
+              },
+            ]
+          : [],
+        { summary: singleGenResult?.roundSummary },
+      ),
+    [singleGenResult],
+  )
+
+  /**
+   * 单张结果弹窗的行文案：除计数 / 原因 / 下一步之外，成功时补一句「采纳会做什么」，
+   * 免得用户在成功场景下看不到采纳说明。
+   */
+  const singleGenAlertLines = useMemo(() => {
+    const adoptHint =
+      '采纳会把图片下载入库并写进资产图片槽位（刷新后仍在）；设为定版后，后续出图会用它当垫图、镜头也会读到它。'
+    if (singleGenSummary.detailLines.length === 0) return [adoptHint]
+    return singleGenSummary.allSucceeded ? [...singleGenSummary.detailLines, adoptHint] : singleGenSummary.detailLines
+  }, [singleGenSummary])
+
+  /**
+   * 批量出图结果的统一口径。新字段（`ok_count` / `failed_count` / `oss_ready_count` /
+   * 归一化 `outcome`）有就用；没有就逐级回退到旧形状（`by_status` → `oss_ready` →
+   * `results` 逐行 → `total`），任何一种形状都不会白屏。
+   */
+  const referenceBatchSummary = useMemo(
+    () =>
+      summarizeAssetResults(referenceBatchResult?.results ?? [], {
+        summary: referenceBatchResult?.summary,
+        payload: referenceBatchResult,
+        dryRun: (referenceBatchResult?.results ?? []).some((row) => row.dry_run),
+      }),
+    [referenceBatchResult],
+  )
+
   const referenceBatchSupported = supportsImageServiceAssetType(assetNavigateRelationType)
   const hasPrimaryImage = images.some((img) => img.is_primary === true)
   const referenceBatchTooltip = referenceBatchSupported
@@ -1736,27 +1834,97 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         footer={
           <Space>
             <Button onClick={() => setSingleGenResult(null)}>关闭</Button>
-            <Button loading={singleGenAdopting === 'slot'} onClick={() => void adoptSingleGenResult(false)}>
-              采纳到该槽位
-            </Button>
-            <Button type="primary" loading={singleGenAdopting === 'primary'} onClick={() => void adoptSingleGenResult(true)}>
-              采纳并设为定版
-            </Button>
+            {/* 没有可采纳地址（失败 / partial_failed）时禁用采纳，避免点了才发现没图 */}
+            <Tooltip
+              title={
+                singleGenResult?.url
+                  ? '把这张图下载入库并写进资产图片槽位'
+                  : '这条结果没有可采纳的图片地址，无法采纳入库'
+              }
+            >
+              <Button
+                disabled={!singleGenResult?.url}
+                loading={singleGenAdopting === 'slot'}
+                onClick={() => void adoptSingleGenResult(false)}
+              >
+                采纳到该槽位
+              </Button>
+            </Tooltip>
+            <Tooltip
+              title={
+                singleGenResult?.url
+                  ? '采纳的同时设为定版（后续出图会用它当垫图）'
+                  : '这条结果没有可采纳的图片地址，无法采纳入库'
+              }
+            >
+              <Button
+                type="primary"
+                disabled={!singleGenResult?.url}
+                loading={singleGenAdopting === 'primary'}
+                onClick={() => void adoptSingleGenResult(true)}
+              >
+                采纳并设为定版
+              </Button>
+            </Tooltip>
           </Space>
         }
         destroyOnClose
         width={720}
       >
         <div className="space-y-3">
+          {/*
+            这里以前是无条件 `type="success"`：出图服务在上游图片已生成、但它自己 OSS 上传失败时
+            返回 `partial_failed`，页面照样显示绿色「出图完成」，还把真实错误消息丢了 ——
+            用户以为成功了，其实图根本没进 OSS、采纳不了。
+            现在类型、标题、计数（成功 X / 失败 Y）、真实原因、下一步全部由
+            `summarizeAssetResults` 决定：部分失败 = warning，全失败 = error，绝不给绿色。
+          */}
           <Alert
-            type="success"
+            type={singleGenSummary.alertType}
             showIcon
-            message={`出图完成（${singleGenResult?.status || 'unknown'}）`}
-            description="采纳会把图片下载入库并写进资产图片槽位（刷新后仍在）；设为定版后，后续出图会用它当垫图、镜头也会读到它。"
+            message={
+              singleGenResult?.status
+                ? `${singleGenSummary.title}｜后端状态：${singleGenResult.status}`
+                : singleGenSummary.title
+            }
+            description={
+              <div className="space-y-1">
+                {singleGenAlertLines.map((line, idx) => (
+                  <div
+                    key={`${idx}_${line}`}
+                    className={
+                      singleGenSummary.hasFailure && line.startsWith('失败原因：') ? 'text-red-600' : undefined
+                    }
+                  >
+                    {line}
+                  </div>
+                ))}
+                {singleGenSummary.hasFailure && singleGenResult?.url ? (
+                  <div className="text-red-600">
+                    注意：这条结果带地址但状态不是成功，采纳前请先确认该地址是否为 OSS 长期地址。
+                  </div>
+                ) : null}
+              </div>
+            }
           />
+          {singleGenSummary.hasFailure && !singleGenSummary.hasUpstreamError ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="上游没有给出失败原因"
+              description="接口只返回了失败状态，没有附带 message / detail.error_message；可让后端补充错误详情，或直接查出图服务日志。"
+            />
+          ) : null}
           {singleGenResult?.url ? (
             <img src={singleGenResult.url} alt="" style={{ width: '100%', borderRadius: 8, border: '1px solid #e2e8f0' }} />
-          ) : null}
+          ) : (
+            <Alert
+              type="info"
+              showIcon
+              message="没有可采纳的图片地址"
+              description="OSS 地址为空时无法采纳入库；若上游图片其实已生成（partial_failed），需要先让出图服务把图成功上传到 OSS，或按上面的提示重试上传。"
+            />
+          )}
           <div className="text-[11px] text-gray-500 break-all">{singleGenResult?.url}</div>
           <div className="rounded bg-slate-50 px-3 py-2 text-[11px] leading-5 text-gray-600">
             <div className="font-medium">本次使用的提示词</div>
@@ -1782,6 +1950,51 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             ) : null}
             <span className="ml-3">守卫状态：{referenceBatchResult?.guard_status || '未知'}</span>
           </div>
+          {/*
+            结果汇总：以前只显示「共 N 个提交结果」，既看不出成功几条 / 失败几条，
+            也把 `partial_failed`（上游图片已生成、OSS 上传失败）混在列表里当正常状态。
+            现在按统一口径给出「成功 X / 失败 Y」和真实失败原因；样式随口径变化，
+            部分失败 = warning、全失败 = error，绝不给绿色成功。
+          */}
+          {referenceBatchSummary.total > 0 || referenceBatchSummary.hasFailure ? (
+            <Alert
+              type={referenceBatchSummary.alertType}
+              showIcon
+              message={referenceBatchSummary.title}
+              description={
+                referenceBatchSummary.detailLines.length > 0 ? (
+                  <div className="space-y-1">
+                    {referenceBatchSummary.detailLines.map((line, idx) => (
+                      <div
+                        key={`${idx}_${line}`}
+                        className={
+                          referenceBatchSummary.hasFailure && line.startsWith('失败原因：')
+                            ? 'text-red-600'
+                            : undefined
+                        }
+                      >
+                        {line}
+                      </div>
+                    ))}
+                  </div>
+                ) : undefined
+              }
+            />
+          ) : null}
+          {referenceBatchSummary.countsKnown && referenceBatchSummary.total > 0 ? (
+            <div className="text-sm">
+              <span className="font-medium">成功 {referenceBatchSummary.okCount} 条</span>
+              <span className="mx-2 text-gray-300">/</span>
+              <span className="font-medium">失败 {referenceBatchSummary.failedCount} 条</span>
+              <span className="ml-3 text-xs text-gray-500">
+                （共 {referenceBatchSummary.total} 条，OSS 长期地址就绪 {referenceBatchSummary.ossReadyCount} 条，
+                计数来源：{referenceBatchSummary.countSource}）
+              </span>
+              {referenceBatchSummary.mismatchNote ? (
+                <div className="text-xs text-orange-600">{referenceBatchSummary.mismatchNote}</div>
+              ) : null}
+            </div>
+          ) : null}
           {referenceBatchDryRun ? (
             <Alert
               type="warning"
@@ -1808,57 +2021,78 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             <Empty description="没有返回任何提交结果" />
           ) : (
             <div className="space-y-3">
-              <div className="text-sm text-gray-600">共 {referenceBatchResults.length} 个提交结果：</div>
-              {referenceBatchResults.map((row) => (
-                <div
-                  key={`${row.source_asset_id}_${row.service_task_id}`}
-                  className="rounded-md border border-gray-200 p-3 space-y-1 text-sm"
-                >
-                  <div>
-                    service_task_id：
-                    <span className="font-mono">{row.service_task_id || '（空）'}</span>
-                  </div>
-                  <div>
-                    status：
-                    <Tag color={row.status === 'succeeded' ? 'green' : row.status === 'dry_run' ? 'orange' : 'blue'}>
-                      {row.status || '未知'}
-                    </Tag>
-                    <span className="text-xs text-gray-400">{row.source_asset_id}</span>
-                  </div>
-                  <div>
-                    oss_url：
-                    {row.oss_url ? (
-                      <a href={row.oss_url} target="_blank" rel="noreferrer">
-                        {row.oss_url}
-                      </a>
-                    ) : (
-                      <span className="text-gray-400">
-                        （{row.dry_run ? 'DRY_RUN 下为空，未上传 OSS' : '未返回'}）
-                      </span>
-                    )}
-                  </div>
-                  {row.message ? <div className="text-xs text-gray-500">{row.message}</div> : null}
-                  <div className="pt-1">
-                    <Tooltip
-                      title={
-                        adoptableUrl(row)
-                          ? '下载入库并写入资产图片槽位（同时设为定版）'
-                          : 'DRY_RUN 下没有真实图片地址，无法采纳'
-                      }
-                    >
-                      <Button
-                        size="small"
-                        type="primary"
-                        disabled={!adoptableUrl(row)}
-                        loading={adoptingKey === `${row.source_asset_id}_${row.service_task_id}`}
-                        onClick={() => void handleAdoptResult(row)}
+              <div className="text-sm text-gray-600">
+                共 {referenceBatchResults.length} 个提交结果
+                {referenceBatchSummary.countsText ? `（${referenceBatchSummary.countsText}）` : ''}：
+              </div>
+              {referenceBatchResults.map((row) => {
+                // 逐行也走同一套归一化：partial_failed 在这里同样不是绿色，
+                // 而且会尽量把 detail.error_message 里的真实原因显示出来。
+                const normalized = normalizeAssetResultRow(row as unknown)
+                return (
+                  <div
+                    key={`${row.source_asset_id}_${row.service_task_id}`}
+                    className="rounded-md border border-gray-200 p-3 space-y-1 text-sm"
+                  >
+                    <div>
+                      service_task_id：
+                      <span className="font-mono">{row.service_task_id || '（空）'}</span>
+                    </div>
+                    <div>
+                      status：
+                      <Tag color={ASSET_OUTCOME_TAG_COLOR[normalized.outcome]}>{normalized.rawStatus || '未知'}</Tag>
+                      {normalized.outcome === 'partial_failed' ? (
+                        <span className="text-xs text-orange-600">部分失败：图片已生成，但 OSS 上传未完成</span>
+                      ) : null}
+                      <span className="text-xs text-gray-400">{row.source_asset_id}</span>
+                    </div>
+                    <div>
+                      oss_url：
+                      {row.oss_url ? (
+                        <a href={row.oss_url} target="_blank" rel="noreferrer">
+                          {row.oss_url}
+                        </a>
+                      ) : (
+                        <span className="text-gray-400">
+                          （
+                          {row.dry_run
+                            ? 'DRY_RUN 下为空，未上传 OSS'
+                            : normalized.url
+                              ? `未上传 OSS；上游图片地址：${normalized.url}`
+                              : '未返回'}
+                          ）
+                        </span>
+                      )}
+                    </div>
+                    {normalized.errorText ? (
+                      <div className={normalized.isFailure ? 'text-xs text-red-500' : 'text-xs text-gray-500'}>
+                        {normalized.isFailure ? `失败原因：${normalized.errorText}` : normalized.errorText}
+                      </div>
+                    ) : null}
+                    <div className="pt-1">
+                      <Tooltip
+                        title={
+                          adoptableUrl(row)
+                            ? '下载入库并写入资产图片槽位（同时设为定版）'
+                            : normalized.isFailure
+                              ? '这条结果没有可采纳的图片地址（未成功上传 OSS），无法采纳入库'
+                              : 'DRY_RUN 下没有真实图片地址，无法采纳'
+                        }
                       >
-                        采纳到资产
-                      </Button>
-                    </Tooltip>
+                        <Button
+                          size="small"
+                          type="primary"
+                          disabled={!adoptableUrl(row)}
+                          loading={adoptingKey === `${row.source_asset_id}_${row.service_task_id}`}
+                          onClick={() => void handleAdoptResult(row)}
+                        >
+                          采纳到资产
+                        </Button>
+                      </Tooltip>
+                    </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
           <Alert

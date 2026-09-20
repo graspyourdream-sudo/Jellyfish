@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Button,
@@ -17,6 +17,16 @@ import {
   message,
 } from 'antd'
 import { OpenAPI } from '../../../services/generated'
+import {
+  ASSET_OUTCOME_LABEL,
+  ASSET_OUTCOME_TAG_COLOR,
+  coerceLooseBoolean,
+  describeDryRunBadge,
+  normalizeAssetResultRow,
+  readLooseBoolean,
+  summarizeAssetResults,
+  summarizeSingleAssetResult,
+} from '../assets/assetResultSummary'
 
 /**
  * LLM 编排 / 资产绑定 / 出图管线 的一体化操作页。
@@ -91,12 +101,70 @@ function ErrorLine({ error }: { error: string }) {
   return <Alert type="error" showIcon className="mb-3" message={error} />
 }
 
-function GuardTag({ dryRun }: { dryRun?: boolean }) {
-  return dryRun ? (
-    <Tag color="orange">DRY_RUN 占位（未真实调用）</Tag>
-  ) : (
-    <Tag color="red">真实调用已开启</Tag>
-  )
+/**
+ * 三态布尔的可读文案（判定用共享的 `coerceLooseBoolean`，这里只负责措辞）。
+ * 为什么不直接 `String(value)`：字段缺失时会显示 "undefined"，用户看不出守卫到底开没开。
+ */
+function coerceBooleanText(value: unknown, trueText: string, falseText: string): string {
+  const parsed = coerceLooseBoolean(value)
+  if (parsed === true) return `true（${trueText}）`
+  if (parsed === false) return `false（${falseText}）`
+  return '未知（未读到该标记）'
+}
+
+/** `dry_run` 专用措辞：true = 演练占位（没有真实调用）。 */
+function dryRunText(value: unknown): string {
+  return coerceBooleanText(value, '演练占位，未真实调用', '真实调用')
+}
+
+/**
+ * 付费出口守卫的 DRY_RUN 状态（全页复用同一个请求，并发的多个 GuardTag 只打一次）。
+ *
+ * 为什么需要它：`<GuardTag />` 以前有 6 处是**无参调用**，`dryRun` 恒为 `undefined`，
+ * 于是一律渲染成红色的「真实调用已开启」—— 开着演练守卫时反而谎报「正在真实付费调用」。
+ * 现在统一读后端守卫状态；读不到就显示「未知」，绝不默认成任何一侧。
+ *
+ * 只做「并发去重」不做长期缓存：`finally` 里清空，保证不会把旧状态一直挂在页面上。
+ */
+let guardDryRunInFlight: Promise<boolean | null> | null = null
+
+function fetchGuardDryRun(): Promise<boolean | null> {
+  if (!guardDryRunInFlight) {
+    guardDryRunInFlight = callApi('/api/v1/studio/llm/orchestration/status')
+      .then((data) => readLooseBoolean((data as AnyRecord)?.guard, ['dry_run']))
+      .catch(() => null)
+      .finally(() => {
+        guardDryRunInFlight = null
+      })
+  }
+  return guardDryRunInFlight
+}
+
+function useGuardDryRun(): boolean | null {
+  const [dryRun, setDryRun] = useState<boolean | null>(null)
+  useEffect(() => {
+    let alive = true
+    void fetchGuardDryRun().then((value) => {
+      if (alive) setDryRun(value)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+  return dryRun
+}
+
+/**
+ * 演练 / 真实 徽标。
+ *
+ * 显式传入的守卫值优先（已读到守卫状态的页面用它），否则用共享快照；
+ * 两者都读不到时显示「未知」—— **不再把「读不到」当成「真实调用已开启」**。
+ */
+function GuardTag({ dryRun }: { dryRun?: unknown }) {
+  const explicit = coerceLooseBoolean(dryRun)
+  const fetched = useGuardDryRun()
+  const badge = describeDryRunBadge(explicit ?? fetched)
+  return <Tag color={badge.color}>{badge.text}</Tag>
 }
 
 /* ------------------------------------------------------------------ 概览 */
@@ -130,6 +198,9 @@ function OverviewTab() {
 
   const guardInfo = (guard?.guard ?? {}) as AnyRecord
   const pipelineGuard = (pipeline?.guard ?? {}) as AnyRecord
+  // 三态：true=DRY_RUN / false=真实 / null=读不到。以前 `String(x) === 'true'` 在
+  // 后端回整数 1、'yes' 或干脆没带这个字段时会得出相反结论（缺字段 → 显示「真实」）。
+  const pipelineDryRun = coerceLooseBoolean(pipelineGuard.dry_run)
 
   return (
     <Space direction="vertical" className="w-full" size="middle">
@@ -137,7 +208,7 @@ function OverviewTab() {
         <Button type="primary" onClick={() => void load()} loading={loading}>
           刷新状态
         </Button>
-        <GuardTag dryRun={Boolean(guardInfo.dry_run)} />
+        <GuardTag dryRun={guardInfo.dry_run} />
       </Space>
       <ErrorLine error={error} />
       <Card title="付费出口守卫" size="small" loading={loading}>
@@ -177,7 +248,7 @@ function OverviewTab() {
             {(pipeline?.service_asset_types as string[] | undefined)?.join(' / ') ?? '—'}
           </Descriptions.Item>
           <Descriptions.Item label="出图守卫">
-            {String(pipelineGuard.dry_run) === 'true' ? 'DRY_RUN' : '真实'}
+            {pipelineDryRun === true ? 'DRY_RUN' : pipelineDryRun === false ? '真实' : '未知（未读到 DRY_RUN 标记）'}
           </Descriptions.Item>
           <Descriptions.Item label="健康探测">
             {pipeline?.probe ? '已探测' : String(pipeline?.probe_skipped_reason ?? '—')}
@@ -262,8 +333,9 @@ function EntityExtractionTab() {
           <Warnings items={result.warnings as string[]} />
           <Card size="small" title={`草稿（${items.length} 条，仅预览不建实体）`}>
             <Space className="mb-2">
-              <Tag>dry_run：{String((result.meta as AnyRecord)?.dry_run)}</Tag>
-              <Tag>llm_called：{String((result.meta as AnyRecord)?.llm_called)}</Tag>
+              <Tag>dry_run：{dryRunText((result.meta as AnyRecord)?.dry_run)}</Tag>
+              {/* llm_called 的语义与 dry_run 相反：true 表示**真的调用了模型**，措辞不能混用 */}
+              <Tag>llm_called：{coerceBooleanText((result.meta as AnyRecord)?.llm_called, '已调用模型', '未调用模型')}</Tag>
               <Tag>模型：{String(((result.meta as AnyRecord)?.target as AnyRecord)?.model_name ?? '—')}</Tag>
             </Space>
             <Table
@@ -688,7 +760,21 @@ function ImagePipelineTab() {
       const values = await planForm.validateFields()
       const data = await callApi('/api/v1/studio/image-pipeline/submit', payloadFrom(values))
       setSubmitResult(data)
-      message.success('提交完成（DRY_RUN 下为占位结果）')
+      // 以前这里无条件弹绿色「提交完成（DRY_RUN 下为占位结果）」—— 哪怕几条全失败也照样报成功。
+      // 现在按同一套结果口径提示：有失败就报失败（并让用户看下方明细里的真实原因）。
+      const outcome = summarizeAssetResults((data?.results ?? []) as AnyRecord[], {
+        summary: data?.summary,
+        payload: data,
+      })
+      if (outcome.hasFailure) {
+        message.error(`${outcome.title}｜真实原因见下方「提交结果」`)
+      } else if (outcome.isDryRun || outcome.dryRunCount > 0) {
+        message.info(`${outcome.title}｜DRY_RUN 下为占位结果，未真实调用出图服务`)
+      } else if (outcome.allSucceeded) {
+        message.success(outcome.title)
+      } else {
+        message.info(outcome.title)
+      }
       const results = (data.results ?? []) as AnyRecord[]
       const first = results.find((item) => item.service_task_id)
       if (first) {
@@ -701,6 +787,25 @@ function ImagePipelineTab() {
       setSubmitting(false)
     }
   }
+
+  /**
+   * 提交结果的统一口径（成功 X / 失败 Y、真实失败原因、下一步、Alert 类型）。
+   * 新字段有就用，没有就回退到 `by_status` / `results` 逐行，不会白屏。
+   */
+  const submitSummary = useMemo(
+    () =>
+      summarizeAssetResults((submitResult?.results ?? []) as AnyRecord[], {
+        summary: submitResult?.summary,
+        payload: submitResult,
+      }),
+    [submitResult],
+  )
+
+  /**
+   * 后端给的 DRY_RUN 开关（**原始值**，不做 `Boolean()` 提前拍平）。
+   * 交给 `GuardTag` 做三态判定：读不到时回退到共享守卫快照，仍然读不到就显示「未知」。
+   */
+  const submitDryRunFlag = readLooseBoolean(submitResult?.summary, ['dry_run'])
 
   const targets = (plan?.targets ?? []) as AnyRecord[]
 
@@ -806,10 +911,49 @@ function ImagePipelineTab() {
           <Warnings items={submitResult.warnings as string[]} />
           <Card size="small" title="提交结果">
             <Space wrap className="mb-2">
-              <Tag color={String((submitResult.summary as AnyRecord)?.dry_run) === 'true' ? 'orange' : 'red'}>
-                {String(submitResult.guard_status ?? '')}
-              </Tag>
+              {/*
+                这里原来是 `String(summary.dry_run) === 'true' ? 'orange' : 'red'`：
+                用字符串比较布尔（布尔 true 恰好能过，但后端回整数 1 / 'yes' / 缺字段时结论会反过来），
+                而且取色只反映 DRY_RUN、完全不反映真实结果，标签文字还是原始的 guard_status。
+                现在拆成两件事：演练/真实用 `GuardTag` 三态如实显示；guard_status 原样单独展示。
+              */}
+              <GuardTag dryRun={submitDryRunFlag} />
+              {submitResult.guard_status ? <Tag>{String(submitResult.guard_status)}</Tag> : null}
             </Space>
+            <Alert
+              type={submitSummary.alertType}
+              showIcon
+              className="mb-2"
+              message={submitSummary.title}
+              description={
+                submitSummary.detailLines.length > 0 ? (
+                  <div className="space-y-1">
+                    {submitSummary.detailLines.map((line, idx) => (
+                      <div
+                        key={`${idx}_${line}`}
+                        className={submitSummary.hasFailure && line.startsWith('失败原因：') ? 'text-red-600' : undefined}
+                      >
+                        {line}
+                      </div>
+                    ))}
+                  </div>
+                ) : undefined
+              }
+            />
+            {submitSummary.countsKnown && submitSummary.total > 0 ? (
+              <div className="mb-2 text-sm">
+                <span className="font-medium">成功 {submitSummary.okCount} 条</span>
+                <span className="mx-2 text-gray-300">/</span>
+                <span className="font-medium">失败 {submitSummary.failedCount} 条</span>
+                <span className="ml-3 text-xs text-gray-500">
+                  （共 {submitSummary.total} 条，OSS 长期地址就绪 {submitSummary.ossReadyCount} 条，计数来源：
+                  {submitSummary.countSource}）
+                </span>
+                {submitSummary.mismatchNote ? (
+                  <div className="text-xs text-orange-600">{submitSummary.mismatchNote}</div>
+                ) : null}
+              </div>
+            ) : null}
             <Table
               rowKey={(row) => String(row.source_task_id)}
               size="small"
@@ -817,12 +961,64 @@ function ImagePipelineTab() {
               dataSource={(submitResult.results ?? []) as AnyRecord[]}
               columns={[
                 { title: '资产', dataIndex: 'source_asset_id', width: 140 },
-                { title: 'service_task_id', dataIndex: 'service_task_id', width: 200 },
-                { title: '状态', dataIndex: 'status', width: 100 },
+                { title: 'service_task_id', dataIndex: 'service_task_id', width: 180 },
+                {
+                  title: '状态',
+                  dataIndex: 'status',
+                  width: 160,
+                  render: (_value: unknown, row: AnyRecord) => {
+                    // 状态列原来只是纯文本：不取色、也没有失败原因。
+                    // 现在按归一化口径取色（partial_failed 之类绝不绿色）并附中文口径。
+                    const normalized = normalizeAssetResultRow(row)
+                    return (
+                      <Space size={4} wrap>
+                        <Tag color={ASSET_OUTCOME_TAG_COLOR[normalized.outcome]}>
+                          {normalized.rawStatus || '未知'}
+                        </Tag>
+                        <span className="text-xs text-gray-400">{ASSET_OUTCOME_LABEL[normalized.outcome]}</span>
+                      </Space>
+                    )
+                  },
+                },
+                {
+                  title: '失败原因',
+                  dataIndex: 'message',
+                  render: (_value: unknown, row: AnyRecord) => {
+                    // 优先取 detail.error_message（其次 message / error 等），否则明确说没有。
+                    const normalized = normalizeAssetResultRow(row)
+                    if (!normalized.errorText) {
+                      return <Typography.Text type="secondary">—</Typography.Text>
+                    }
+                    return (
+                      <span className={normalized.isFailure ? 'text-red-500' : 'text-gray-500'}>
+                        {normalized.errorText}
+                      </span>
+                    )
+                  },
+                },
                 {
                   title: 'OSS 地址',
                   dataIndex: 'oss_url',
-                  render: (v: string) => v || <Typography.Text type="secondary">（DRY_RUN 无）</Typography.Text>,
+                  width: 220,
+                  render: (v: string, row: AnyRecord) => {
+                    if (v) {
+                      return (
+                        <a href={v} target="_blank" rel="noreferrer">
+                          {v}
+                        </a>
+                      )
+                    }
+                    const normalized = normalizeAssetResultRow(row)
+                    if (normalized.url) {
+                      // 图片已生成、只是没进 OSS：把上游地址显示出来，别让用户以为「什么都没发生」
+                      return <Typography.Text type="secondary">未上传 OSS；上游地址：{normalized.url}</Typography.Text>
+                    }
+                    return (
+                      <Typography.Text type="secondary">
+                        {coerceLooseBoolean(row.dry_run) === true ? '（DRY_RUN 无）' : '（未返回）'}
+                      </Typography.Text>
+                    )
+                  },
                 },
               ]}
             />
@@ -879,13 +1075,27 @@ function VideoSubmitTab() {
       const values = await form.validateFields()
       const data = await callApi('/api/v1/studio/image-pipeline/video-submit', payloadFrom(values))
       setResult(data)
-      message.success(`提交返回：${String(data.status)}`)
+      // 出视频同样不能无条件弹绿色成功：部分失败 / 失败要报失败。
+      const outcome = summarizeSingleAssetResult(data, { summary: data?.summary, payload: data })
+      if (outcome.hasFailure) {
+        message.error(`${outcome.title}｜真实原因见下方「提交结果」`)
+      } else if (outcome.allSucceeded) {
+        message.success(outcome.title)
+      } else {
+        message.info(outcome.title)
+      }
     } catch (e) {
       setError((e as Error).message)
     } finally {
       setSubmitting(false)
     }
   }
+
+  /** 出视频提交结果的统一口径（单条），与出图共用同一套判定。 */
+  const videoResultSummary = useMemo(
+    () => summarizeSingleAssetResult(result, { summary: result?.summary, payload: result }),
+    [result],
+  )
 
   return (
     <Space direction="vertical" className="w-full" size="middle">
@@ -965,11 +1175,42 @@ function VideoSubmitTab() {
       ) : null}
       {result ? (
         <Card size="small" title="提交结果">
+          {/*
+            状态列以前是一段内联三元取色（partial_failed 恰好落到 red，但只认这三个字符串，
+            其它非成功状态会掉进 red/blue 的模糊地带），而且失败原因只显示 `result.error`，
+            `detail.error_message` / `message` 里的真实原因会被丢掉。现在共用同一套归一化口径。
+          */}
+          <Alert
+            type={videoResultSummary.alertType}
+            showIcon
+            className="mb-2"
+            message={videoResultSummary.title}
+            description={
+              videoResultSummary.detailLines.length > 0 ? (
+                <div className="space-y-1">
+                  {videoResultSummary.detailLines.map((line, idx) => (
+                    <div
+                      key={`${idx}_${line}`}
+                      className={videoResultSummary.hasFailure && line.startsWith('失败原因：') ? 'text-red-600' : undefined}
+                    >
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              ) : undefined
+            }
+          />
           <Descriptions column={2} size="small">
             <Descriptions.Item label="状态">
-              <Tag color={result.status === 'succeeded' ? 'green' : result.status === 'dry_run' ? 'orange' : 'red'}>
-                {String(result.status)}
-              </Tag>
+              {(() => {
+                const normalized = normalizeAssetResultRow(result)
+                return (
+                  <Space size={4} wrap>
+                    <Tag color={ASSET_OUTCOME_TAG_COLOR[normalized.outcome]}>{normalized.rawStatus || '未知'}</Tag>
+                    <span className="text-xs text-gray-400">{ASSET_OUTCOME_LABEL[normalized.outcome]}</span>
+                  </Space>
+                )
+              })()}
             </Descriptions.Item>
             <Descriptions.Item label="provider_task_id">{String(result.provider_task_id || '—')}</Descriptions.Item>
             <Descriptions.Item label="耗时">{String(result.elapsed_ms)}ms</Descriptions.Item>
@@ -1020,6 +1261,9 @@ function PromptPackageTab() {
   }
 
   const meta = (result?.meta ?? {}) as AnyRecord
+  // 三态读法：`undefined` 不能当成「真实输出」。以前 `meta.dry_run ? 'orange' : 'red'`
+  // 在字段缺失时会显示红色的「真实模型输出」—— 等于谎报真实调用。
+  const metaDryRun = coerceLooseBoolean(meta.dry_run)
 
   return (
     <Space direction="vertical" className="w-full" size="middle">
@@ -1054,8 +1298,12 @@ function PromptPackageTab() {
               <Tag>图片提示词：{String(meta.image_prompt_count ?? 0)}</Tag>
               <Tag>视频提示词：{String(meta.video_prompt_count ?? 0)}</Tag>
               <Tag>画像卡：{String(meta.entity_card_count ?? 0)}</Tag>
-              <Tag color={meta.dry_run ? 'orange' : 'red'}>
-                {meta.dry_run ? 'DRY_RUN 占位' : '真实模型输出'}
+              <Tag color={metaDryRun === true ? 'orange' : metaDryRun === false ? 'red' : 'default'}>
+                {metaDryRun === true
+                  ? 'DRY_RUN 占位'
+                  : metaDryRun === false
+                    ? '真实模型输出'
+                    : '未知（未读到 dry_run 标记）'}
               </Tag>
             </Space>
           </Card>
