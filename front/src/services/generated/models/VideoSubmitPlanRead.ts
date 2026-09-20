@@ -2,6 +2,7 @@
 /* istanbul ignore file */
 /* tslint:disable */
 /* eslint-disable */
+import type { VideoAudioPlanRead } from './VideoAudioPlanRead';
 import type { VideoPlanFrameRead } from './VideoPlanFrameRead';
 /**
  * 直提出视频的计划预览。
@@ -64,6 +65,10 @@ export type VideoSubmitPlanRead = {
      */
     audio_state?: string;
     /**
+     * 参考音频审计（只增字段）：included / file_id / url / excluded_reason —— 本次请求是否携带音频、带的是哪个地址、没带是为什么
+     */
+    audio?: VideoAudioPlanRead;
+    /**
      * 是否命中固定模型策略（seedance-2.0-mini）
      */
     model_pinned?: boolean;
@@ -75,4 +80,3 @@ export type VideoSubmitPlanRead = {
     guard_status?: string;
     note?: string;
 };
-

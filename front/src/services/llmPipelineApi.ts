@@ -352,6 +352,32 @@ export interface VideoPlanFrame {
   reason?: string
 }
 
+/**
+ * 参考音频审计（计划/预览响应里的 `audio` 字段）。
+ *
+ * 回答的是"**参考音频**（作为输入）会不会进本次供应商请求"，与"**最终成片的音轨**"
+ * （供应商侧 `generate_audio` 生成的那条轨）是两件事 —— 后者不在这里表达。
+ */
+export interface VideoAudioAudit {
+  /** 本次请求是否真的会携带（会进 audio_urls） */
+  included: boolean
+  /** 绑定的音频 file_id（未绑定为空） */
+  file_id?: string
+  /** 会进请求的地址（公网 http(s) / asset:// / 供应商接受的 data URL）；不携带时为空 */
+  url?: string
+  /** 解析出的原始地址（可能是本机/内网，仅供技术详情，不会发给供应商） */
+  declared_url?: string
+  /** 不携带时的原因（本机相对路径 / 内网地址 / 供应商不吃 data URL / 未绑定…） */
+  excluded_reason?: string
+  reason_code?: string
+  how_to_fix?: string
+  /** public_url / asset_ref / data_url_inline / not_bound / opt_out / local_path / private_address … */
+  state?: string
+  vendor_supports_reference_audio?: boolean
+  /** 术语澄清：参考音频（输入）≠ 最终成片音轨（输出） */
+  note?: string
+}
+
 export interface VideoSubmitPlanResult {
   shot_id: string
   provider?: string
@@ -370,6 +396,8 @@ export interface VideoSubmitPlanResult {
   audio_url?: string
   audio_opt_out?: boolean
   audio_state?: string
+  /** 参考音频审计（只增字段）：included / file_id / url / excluded_reason */
+  audio?: VideoAudioAudit
   prompt?: string
   prompt_source?: string
   ratio?: string

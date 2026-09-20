@@ -63,6 +63,7 @@ import {
 import { useLocation, useNavigate, useParams, Link } from 'react-router-dom'
 import { ChapterShotAssetBindingSection } from '../shots/components/ChapterShotAssetBindingSection'
 import { ShotAudioBindingSection } from '../shots/components/ShotAudioBindingSection'
+import { audioStateTag } from '../shots/components/audioAdmissionCore'
 import { StudioStepProgressStrip } from './components/StudioStepProgressStrip'
 import {
   FilmService,
@@ -5585,6 +5586,8 @@ function Inspector(props: {
                           shotId={selectedShot.id}
                           audioFileId={readBoundAudioFileId(shotDetail)}
                           audioOptOut={Boolean((shotDetail as unknown as { audio_opt_out?: boolean } | null)?.audio_opt_out)}
+                          // 参考音频审计（来自生成计划）：把"绑了但供应商取不到"在提交前就显示出来
+                          audioAudit={requestPlan.plan?.audio ?? null}
                           projectId={projectId}
                           chapterId={chapterId}
                           onSave={async (fileId) => {
@@ -6459,21 +6462,24 @@ function Inspector(props: {
                               color={
                                 requestPlan.plan.audio_opt_out
                                   ? 'default'
-                                  : requestPlan.plan.audio_state === 'bound'
+                                  : requestPlan.plan.audio?.included === true
                                     ? 'cyan'
                                     : 'gold'
                               }
                               style={{ marginInlineEnd: 4 }}
                             >
-                              {requestPlan.plan.audio_opt_out
-                                ? '本镜明确无需声音'
-                                : requestPlan.plan.audio_state === 'bound'
-                                  ? '声音已绑定（公网可用）'
-                                  : requestPlan.plan.audio_state === 'bound_not_public'
-                                    ? '声音已绑定但地址非公网'
-                                    : '声音未绑定'}
+                              {audioStateTag(requestPlan.plan.audio, requestPlan.plan.audio_state)}
                             </Tag>
                             <span className="text-[11px] text-gray-500">声音文件与内部 ID 见「技术详情」。</span>
+                            {/* 绑了但用不上：计划阶段就把原因与修法写出来（不等到提交失败） */}
+                            {requestPlan.plan.audio?.included === false && requestPlan.plan.audio?.file_id ? (
+                              <div className="mt-1 max-w-[560px] text-[10px] leading-4 text-orange-600">
+                                <div>{maskInternalIds(String(requestPlan.plan.audio.excluded_reason || ''))}</div>
+                                {requestPlan.plan.audio.how_to_fix ? (
+                                  <div className="text-slate-500">怎么修：{requestPlan.plan.audio.how_to_fix}</div>
+                                ) : null}
+                              </div>
+                            ) : null}
                           </div>
                         </div>
                       ) : (

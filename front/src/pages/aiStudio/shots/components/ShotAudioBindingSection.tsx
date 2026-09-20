@@ -27,6 +27,11 @@ import { Alert, Button, Empty, Input, Modal, Space, Table, Tag, Typography, Uplo
 import type { TableColumnsType } from 'antd'
 import { DeleteOutlined, ReloadOutlined, SoundOutlined, UploadOutlined } from '@ant-design/icons'
 import { OpenAPI, StudioFilesService } from '../../../../services/generated'
+import {
+  REFERENCE_AUDIO_VS_FINAL_TRACK,
+  describeAudioAdmission,
+  type AudioAudit,
+} from './audioAdmissionCore'
 
 const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.oga', '.opus', '.wma', '.aiff', '.aif']
 
@@ -56,6 +61,15 @@ type ShotAudioBindingSectionProps = {
   /** 可选：上传时把音频挂到项目/章节下，便于素材库按项目筛选。 */
   projectId?: string | null
   chapterId?: string | null
+  /**
+   * 后端生成计划里的**参考音频审计**（`VideoSubmitPlanRead.audio`）。
+   *
+   * 为什么要传进来：光知道"绑了 file_id"说明不了供应商取不取得到 —— 本地/相对路径、
+   * 内网地址、供应商不接受内嵌 base64 都会被后端在**请求计划层**排除。
+   * 传进来之后，这里就能在**提交之前**显示「已绑定，但供应商无法访问」及原因，
+   * 而不是等生成失败才说。缺省（计划未加载）时退回"状态未知"，不猜。
+   */
+  audioAudit?: AudioAudit | null
 }
 
 function isAudioFileName(name: string): boolean {
@@ -77,6 +91,7 @@ export function ShotAudioBindingSection({
   onSaveOptOut,
   projectId,
   chapterId,
+  audioAudit = null,
 }: ShotAudioBindingSectionProps) {
   const [files, setFiles] = useState<StudioAudioFile[]>([])
   const [loading, setLoading] = useState(false)
@@ -113,6 +128,12 @@ export function ShotAudioBindingSection({
   }, [loadAudioFiles])
 
   const boundName = useMemo(() => fileNameFromId(boundId, files), [boundId, files])
+
+  /**
+   * 绑定状态文案：**由后端计划里的审计字段驱动**（`audio.included` / `excluded_reason`）。
+   * 绑定本身（file_id 存在）与"供应商能不能取到"是两件事 —— 这里如实分开显示。
+   */
+  const admission = useMemo(() => describeAudioAdmission(audioAudit), [audioAudit])
 
   const bindFile = useCallback(
     async (fileId: string | null) => {
@@ -225,10 +246,11 @@ export function ShotAudioBindingSection({
           <div className="text-sm font-medium text-slate-900">声音绑定</div>
           <Typography.Text type="secondary" className="text-[11px]">
             给这条分镜绑定配音 / 台词音频。绑定后它一定会出现在交付内容的
-            「绑定素材·实际文件」里。能否随视频生成请求发出去看两点：①供应商支持参考音频（seedance 支持，
-            字段 `audio_urls`，最多 3 条、总时长 ≤15s、与首尾帧图片互斥）；②音频地址必须公网可达
-            （本地 `/files/...` 地址供应商抓不到）。任一不满足时，生成响应与计划预览会明确写"本次未携带"
-            并告诉你补救办法。
+            「绑定素材·实际文件」里。**能不能进视频生成请求**（参考音频）是另一件事，
+            看两点：①供应商支持参考音频（seedance 支持，字段 `audio_urls`，最多 3 条、总时长 ≤15s、
+            与首尾帧图片互斥）；②地址必须是**公网 http(s)** 或 `asset://`（本地 `/files/...`、
+            内网地址供应商抓不到）。不满足时这里会直接显示「已绑定，但供应商无法访问」及原因，
+            不用等生成失败。{REFERENCE_AUDIO_VS_FINAL_TRACK}
           </Typography.Text>
         </div>
         <Space size={8}>
@@ -287,11 +309,32 @@ export function ShotAudioBindingSection({
         />
       ) : boundId ? (
         <Alert
-          type="success"
+          type={admission.blocked ? 'warning' : admission.tone === 'success' ? 'success' : 'info'}
           showIcon
-          message={`已绑定声音：${boundName}`}
+          message={
+            admission.blocked
+              ? `已绑定声音：${boundName} —— 已绑定，但供应商无法访问`
+              : admission.tone === 'success'
+                ? `已绑定声音：${boundName}（会作为参考音频进入本次请求）`
+                : `已绑定声音：${boundName}`
+          }
           description={
             <div className="space-y-2">
+              {admission.blocked ? (
+                <>
+                  <div className="text-xs text-orange-700">{admission.detail}</div>
+                  {admission.fix ? <div className="text-xs text-slate-600">怎么修：{admission.fix}</div> : null}
+                  <div className="text-[11px] text-slate-400">{admission.terminology}</div>
+                </>
+              ) : (
+                <>
+                  <div className="text-[11px] text-slate-500">{admission.tag}</div>
+                  {admission.detail ? <div className="text-xs text-slate-600">{admission.detail}</div> : null}
+                  {admission.tone === 'success' && admission.fix ? (
+                    <div className="text-[11px] text-slate-400">{admission.fix}</div>
+                  ) : null}
+                </>
+              )}
               <div className="text-xs text-slate-500">
                 <span className="text-gray-500">已绑定（内部 ID 见工作区「技术详情」）</span>
               </div>

@@ -337,6 +337,7 @@ export type { VariantSuggestion } from './models/VariantSuggestion';
 export type { VFXType } from './models/VFXType';
 export type { VideoGenerationOptionsRead } from './models/VideoGenerationOptionsRead';
 export type { VideoGenerationTaskRequest } from './models/VideoGenerationTaskRequest';
+export type { VideoAudioPlanRead } from './models/VideoAudioPlanRead';
 export type { VideoPlanFrameRead } from './models/VideoPlanFrameRead';
 export type { VideoPromptPreviewRead } from './models/VideoPromptPreviewRead';
 export type { VideoPromptPreviewRequest } from './models/VideoPromptPreviewRequest';
