@@ -33,6 +33,7 @@ from app.models.studio_shots import (
     ShotDetail,
     ShotDialogLine,
     ShotFrameImage,
+    ShotVideoPromptDraft,
 )
 from app.models.types import (
     AssetQualityLevel,
@@ -53,6 +54,7 @@ from app.models.types import (
     ShotDialogueCandidateStatus,
     ShotFrameType,
     ShotStatus,
+    ShotVideoPromptDraftStatus,
     TimelineClipType,
     VFXType,
 )
@@ -64,6 +66,7 @@ __all__ = [
     "ProjectVisualStyle",
     "ChapterStatus",
     "ShotStatus",
+    "ShotVideoPromptDraftStatus",
     "ShotCandidateType",
     "ShotCandidateStatus",
     "ShotDialogueCandidateStatus",
@@ -88,6 +91,7 @@ __all__ = [
     "Shot",
     "ShotDetail",
     "ShotFrameImage",
+    "ShotVideoPromptDraft",
     "ShotDialogLine",
     "ShotExtractedCandidate",
     "ShotExtractedDialogueCandidate",

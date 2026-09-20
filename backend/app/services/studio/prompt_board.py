@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.studio import Shot, ShotDetail
 from app.schemas.studio.shots import ShotDetailUpdate
+from app.services.studio import prompt_board_drafts as drafts
 from app.services.studio import shot_details as shot_details_service
 from app.services.studio.llm_orchestration import dry_run
 from app.services.studio.llm_orchestration.video_prompt import preview_video_prompt
@@ -51,6 +52,12 @@ RUNTIME_ENV_ENV = "JELLYFISH_ENV"
 ALLOWED_SOURCES: tuple[str, ...] = tuple(SAVABLE_VIDEO_PROMPT_SOURCES)
 MODE_FILL_EMPTY: OverwriteMode = "fill_empty"
 MODE_OVERWRITE_SELECTED: OverwriteMode = "overwrite_selected"
+
+#: 草稿的默认来源：看板这条流程（``POST /draft``）只有"真实调用大模型"一种产出
+DEFAULT_DRAFT_SOURCE = "llm"
+
+#: 真实生成占用的租约时长（秒）：够慢生成跑完，中断后也不会长时间锁死
+GENERATION_LEASE_SECONDS = 300
 
 #: 导入时的来源标记（巨日禄）
 JURILU_SOURCE = "jurilu"
@@ -262,6 +269,235 @@ async def load_board(db: AsyncSession, *, chapter_id: str) -> list[BoardShot]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# 服务端草稿存储（修「整集视频提示词草稿丢失」）
+#
+# 背景：看板按"一次一镜"真实调用大模型（真金白银），草稿此前只活在浏览器内存里，
+# 刷新 / 切走 / 中断就全丢。这里把草稿落到 ``shot_video_prompt_drafts``：
+# 刷新能恢复、中断能续跑、失败能定位；并且**绝不**写 ``shot_details.video_prompt``
+# （写正式列只有 ``save_entries`` 一条路）。
+# ---------------------------------------------------------------------------
+
+
+def draft_to_read(row: Any, *, shot: BoardShot | None = None) -> dict[str, Any]:
+    """把草稿行渲染成页面要的状态（``pending / running / ok / failed``）。
+
+    两个刻意的读层换算：
+    - **没有行 = 未开始**（``pending``）：不落空行，才不会把"未开始"和"失败"混在一起；
+    - ``running`` 但租约已失效 = **中断**（进程被杀/页面关掉）：渲染成 ``pending`` 并置
+      ``interrupted=True``，页面据此提示"上次中断，可重新生成"，而不是永远显示"生成中"。
+
+    ``draft_token`` 只在"正文是**服务端自己生成**且非空"时签发 —— 客户端用保存接口
+    塞进来的正文（``server_generated=False``）拿不到令牌，因此**不能**按 ``llm_draft``
+    保存，沿用既有"来源必须自证"的守卫。
+    """
+    shot_id = str(getattr(row, "shot_id", "") or (shot.shot_id if shot else ""))
+    prompt = str(getattr(row, "prompt", "") or "")
+    stored = str(getattr(row, "status", "") or "").strip()
+    live = bool(row is not None and drafts.lease_alive(row))
+    interrupted = (not live) and stored == drafts.STATUS_RUNNING
+    if live:
+        read_status = drafts.STATUS_RUNNING
+    elif interrupted or not stored:
+        read_status = drafts.STATUS_PENDING
+    else:
+        read_status = stored
+
+    token = ""
+    if prompt.strip() and bool(getattr(row, "server_generated", False)):
+        token = draft_token(shot_id=shot_id, prompt=prompt)
+    expires = drafts.as_naive_utc(getattr(row, "claim_expires_at", None))
+    updated = drafts.as_naive_utc(getattr(row, "updated_at", None))
+    return {
+        "shot_id": shot_id,
+        "code": shot.code if shot is not None else "",
+        "index": shot.index if shot is not None else 0,
+        "title": shot.title if shot is not None else "",
+        "status": read_status,
+        "stored_status": stored,
+        "interrupted": interrupted,
+        "has_draft": bool(prompt.strip()),
+        "prompt": prompt,
+        "source": str(getattr(row, "source", "") or ""),
+        "error": str(getattr(row, "error", "") or ""),
+        "model": str(getattr(row, "model", "") or ""),
+        "meta": dict(getattr(row, "meta", None) or {}),
+        "draft_token": token,
+        # 可直接按 llm_draft 保存（页面据此决定"确认保存"要不要带令牌）
+        "saveable": bool(token),
+        "claim_expires_at": expires.isoformat() + "Z" if expires else None,
+        "updated_at": updated.isoformat() + "Z" if updated else None,
+    }
+
+
+async def load_draft_state(db: AsyncSession, *, chapter_id: str) -> dict[str, Any]:
+    """该集**逐镜**草稿状态（一次查询 + 一次镜头表读取，不调模型、不触网）。
+
+    返回每镜一行（含没有草稿的镜头），页面据此直接渲染
+    已完成 / 失败 / 生成中 / 未开始，并在刷新后恢复逐镜队列。
+    """
+    board = await load_board(db, chapter_id=chapter_id)
+    rows = await drafts.load_map(db, chapter_id=chapter_id)
+    shots = [draft_to_read(rows.get(shot.shot_id), shot=shot) for shot in board]
+    summary = {"total": len(shots)}
+    for status in (drafts.STATUS_OK, drafts.STATUS_FAILED, drafts.STATUS_RUNNING, drafts.STATUS_PENDING):
+        summary[status] = len([item for item in shots if item["status"] == status])
+    return {
+        "chapter_id": chapter_id,
+        "shots": shots,
+        "summary": summary,
+        "note": (
+            "这里读的是**服务端草稿**（shot_video_prompt_drafts），刷新/中断都不会丢；"
+            "它不影响正式提示词 shot_details.video_prompt —— 写正式列只有 /save。"
+        ),
+    }
+
+
+async def save_shot_draft(
+    db: AsyncSession,
+    *,
+    chapter_id: str,
+    shot_id: str,
+    status: str,
+    prompt: str = "",
+    error: str = "",
+    source: str = "",
+    model: str = "",
+    meta: dict[str, Any] | None = None,
+    claim_token: str = "",
+) -> dict[str, Any]:
+    """保存/更新**一镜**的草稿（幂等 upsert）。页面在每镜生成结束后立刻调用。
+
+    - ``status="ok"``：必须带正文；正文与库里已存正文完全一致时沿用"服务端生成"标记
+      （因此仍可拿到草稿令牌），否则视为客户端内容（``server_generated=False``，不给令牌）；
+    - ``status="failed"``：只记失败原因；**不传正文就不动已存正文**，
+      免得"重试失败"把上一版真金白银生成的草稿抹掉；
+    - 无论哪种状态，写入即视为本次生成结束 → 顺带**释放生成租约**（结果优先：
+      宁可释放，也不让这一镜留下永远的"生成中"）；
+    - 只写草稿表，**不碰** ``shot_details.video_prompt``。
+
+    ``claim_token`` 只是把"谁结束了这次生成"带全（便于以后审计扩展），当前不参与判定。
+    """
+    state = str(status or "").strip()
+    if state not in (drafts.STATUS_OK, drafts.STATUS_FAILED):
+        return {
+            "chapter_id": chapter_id,
+            "created": False,
+            "draft": None,
+            "error": "草稿状态只接受 ok / failed（「未开始」靠没有草稿行表达，不用写 pending）。",
+        }
+    board = await load_board(db, chapter_id=chapter_id)
+    shot = next((item for item in board if item.shot_id == shot_id), None)
+    if shot is None:
+        return {"chapter_id": chapter_id, "created": False, "draft": None, "error": "镜头不属于本集。"}
+
+    body = str(prompt or "")
+    if state == drafts.STATUS_OK and not body.strip():
+        return {
+            "chapter_id": chapter_id,
+            "created": False,
+            "draft": None,
+            "error": "status=ok 必须带非空的草稿正文。",
+        }
+    resolved_source = str(source or "").strip() or DEFAULT_DRAFT_SOURCE
+    if resolved_source not in ALLOWED_SOURCES:
+        return {
+            "chapter_id": chapter_id,
+            "created": False,
+            "draft": None,
+            "error": f"草稿来源只接受 {' / '.join(ALLOWED_SOURCES)}，收到：{resolved_source}。",
+        }
+
+    row, created = await drafts.upsert(
+        db,
+        chapter_id=chapter_id,
+        shot_id=shot.shot_id,
+        status=state,
+        prompt=body if state == drafts.STATUS_OK else (body or None),
+        source=resolved_source,
+        error=error,
+        model=model,
+        meta=meta,
+        # 内容自证：与库里一致 → 沿用原标记；不一致/新建 → 不是服务端产物
+        server_generated=None,
+        release_claim=True,
+    )
+    return {
+        "chapter_id": chapter_id,
+        "created": created,
+        "draft": draft_to_read(row, shot=shot),
+        "note": "已写入服务端草稿；正式提示词（shot_details.video_prompt）未被修改。",
+    }
+
+
+async def clear_chapter_drafts(
+    db: AsyncSession, *, chapter_id: str, shot_ids: list[str] | None = None
+) -> dict[str, Any]:
+    """清掉该集草稿（``shot_ids`` 为空 = 整集）。``/save`` 成功后由服务端自动调用。"""
+    ids = [str(item) for item in (shot_ids or []) if str(item or "").strip()]
+    cleared = await drafts.clear(db, chapter_id=chapter_id, shot_ids=ids or None)
+    return {"chapter_id": chapter_id, "cleared": cleared, "shot_ids": ids}
+
+
+async def claim_shot_draft(
+    db: AsyncSession,
+    *,
+    chapter_id: str,
+    shot_id: str,
+    lease_seconds: int | None = None,
+    claim_token: str = "",
+) -> dict[str, Any]:
+    """抢占一镜的「生成中」租约（**同一镜不允许并发生成，避免重复付费**）。
+
+    页面用法：生成前先 claim，``claimed=false`` 就不要发这次付费请求；
+    生成结束（成功/失败）调保存接口即自动释放，未生成则调释放接口。
+    """
+    board = await load_board(db, chapter_id=chapter_id)
+    shot = next((item for item in board if item.shot_id == shot_id), None)
+    if shot is None:
+        return {"chapter_id": chapter_id, "shot_id": shot_id, "code": "", "claimed": False, "reason": "镜头不属于本集。"}
+    result = await drafts.claim(
+        db,
+        chapter_id=chapter_id,
+        shot_id=shot.shot_id,
+        lease_seconds=lease_seconds,
+        claim_token=claim_token,
+    )
+    data = result.to_read()
+    data.update({"chapter_id": chapter_id, "shot_id": shot.shot_id, "code": shot.code})
+    # 抢占成功/失败后把最新草稿状态一并返回，页面可立即更新那一行
+    row = await drafts.get_row(db, chapter_id=chapter_id, shot_id=shot.shot_id)
+    data["draft"] = draft_to_read(row, shot=shot)
+    return data
+
+
+async def release_shot_draft(
+    db: AsyncSession,
+    *,
+    chapter_id: str,
+    shot_id: str,
+    claim_token: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    """释放「生成中」租约（不做生成时用；``error`` 非空则记为该镜失败原因）。"""
+    board = await load_board(db, chapter_id=chapter_id)
+    shot = next((item for item in board if item.shot_id == shot_id), None)
+    if shot is None:
+        return {"chapter_id": chapter_id, "shot_id": shot_id, "released": False, "reason": "镜头不属于本集。"}
+    released = await drafts.release(
+        db, chapter_id=chapter_id, shot_id=shot.shot_id, claim_token=claim_token, error=error
+    )
+    row = await drafts.get_row(db, chapter_id=chapter_id, shot_id=shot.shot_id)
+    return {
+        "chapter_id": chapter_id,
+        "shot_id": shot.shot_id,
+        "code": shot.code,
+        "released": released,
+        "reason": "" if released else "没有可释放的租约（可能已被释放或令牌不匹配）。",
+        "draft": draft_to_read(row, shot=shot),
+    }
+
+
 def split_import_text(text: str) -> list[tuple[int | None, str]]:
     """把整段粘贴文本切成 "（编号, 正文）" 列表。
 
@@ -452,6 +688,7 @@ async def save_entries(
 
     results: list[dict[str, Any]] = []
     applied = 0
+    applied_shot_ids: list[str] = []
 
     resolved_source = ORIGIN_TO_SOURCE.get(str(origin or "").strip(), "")
     if not resolved_source:
@@ -521,9 +758,15 @@ async def save_entries(
             body=ShotDetailUpdate(video_prompt=prompt, video_prompt_source=resolved_source),
         )
         applied += 1
+        applied_shot_ids.append(shot.shot_id)
         results.append({"shot_id": shot_id, "applied": True, "reason": "已写入", "code": shot.code})
 
     await db.commit()
+    # 正式提示词已落库 → 草稿使命完成，**清掉这些镜头的草稿**（不清整集：没写的不动）。
+    # 不清就会让页面一直显示"还有未保存草稿"，用户分不清哪份才是正式内容。
+    cleared = 0
+    if applied_shot_ids:
+        cleared = await drafts.clear(db, chapter_id=chapter_id, shot_ids=applied_shot_ids)
     return {
         "chapter_id": chapter_id,
         "mode": mode,
@@ -532,6 +775,8 @@ async def save_entries(
         "applied_count": applied,
         "skipped_count": len(results) - applied,
         "results": results,
+        # 本次因正式落库而被清掉的草稿行数（0 = 本来就没有草稿）
+        "cleared_draft_count": cleared,
     }
 
 
@@ -541,13 +786,22 @@ async def generate_draft(
     chapter_id: str,
     shot_id: str,
     mode: OverwriteMode = MODE_FILL_EMPTY,
+    claim_token: str = "",
 ) -> dict[str, Any]:
-    """**单镜**生成一条视频提示词草稿（**不落库**），供页面维护逐镜队列。
+    """**单镜**生成一条视频提示词草稿，供页面维护逐镜队列。
 
     为什么按"一次一镜"设计（用户 2026-09-19 修正）：
     如果后端在一个请求里循环调用全部镜头，用户点"停止"也拦不住后面已经排队的付费调用。
     改成页面逐镜请求：请求之间是用户可中断的边界 —— 点停止就不再发下一镜，
     已完成的草稿留在预览表里，失败项可以单独重试。不引入任何异步任务系统。
+
+    **草稿落库**（修「整集提示词草稿丢失」）：真实生成成功后立即写
+    ``shot_video_prompt_drafts``（``server_generated=True``），刷新/中断都不再丢；
+    正式提示词 ``shot_details.video_prompt`` 一个字节都不动（只有 ``save_entries`` 会写）。
+    演练模式（``dry_run``）依旧**一个字节都不落库**，绝不把占位冒充成大模型产物。
+
+    **防重复付费**：真实调用前先抢该镜的「生成中」租约（同一镜租约内只能有一次生成），
+    抢不到就返回 ``status="busy"`` 且**不发起调用**；调用收尾（成功/异常）即释放租约。
     """
     board = await load_board(db, chapter_id=chapter_id)
     shot = next((item for item in board if item.shot_id == shot_id), None)
@@ -558,21 +812,114 @@ async def generate_draft(
     if not should_write:
         return {"shot_id": shot_id, "code": shot.code, "status": "skipped", "reason": reason}
 
-    preview = await preview_video_prompt(db, body=VideoPromptPreviewRequest(shot_id=shot.shot_id))
-    llm_called = bool(getattr(preview.meta, "llm_called", False))
-    prompt = str(preview.final_prompt or "").strip()
-    if dry_run.dry_run_enabled() or not llm_called:
+    # 演练模式在**调用之前**就能判定：此时既不抢租约也不落库（"演练一个字节都不写"）
+    if dry_run.dry_run_enabled():
+        preview = await preview_video_prompt(db, body=VideoPromptPreviewRequest(shot_id=shot.shot_id))
         return {
             "shot_id": shot_id,
+            "code": shot.code,
+            "status": "dry_run",
+            "prompt": str(preview.final_prompt or "").strip(),
+            "reason": "演练模式：后端未真实调用大模型；这是占位草稿，不能保存。",
+        }
+
+    # 真实调用前的闸门：同一镜不允许并发生成（否则同一镜可能被付费生成两遍）
+    lease = await drafts.claim(
+        db,
+        chapter_id=chapter_id,
+        shot_id=shot.shot_id,
+        lease_seconds=GENERATION_LEASE_SECONDS,
+        claim_token=claim_token,
+    )
+    if not lease.claimed:
+        return {
+            "shot_id": shot_id,
+            "code": shot.code,
+            "status": "busy",
+            "reason": lease.reason,
+            "claim_expires_at": lease.expires_at.isoformat() + "Z" if lease.expires_at else None,
+        }
+    return await _generate_with_lease(db, chapter_id=chapter_id, shot=shot, lease=lease)
+
+
+async def _generate_with_lease(
+    db: AsyncSession,
+    *,
+    chapter_id: str,
+    shot: BoardShot,
+    lease: drafts.ClaimResult,
+) -> dict[str, Any]:
+    """持有租约时的真实调用与收尾（成功即落库；失败/异常一定释放租约）。
+
+    单独拆出来是为了让 ``generate_draft`` 只保留"判定 + 闸门"，
+    同时保证**任何**返回路径都不会把这一镜留在"生成中"（否则要等租约过期才能重试）。
+    """
+    try:
+        preview = await preview_video_prompt(db, body=VideoPromptPreviewRequest(shot_id=shot.shot_id))
+    except Exception as exc:  # noqa: BLE001 - 收尾必须释放租约，否则这一镜会被锁到租约过期
+        blocked = isinstance(exc, (dry_run.DryRunBlocked, dry_run.RealCallNotConfirmed))
+        # 被守卫拦下 = 根本没有付费调用，不记为失败（演练/未确认不该污染草稿状态）
+        await drafts.release(
+            db,
+            chapter_id=chapter_id,
+            shot_id=shot.shot_id,
+            claim_token=lease.claim_token,
+            error="" if blocked else f"{type(exc).__name__}: {exc}",
+        )
+        raise
+
+    llm_called = bool(getattr(preview.meta, "llm_called", False))
+    prompt = str(preview.final_prompt or "").strip()
+    if not llm_called:
+        await drafts.release(
+            db,
+            chapter_id=chapter_id,
+            shot_id=shot.shot_id,
+            claim_token=lease.claim_token,
+            error="后端未真实调用大模型（无 llm_called 标记），该草稿不可保存。",
+        )
+        return {
+            "shot_id": shot.shot_id,
             "code": shot.code,
             "status": "dry_run",
             "prompt": prompt,
             "reason": "演练模式：后端未真实调用大模型；这是占位草稿，不能保存。",
         }
     if not prompt:
-        return {"shot_id": shot_id, "code": shot.code, "status": "failed", "reason": "生成结果为空。"}
+        await drafts.release(
+            db,
+            chapter_id=chapter_id,
+            shot_id=shot.shot_id,
+            claim_token=lease.claim_token,
+            error="生成结果为空。",
+        )
+        return {
+            "shot_id": shot.shot_id,
+            "code": shot.code,
+            "status": "failed",
+            "reason": "生成结果为空。",
+        }
+
+    # 生成成功 → **立刻落库**（这一步就是"刷新不丢"的关键），并释放租约
+    row, _created = await drafts.upsert(
+        db,
+        chapter_id=chapter_id,
+        shot_id=shot.shot_id,
+        status=drafts.STATUS_OK,
+        prompt=prompt,
+        source=DEFAULT_DRAFT_SOURCE,
+        error="",
+        model=str(getattr(preview.meta, "model", "") or ""),
+        meta={
+            "llm_called": True,
+            "latency_ms": getattr(preview.meta, "latency_ms", None),
+            "warnings": list(preview.warnings or []),
+        },
+        server_generated=True,
+        release_claim=True,
+    )
     return {
-        "shot_id": shot_id,
+        "shot_id": shot.shot_id,
         "code": shot.code,
         "status": "draft",
         "prompt": prompt,
@@ -581,6 +928,9 @@ async def generate_draft(
         "warnings": list(preview.warnings or []),
         # 后端签发的草稿令牌：保存时声明 llm_draft 必须带上它
         "draft_token": draft_token(shot_id=shot.shot_id, prompt=prompt),
+        # 草稿已落服务端：刷新/中断都能恢复（服务端生成路径置 server_generated=True）
+        "persisted": True,
+        "draft": draft_to_read(row, shot=shot),
     }
 
 
@@ -740,7 +1090,9 @@ __all__ = [
     "load_readiness",
     "ALLOWED_SOURCES",
     "BoardShot",
+    "DEFAULT_DRAFT_SOURCE",
     "EXTERNAL_IMPORT_SOURCE",
+    "GENERATION_LEASE_SECONDS",
     "ImportEntry",
     "ImportPreview",
     "JURILU_SOURCE",
@@ -749,12 +1101,18 @@ __all__ = [
     "MODE_FILL_EMPTY",
     "MODE_OVERWRITE_SELECTED",
     "ORIGIN_TO_SOURCE",
+    "claim_shot_draft",
+    "clear_chapter_drafts",
+    "draft_to_read",
     "draft_token",
     "generate_draft",
     "load_board",
+    "load_draft_state",
     "match_import_entries",
+    "release_shot_draft",
     "resolve_mode_action",
     "save_entries",
+    "save_shot_draft",
     "shot_code",
     "split_import_text",
 ]

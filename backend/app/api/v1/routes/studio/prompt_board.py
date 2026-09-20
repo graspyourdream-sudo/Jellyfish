@@ -3,18 +3,27 @@
 流程口径见 `site/content/docs/plans/episode-video-prompt-batch-plan.md`：
 一整集先在集页面批量生成或批量导入（7~20 条）→ 预览校对 → 批量确认保存 → 再进工作台。
 
-四条端点各自只做一件事，避免"预览即落库"：
+端点各自只做一件事，避免"预览即落库"：
 - ``GET  /{chapter_id}``        看板：本集镜头 + 当前提示词 + 来源（只读）
-- ``POST /{chapter_id}/draft``      单镜生成草稿（真 LLM；**不落库**）。页面维护逐镜队列：
-  一次只请求一镜，点"停止"就不再发下一镜，已完成的草稿保留、失败项单独重试。
+- ``POST /{chapter_id}/draft``      单镜生成草稿（真 LLM；**只在草稿表落库，不写正式列**）。
+  页面维护逐镜队列：一次只请求一镜，点"停止"就不再发下一镜，已完成的草稿保留、
+  失败项单独重试。
 - ``POST /{chapter_id}/import-parse`` 解析 + 匹配（**不落库**，返回逐条匹配状态与冲突）
-- ``POST /{chapter_id}/save``   确认后批量保存（覆盖模式三选一，默认只补空白）
+- ``POST /{chapter_id}/save``   确认后批量保存（覆盖模式三选一，默认只补空白）；
+  **只有它**会写正式列 ``shot_details.video_prompt``，成功后清掉被写入镜头的草稿
+
+草稿持久化（修「整集视频提示词草稿丢失」，2026-09-19）——四个端点，全部只碰草稿表：
+- ``GET    /{chapter_id}/drafts``          逐镜草稿状态（刷新/中断后恢复队列）
+- ``POST   /{chapter_id}/drafts``          保存**一镜**草稿（每镜生成结束后调用，幂等 upsert）
+- ``DELETE /{chapter_id}/drafts``          清草稿（默认整集，可只清指定镜头）
+- ``POST   /{chapter_id}/drafts/claim``    抢占该镜「生成中」租约（同一镜防并发生成/重复付费）
+- ``POST   /{chapter_id}/drafts/release``  释放租约（决定不生成时用）
 """
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,6 +55,46 @@ class BoardDraftRequest(BaseModel):
 
     shot_id: str = Field(..., min_length=1)
     mode: Literal["fill_empty", "overwrite_selected"] = "fill_empty"
+    claim_token: str = Field(
+        "",
+        description=(
+            "「生成中」租约令牌：页面先调 /drafts/claim 占位时把它带回来，"
+            "服务端据此认出是自己的租约并直接续租；不带也可以（服务端会自己抢一次）"
+        ),
+    )
+
+
+class BoardDraftSaveRequest(BaseModel):
+    """保存**一镜**草稿的请求（每镜生成结束后立刻调用；幂等 upsert）。"""
+
+    shot_id: str = Field(..., min_length=1)
+    status: Literal["ok", "failed"] = Field(
+        "ok", description="ok=生成成功有正文；failed=生成失败（只记原因，正文可省略）"
+    )
+    prompt: str = Field("", description="草稿正文（status=ok 时必填）")
+    error: str = Field("", description="失败原因（status=failed 时填）")
+    source: str = Field("", description="草稿来源，省略按 llm；只接受看板允许的来源")
+    model: str = Field("", description="本次使用的模型名（可选，便于对账）")
+    meta: dict[str, Any] = Field(default_factory=dict, description="附加信息（latency_ms / warnings 等）")
+    claim_token: str = Field("", description="本次生成持有的租约令牌（可选；写入即释放租约）")
+
+
+class BoardDraftClaimRequest(BaseModel):
+    """抢占一镜「生成中」租约的请求。"""
+
+    shot_id: str = Field(..., min_length=1)
+    lease_seconds: int | None = Field(
+        None, description="租约时长（秒）；省略用默认值，服务端会夹到安全区间"
+    )
+    claim_token: str = Field("", description="同一令牌再次调用 = 续租")
+
+
+class BoardDraftReleaseRequest(BaseModel):
+    """释放一镜租约的请求（用户点"停止"后不生成这一镜时用）。"""
+
+    shot_id: str = Field(..., min_length=1)
+    claim_token: str = Field("", description="持有者令牌；不匹配则拒绝释放")
+    error: str = Field("", description="填了就顺带把该镜记为失败（带这个原因）")
 
 
 class BoardImportParseRequest(BaseModel):
@@ -109,13 +158,106 @@ async def get_board_readiness(
     )
 
 
-@router.post("/{chapter_id}/draft", response_model=ApiResponse[dict[str, Any]], summary="单镜生成视频提示词草稿（真 LLM，不落库）")
+@router.post("/{chapter_id}/draft", response_model=ApiResponse[dict[str, Any]], summary="单镜生成视频提示词草稿（真 LLM；只落草稿表）")
 async def draft_board_shot(chapter_id: str, body: BoardDraftRequest, db: AsyncSession = Depends(get_db)) -> Any:
-    """一次只为一镜生成草稿：页面据此维护逐镜队列，用户点停止即不再发下一镜。"""
+    """一次只为一镜生成草稿：页面据此维护逐镜队列，用户点停止即不再发下一镜。
+
+    真实生成成功后草稿**立刻落服务端**（刷新/中断不丢），正式提示词列不动；
+    同一镜若已有进行中的生成，返回 ``status="busy"`` 且不发起调用（防重复付费）。
+    """
     try:
-        data = await svc.generate_draft(db, chapter_id=chapter_id, shot_id=body.shot_id, mode=body.mode)
+        data = await svc.generate_draft(
+            db,
+            chapter_id=chapter_id,
+            shot_id=body.shot_id,
+            mode=body.mode,
+            claim_token=body.claim_token,
+        )
     except _BLOCKED as exc:
         return paid_outlet_guard.blocked_envelope(exc)
+    return success_response(data)
+
+
+@router.get(
+    "/{chapter_id}/drafts",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="逐镜草稿状态（刷新/中断后恢复队列，只读草稿表）",
+)
+async def get_board_drafts(chapter_id: str, db: AsyncSession = Depends(get_db)) -> Any:
+    return success_response(await svc.load_draft_state(db, chapter_id=chapter_id))
+
+
+@router.post(
+    "/{chapter_id}/drafts",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="保存一镜草稿（幂等 upsert；不写正式提示词列）",
+)
+async def save_board_draft(chapter_id: str, body: BoardDraftSaveRequest, db: AsyncSession = Depends(get_db)) -> Any:
+    """每镜生成结束后调用：成功存正文、失败存原因。
+
+    正文**只有**经 ``/save`` 才会进 ``shot_details.video_prompt``；
+    本接口一个字节都不写正式列。
+    """
+    data = await svc.save_shot_draft(
+        db,
+        chapter_id=chapter_id,
+        shot_id=body.shot_id,
+        status=body.status,
+        prompt=body.prompt,
+        error=body.error,
+        source=body.source,
+        model=body.model,
+        meta=body.meta,
+        claim_token=body.claim_token,
+    )
+    return success_response(data)
+
+
+@router.delete(
+    "/{chapter_id}/drafts",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="清草稿（默认整集；可只清指定镜头）",
+)
+async def delete_board_drafts(
+    chapter_id: str,
+    shot_ids: str = Query("", description="逗号分隔的镜头 ID；空 = 清整集"),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    ids = [item.strip() for item in str(shot_ids or "").split(",") if item.strip()]
+    return success_response(await svc.clear_chapter_drafts(db, chapter_id=chapter_id, shot_ids=ids))
+
+
+@router.post(
+    "/{chapter_id}/drafts/claim",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="抢占一镜「生成中」租约（同一镜防并发生成/重复付费）",
+)
+async def claim_board_draft(chapter_id: str, body: BoardDraftClaimRequest, db: AsyncSession = Depends(get_db)) -> Any:
+    data = await svc.claim_shot_draft(
+        db,
+        chapter_id=chapter_id,
+        shot_id=body.shot_id,
+        lease_seconds=body.lease_seconds,
+        claim_token=body.claim_token,
+    )
+    return success_response(data)
+
+
+@router.post(
+    "/{chapter_id}/drafts/release",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="释放一镜「生成中」租约（不生成时用）",
+)
+async def release_board_draft(
+    chapter_id: str, body: BoardDraftReleaseRequest, db: AsyncSession = Depends(get_db)
+) -> Any:
+    data = await svc.release_shot_draft(
+        db,
+        chapter_id=chapter_id,
+        shot_id=body.shot_id,
+        claim_token=body.claim_token,
+        error=body.error,
+    )
     return success_response(data)
 
 

@@ -53,6 +53,18 @@ class ShotStatus(str, Enum):
     ready = "ready"
 
 
+class ShotVideoPromptDraftStatus(str, Enum):
+    """集级提示词看板的**草稿**状态（服务端草稿存储，与正式字段无关）。
+
+    只有三种落库状态；「未开始」**不落行**（没有草稿行的镜头就是未开始），
+    这样"未开始"和"失败"在数据层不会混淆 —— 读接口会把缺行渲染成 ``pending``。
+    """
+
+    running = "running"  # 已抢占生成中（带租约，超时自动释放）
+    ok = "ok"            # 生成成功，草稿可用
+    failed = "failed"    # 生成失败，带原因
+
+
 class ShotCandidateType(str, Enum):
     """镜头提取候选类型。"""
 
