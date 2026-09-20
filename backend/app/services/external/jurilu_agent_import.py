@@ -301,6 +301,9 @@ def fetch_agent_platform_with_cookie(
     authorization: str = "",
     referer: str = "",
 ) -> dict:
+    # 早退分支（URL 缺失 / 域名不对 / 没凭证）+ 成功 + 三类异常，共 8 个 return；
+    # 拆小函数会把「头怎么拼、事实怎么取证」拆散，得不偿失。
+    # pylint: disable=too-many-return-statements
     clean_url = str(agent_list_url or "").strip()
     clean_cookie = str(cookie_text or "").strip()
     clean_auth = str(authorization or "").strip()
@@ -344,6 +347,7 @@ def fetch_agent_platform_with_cookie(
             body_bytes = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
 
     request = urllib.request.Request(clean_url, data=body_bytes, headers=headers, method=method)
+    facts = _request_facts(headers, clean_cookie)
     started = time.time()
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
@@ -355,6 +359,7 @@ def fetch_agent_platform_with_cookie(
                 "elapsed_ms": int((time.time() - started) * 1000),
                 "text": body,
                 "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                "request_facts": facts,
             }
     except urllib.error.HTTPError as exc:
         error_type = "cookie 失效" if exc.code in {401, 403} else "网络失败"
@@ -364,27 +369,64 @@ def fetch_agent_platform_with_cookie(
             resp_body = ""
         return _error_result(clean_url, method, exc.code, error_type, f"HTTP {exc.code}",
                              int((time.time() - started) * 1000), bool(clean_cookie),
-                             bool(clean_auth), bool(clean_referer), resp_body)
+                             bool(clean_auth), bool(clean_referer), resp_body,
+                             request_facts=facts)
     except urllib.error.URLError as exc:
         return _error_result(clean_url, method, None, "网络失败",
                              f"{type(exc.reason).__name__}: {exc.reason}",
                              int((time.time() - started) * 1000), bool(clean_cookie),
-                             bool(clean_auth), bool(clean_referer), "")
+                             bool(clean_auth), bool(clean_referer), "",
+                             request_facts=facts)
     except Exception as exc:
         return _error_result(clean_url, method, None, "网络失败",
                              f"{type(exc).__name__}: {exc}",
                              int((time.time() - started) * 1000), bool(clean_cookie),
-                             bool(clean_auth), bool(clean_referer), "")
+                             bool(clean_auth), bool(clean_referer), "",
+                             request_facts=facts)
+
+
+def cookie_has_authorization_item(cookie_text: str) -> bool:
+    """整串 Cookie 里是否有一个**名为 Authorization** 的项。
+
+    只回布尔值：项名可以报，项值绝不能外泄。
+    """
+    for part in str(cookie_text or "").split(";"):
+        name = part.split("=", 1)[0].strip()
+        if name.lower() == "authorization":
+            return True
+    return False
+
+
+def _request_facts(headers: Dict[str, str], cookie_text: str) -> Dict[str, Any]:
+    """真实的**请求头形状**取证：只有头名与布尔值，绝不含头值。
+
+    401 排查时用户要的七件事（URL / 方法 / 状态 / 头名 / 是否带 Cookie /
+    Cookie 里是否有 Authorization 项 / 是否错发了 HTTP Authorization 头）里，
+    后三件由这里给出，前几件由调用方补齐。
+    """
+    names = sorted({str(key).lower() for key in headers})
+    return {
+        "request_header_names": names,
+        "sent_cookie_header": "cookie" in names,
+        "sent_authorization_header": "authorization" in names,
+        "cookie_has_authorization_item": cookie_has_authorization_item(cookie_text),
+    }
 
 
 def _error_result(url, method, status, error_type, error, elapsed_ms,
-                  has_cookie, has_auth, has_referer, response_preview="") -> dict:
-    return {
+                  has_cookie, has_auth, has_referer, response_preview="",
+                  request_facts: Optional[dict] = None) -> dict:
+    payload = {
         "ok": False, "url": url, "method": method, "status": status,
         "error_type": error_type, "error": error, "elapsed_ms": elapsed_ms,
         "has_cookie": has_cookie, "has_auth": has_auth, "has_referer": has_referer,
         "response_preview": _sanitize(response_preview),
     }
+    if request_facts:
+        # 既有嵌套形状（供两步流程/服务层取用），也摊平一份便于直接看
+        payload["request_facts"] = request_facts
+        payload.update(request_facts)
+    return payload
 
 
 def _sanitize(text: str) -> str:
@@ -425,6 +467,7 @@ def fetch_all_storyboards(
         authorization=authorization, referer=referer,
     )
     diag["script_status"] = script_result.get("status")
+    diag["script_request_facts"] = script_result.get("request_facts") or {}
     if not script_result.get("ok"):
         return {"ok": False, "scripts": [], "storyboards": [],
                 "warnings": [f"获取脚本列表失败: {script_result.get('error')}"],
@@ -464,6 +507,9 @@ def fetch_all_storyboards(
         )
         if not sb_result.get("ok"):
             warnings.append(f"scriptId={sid} 分镜接口失败: {sb_result.get('error')}")
+            diag.setdefault("storyboard_request_facts", []).append(
+                sb_result.get("request_facts") or {}
+            )
             continue
 
         sbs = _extract_storyboard_records(

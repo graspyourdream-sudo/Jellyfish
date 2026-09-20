@@ -80,6 +80,15 @@ def fetch_entries(
     diagnostics["has_cookie"] = bool(resolved_cookie)
     diagnostics["has_auth"] = bool(resolved_auth)
     diagnostics["has_referer"] = bool(referer)
+    # 401 排查用的**请求头形状**（只有头名与布尔值，绝不含头值）：
+    # 「是否带 Cookie / Cookie 里是否有 Authorization 项 / 是否错发了 HTTP Authorization 头」
+    facts = dict(diagnostics.get("script_request_facts") or {})
+    diagnostics["request_header_names"] = list(facts.get("request_header_names") or [])
+    diagnostics["sent_cookie_header"] = bool(facts.get("sent_cookie_header"))
+    diagnostics["sent_authorization_header"] = bool(facts.get("sent_authorization_header"))
+    diagnostics["cookie_has_authorization_item"] = bool(
+        facts.get("cookie_has_authorization_item")
+    )
 
     if not result.get("ok"):
         raise JuriluImportError(
@@ -142,8 +151,10 @@ async def build_preview(
         cookie=cookie,
         authorization=authorization,
         auth_mode=auth_mode,
-        # 巨日禄按 Referer 判来源：留空时用页面 URL 兜底（原中控台同口径 app.py:18478）
-        referer=(referer or source_url),
+        # 巨日禄按 Referer 判来源：留空时由 fetch_entries 统一用页面 URL 兜底
+        # （这里**不能**引用 source_url —— 那是 fetch_entries 里的局部变量，
+        #   在 build_preview 作用域里并不存在，写了就是 NameError）
+        referer=referer,
         api_url_override=api_url_override,
     )
     shots = await load_chapter_shots(db, chapter_id)

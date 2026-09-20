@@ -133,3 +133,81 @@ def test_401_diagnostics_are_redacted(monkeypatch) -> None:
     blob = repr(result)
     assert "abc.def.ghi" not in blob
     assert "ph_phc_demo" not in blob
+
+
+def test_error_result_reports_request_header_shape_only(monkeypatch) -> None:
+    """401 时要能报出「请求头形状」：只有头名与布尔，绝无头值。
+
+    对应用户要求的脱敏信息：请求头名称 / 是否带 Cookie /
+    Cookie 里是否有名为 Authorization 的项 / 是否错发了 HTTP Authorization 头。
+    """
+    _capture(monkeypatch)
+    # 仅 Cookie（授权方式 none，Authorization 框为空）
+    only_cookie = jurilu.fetch_agent_platform_with_cookie(URL, COOKIE, authorization="")
+    facts = only_cookie["request_facts"]
+    assert facts["request_header_names"] == [
+        "accept", "accept-encoding", "cookie", "origin", "user-agent",
+    ]
+    assert facts["sent_cookie_header"] is True
+    assert facts["sent_authorization_header"] is False
+    assert facts["cookie_has_authorization_item"] is True
+
+    # 额外带 Authorization 时也要如实标出来
+    with_auth = jurilu.fetch_agent_platform_with_cookie(URL, COOKIE, authorization="abc.def")
+    facts2 = with_auth["request_facts"]
+    assert facts2["sent_authorization_header"] is True
+    assert "authorization" in facts2["request_header_names"]
+
+    # 没有 Authorization 项的普通 Cookie
+    plain = jurilu.fetch_agent_platform_with_cookie(URL, "a=1; b=2", authorization="")
+    assert plain["request_facts"]["cookie_has_authorization_item"] is False
+
+    # 头值一个字都不能出现
+    for payload in (only_cookie, with_auth, plain):
+        blob = repr(payload)
+        assert "abc.def.ghi" not in blob
+        assert "ph_phc_demo" not in blob
+
+
+def test_storyboards_diagnostics_carry_request_facts(monkeypatch) -> None:
+    """两步抓取失败时，diagnostics 里要带上第一步的请求头形状。"""
+
+    def raise_401(request, timeout=None):  # noqa: ANN001, ANN202
+        raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(jurilu.urllib.request, "urlopen", raise_401)
+    result = jurilu.fetch_all_storyboards(
+        source_url=URL, cookie_text=COOKIE, authorization="", referer=URL,
+    )
+    assert result["ok"] is False
+    diag = result["diagnostics"]
+    assert diag["script_status"] == 401
+    facts = diag["script_request_facts"]
+    assert facts["sent_cookie_header"] is True
+    assert facts["sent_authorization_header"] is False
+    assert facts["cookie_has_authorization_item"] is True
+    assert "referer" in facts["request_header_names"]
+    assert "abc.def.ghi" not in repr(diag)
+
+
+def test_fetch_entries_flattens_request_shape_into_diagnostics(monkeypatch) -> None:
+    """服务层要把请求头形状摊平成前端可直接渲染的脱敏字段。"""
+    import pytest
+
+    from app.services.external import jurilu_import_service as service
+
+    def raise_401(request, timeout=None):  # noqa: ANN001, ANN202
+        raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(jurilu.urllib.request, "urlopen", raise_401)
+    with pytest.raises(service.JuriluImportError) as excinfo:
+        service.fetch_entries(url=URL, cookie=COOKIE, auth_mode="none", referer="")
+    diag = excinfo.value.diagnostics
+    assert diag["has_cookie"] is True
+    assert diag["has_auth"] is False
+    assert diag["has_referer"] is False
+    assert diag["sent_cookie_header"] is True
+    assert diag["sent_authorization_header"] is False
+    assert diag["cookie_has_authorization_item"] is True
+    assert "cookie" in diag["request_header_names"]
+    assert "abc.def.ghi" not in repr(diag)
