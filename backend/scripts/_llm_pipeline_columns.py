@@ -1,4 +1,4 @@
-"""LLM 管线新增列的**唯一清单**：迁移脚本与回滚脚本共用这一份，禁止各写一份。
+"""SQLite 增量列清单（LLM 管线 + 项目起点）：迁移脚本与回滚脚本共用这一份，禁止各写一份。
 
 为什么要有这个文件：迁移与回滚此前各维护一份列清单，已经漂移成
 「迁移 11 列 / 回滚 10 列」——迁移漏了 ``video_prompt`` / ``video_prompt_source``，
@@ -12,7 +12,11 @@
    ``{提示词类别: 提示词正文}``）。
 2. 定版主图（4 列）：``actor_images`` / ``scene_images`` / ``prop_images`` /
    ``costume_images`` 各加 ``is_primary``。此前只有 ``character_images`` 有这一列。
-3. 镜头级正式产物（4 列，都在 ``shot_details``）：
+3. 项目起点（1 列，``projects``）：``start_mode``（``script`` / ``prompts``）。
+   「从视频提示词开始」的项目创建时需要它来决定是否自动补默认章节、以及工作台第一步
+   显示「已跳过：提示词起步」；**旧行由 ``DEFAULT 'script'`` 自动回填**，行为与迁移前一致
+   （老项目仍然按「从剧本开始」走）。
+4. 镜头级正式产物（4 列，都在 ``shot_details``）：
    ``video_prompt`` / ``video_prompt_source``（视频提示词与来源，交付导出读的就是它）、
    ``audio_file_id`` / ``audio_opt_out``（声音绑定与「本镜无需声音」显式标记，
    两者互斥）。
@@ -113,6 +117,12 @@ COLUMNS: tuple[NewColumn, ...] = (
         "audio_file_id",
         "VARCHAR(64) DEFAULT NULL",
         "镜头级音频文件引用（files.type=audio）；无音频时保持 NULL",
+    ),
+    NewColumn(
+        "projects",
+        "start_mode",
+        "VARCHAR(16) NOT NULL DEFAULT 'script'",
+        "项目起点（script=从剧本开始 / prompts=从视频提示词开始）；旧行自动回填 script",
     ),
     NewColumn(
         "shot_details",

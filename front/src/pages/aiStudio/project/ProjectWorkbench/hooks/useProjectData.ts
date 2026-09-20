@@ -45,6 +45,7 @@ function toUIProject(p: ProjectRead): Project {
     },
     createdAt,
     updatedAt,
+    startMode: (p.start_mode as 'script' | 'prompts' | undefined) ?? 'script',
   }
 }
 

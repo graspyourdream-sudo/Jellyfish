@@ -2,6 +2,7 @@
 /* istanbul ignore file */
 /* tslint:disable */
 /* eslint-disable */
+import type { ProjectStartMode } from './ProjectStartMode';
 import type { ProjectVisualStyle } from './ProjectVisualStyle';
 export type ProjectRead = {
     /**
@@ -36,6 +37,10 @@ export type ProjectRead = {
      * 项目级默认视频比例；分镜未覆盖时生效
      */
     default_video_ratio?: (string | null);
+    /**
+     * 项目起点：script=从剧本开始；prompts=从视频提示词开始
+     */
+    start_mode?: ProjectStartMode;
     /**
      * 聚合统计（JSON）
      */

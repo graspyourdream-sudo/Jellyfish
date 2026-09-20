@@ -33,6 +33,7 @@ import {
   type ProjectStepKey,
 } from './projectSteps'
 import { useProjectStepSignals } from './hooks/useProjectStepSignals'
+import { getDisplayStep, getDisplayStepIndex } from './projectSteps'
 import { ProjectStepNav } from './components/ProjectStepNav'
 import { ProjectStepSummaryStrip } from './components/ProjectStepSummaryStrip'
 import { ProjectExtractCandidatesPanel } from './components/ProjectExtractCandidatesPanel'
@@ -149,6 +150,7 @@ const ProjectWorkbench: React.FC = () => {
     projectId,
     chapters,
     focusChapterId: focusChapter?.id ?? null,
+    startMode: project?.startMode ?? 'script',
   })
 
   const resolution = useMemo(() => resolveProjectStep(stepSignals), [stepSignals])
@@ -339,12 +341,18 @@ const ProjectWorkbench: React.FC = () => {
   const renderStepContent = () => {
     if (!activeStep) return null
     if (activeStep === 'script') return <ChaptersTab />
-    if (activeStep === 'extract_assets') {
+    if (activeStep === 'extract_assets' || activeStep === 'image_prep') {
+      /**
+       * 用户看到的第 2 步「资产准备」= 内部 extract_assets + image_prep **同屏连续完成**：
+       * 提取候选 → 审核 → 关联资产库已有 / 新建 → 图片提示词 → 上传或生成图片 → 设为定版。
+       * 两个内部 key 都渲染这一屏，所以旧深链（?step=image_prep）依然可用，只是不再单独占一步。
+       */
       return (
-        <div className="h-full min-h-0 flex flex-col">
+        <div className="h-full min-h-0 flex flex-col overflow-auto pr-1">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <span className="text-xs text-gray-500">
-              第 2 步：从剧本中提取角色、场景、道具。资产在本步建立，参考图片在第 3 步「图片准备」里补齐。
+              第 2 步「资产准备」：先提取候选并确认写入，再在下面把每个资产的图片提示词、图片与定版补齐，
+              全部在同一步完成。
             </span>
             <Segmented
               size="small"
@@ -359,15 +367,22 @@ const ProjectWorkbench: React.FC = () => {
               }))}
             />
           </div>
-          {/* 第 2 步的工作面板：点前门禁状态 → 开始/重新提取 → 候选预览 → 确认写入 */}
+          {/* ① 提取 → 审核候选 → 确认写入（关联库资产或新建） */}
           <ProjectExtractCandidatesPanel
             projectId={projectId ?? null}
             chapterId={focusChapter?.id ?? null}
             chapterLabel={chapterLabel}
             onReload={reloadSignals}
           />
-          {/* 只挂载当前子页签，保持与原来 Tab 切换一致的加载行为 */}
-          <div className="flex-1 min-h-0 overflow-hidden">
+          {/* ② 同一步内继续：资产清单与状态 → 图片提示词 → 图片 → 定版 */}
+          <ProjectImagePrepPanel
+            assets={projectAssets}
+            detail={stepDetail}
+            loading={signalsLoading}
+            onReload={reloadSignals}
+          />
+          {/* ③ 项目资产明细（角色 / 场景 / 道具 / 服装 / 演员）：两个入口都保留 */}
+          <div className="mt-3 min-h-0">
             {assetSubTab === 'roles' && <RolesTab />}
             {assetSubTab === 'scenes' && <ScenesTab />}
             {assetSubTab === 'props' && <PropsTab />}
@@ -375,16 +390,6 @@ const ProjectWorkbench: React.FC = () => {
             {assetSubTab === 'actors' && <ActorsTab />}
           </div>
         </div>
-      )
-    }
-    if (activeStep === 'image_prep') {
-      return (
-        <ProjectImagePrepPanel
-          assets={projectAssets}
-          detail={stepDetail}
-          loading={signalsLoading}
-          onReload={reloadSignals}
-        />
       )
     }
     if (activeStep === 'video_prompt') {
@@ -395,6 +400,8 @@ const ProjectWorkbench: React.FC = () => {
           chapterId={focusChapter?.id ?? null}
           chapterLabel={chapterLabel ?? '未选择章节'}
           onEnterStudio={() => openChapterStudio('video_prompt')}
+          onContinueAssets={() => openStep('extract_assets')}
+          onGoBinding={() => openChapterStudio('binding')}
         />
       )
     }
@@ -472,6 +479,7 @@ const ProjectWorkbench: React.FC = () => {
         <ProjectStepNav
           activeStep={activeStep}
           resolvedStep={resolution.step}
+          startMode={project?.startMode ?? 'script'}
           loading={signalsLoading}
           onSelectStep={handleSelectStep}
         />
@@ -483,7 +491,9 @@ const ProjectWorkbench: React.FC = () => {
             <InfoCircleOutlined />
             {signalsLoading
               ? '正在判断项目进度…'
-              : `当前流程位置：第 ${getProjectStepIndex(resolution.step) + 1} 步 · ${resolvedStepMeta.label}`}
+              : `当前流程位置：第 ${getDisplayStepIndex(resolution.step) + 1} 步 · ${
+                  getDisplayStep(resolution.step).label
+                }`}
           </span>
         </div>
       </div>

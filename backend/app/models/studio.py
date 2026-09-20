@@ -44,6 +44,7 @@ from app.models.types import (
     DialogueLineMode,
     FileType,
     FileUsageKind,
+    ProjectStartMode,
     ProjectStyle,
     ProjectVisualStyle,
     PromptCategory,
@@ -58,6 +59,7 @@ from app.models.types import (
 
 __all__ = [
     # Enums
+    "ProjectStartMode",
     "ProjectStyle",
     "ProjectVisualStyle",
     "ChapterStatus",

@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models.studio import ChapterStatus, ProjectStyle, ProjectVisualStyle
+from app.models.studio import ChapterStatus, ProjectStartMode, ProjectStyle, ProjectVisualStyle
 
 
 PROJECT_STYLE_EXAMPLES = [x.value for x in ProjectStyle]
@@ -29,6 +29,20 @@ class ProjectBase(BaseModel):
     unify_style: bool = Field(True, description="是否统一风格")
     progress: int = Field(0, description="进度百分比（0-100）")
     default_video_ratio: str | None = Field(None, description="项目级默认视频比例；分镜未覆盖时生效")
+    start_mode: ProjectStartMode = Field(
+        ProjectStartMode.script,
+        description="项目起点：script=从剧本开始；prompts=从视频提示词开始",
+    )
+
+    @field_validator("start_mode", mode="before")
+    @classmethod
+    def _default_start_mode(cls, value: object) -> object:
+        """`None` 按 `script` 处理。
+
+        覆盖两种情况：① 迁移前写入、尚未回填的历史行；② 内存中刚构造还没 flush 的
+        ORM 对象（列默认值此时还没生效）。两者都不该让响应校验 500。
+        """
+        return ProjectStartMode.script if value is None else value
     stats: dict[str, Any] = Field(default_factory=dict, description="聚合统计（JSON）")
 
 
@@ -45,6 +59,7 @@ class ProjectUpdate(BaseModel):
     unify_style: bool | None = None
     progress: int | None = None
     default_video_ratio: str | None = None
+    start_mode: ProjectStartMode | None = None
     stats: dict[str, Any] | None = None
 
 

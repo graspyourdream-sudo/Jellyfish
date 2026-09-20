@@ -55,13 +55,16 @@ def test_shared_column_list_is_symmetric_between_migrate_and_rollback() -> None:
 
     assert migrate.COLUMNS is shared.COLUMNS
     assert rollback.COLUMNS is shared.COLUMNS
-    assert shared.column_count() == len(shared.COLUMNS) == 13
+    # 数量动态取自清单本身（清单是唯一来源，不在测试里写死）
+    assert shared.column_count() == len(shared.COLUMNS)
     assert shared.column_pairs() == tuple((c.table, c.column) for c in shared.COLUMNS)
 
-    # 13 列的三段构成必须都在（防止"漏了两列"这种历史问题复发）
+    # 各段构成必须都在（防止"漏了两列"这种历史问题复发）
     pairs = set(shared.column_pairs())
     assert len([p for p in pairs if p[1] == "image_prompts"]) == 5
     assert len([p for p in pairs if p[1] == "is_primary"]) == 4
+    assert len([p for p in pairs if p[1] == "start_mode"]) == 1
+    assert ("projects", "start_mode") in pairs
     assert {
         ("shot_details", "video_prompt"),
         ("shot_details", "video_prompt_source"),
@@ -109,6 +112,9 @@ _PRE_MIGRATION_DDL = (
     "CREATE TABLE prop_images (id INTEGER PRIMARY KEY, prop_id TEXT)",
     "CREATE TABLE costume_images (id INTEGER PRIMARY KEY, costume_id TEXT)",
     "CREATE TABLE shot_details (id TEXT PRIMARY KEY, camera_shot TEXT)",
+    # 项目起点列（scripts/_llm_pipeline_columns.py 里的 projects.start_mode）也在这份清单里，
+    # 因此最小的「迁移前」结构必须包含 projects 表。
+    "CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT)",
 )
 
 
@@ -120,6 +126,7 @@ def _make_pre_migration_db(path: Path) -> None:
         # 放几行数据：回滚后必须原样还在（DROP COLUMN 不该动数据）
         conn.execute("INSERT INTO characters (id, name) VALUES ('char-1', '林小满')")
         conn.execute("INSERT INTO shot_details (id, camera_shot) VALUES ('shot-1', 'MS')")
+        conn.execute("INSERT INTO projects (id, name) VALUES ('proj-1', '老项目')")
         conn.commit()
     finally:
         conn.close()
@@ -134,7 +141,7 @@ def _columns(path: Path, table: str) -> list[str]:
 
 
 def test_migrate_then_rollback_round_trip_is_symmetric_and_idempotent(tmp_path: Path) -> None:
-    """迁移前缺列 → 迁移 → 13 列全有 → 再迁移幂等 → 回滚 → 13 列全无且数据不动。"""
+    """迁移前缺列 → 迁移 → 清单里的列全有 → 再迁移幂等 → 回滚 → 全无且数据不动。"""
     # pylint: disable=import-error  # scripts/ 已在上文注入 sys.path
     # pylint: disable=import-error  # scripts/ 已注入 sys.path
     import _llm_pipeline_columns as shared
@@ -153,7 +160,7 @@ def test_migrate_then_rollback_round_trip_is_symmetric_and_idempotent(tmp_path: 
     for item in shared.COLUMNS:
         assert item.column not in _columns(db, item.table)
 
-    # 1) 迁移：13 列全部存在
+    # 1) 迁移：清单里的列全部存在
     assert migrate.migrate(check_only=False, db_path=db) == 0
     for item in shared.COLUMNS:
         assert item.column in _columns(db, item.table), f"迁移后缺少 {item.table}.{item.column}"

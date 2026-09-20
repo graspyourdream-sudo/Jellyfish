@@ -1,16 +1,15 @@
 /**
- * 项目工作台「六步流程」模型。
+ * 项目工作台「生产步骤」模型。
  *
- * 这 6 步是项目工作台的主导航（替代原来的 10 个平级 Tab）：
- *   1. 剧本        script            （prep：在工作台内就地渲染）
- *   2. 提取资产    extract_assets     （prep：在工作台内就地渲染）
- *   3. 图片准备    image_prep         （prep：在工作台内就地渲染）
- *   4. 视频提示词  video_prompt       （studio：跳到章节工作室，本轮不重建）
- *   5. 关联绑定    binding            （studio：跳到章节工作室，本轮不重建）
- *   6. 生成与交付  generate_deliver   （studio：跳到章节工作室，本轮不重建）
+ * 用户可见的是**五步**（第二部分统一口径，见 `DISPLAY_STEPS`）：
+ *   1. 剧本与分镜 → 2. 资产准备 → 3. 整集视频提示词 → 4. 资产与声音绑定 → 5. 生成与交付
+ * 内部的 key 仍是下面这 6 个（旧深链、旧字段一律保留可用）：
+ *   script → extract_assets → image_prep → video_prompt → binding → generate_deliver
+ * 其中 `extract_assets` 与 `image_prep` **共同**构成用户看到的第 2 步「资产准备」，
+ * 页面把两块内容渲染在同一步里，形成连续流程。
  *
- * 本文件是**纯模型**：不依赖 React、不发请求、不做副作用，方便单测与复用。
- * 数据抓取在 `hooks/useProjectStepSignals.ts`，URL/渲染在 `index.tsx`。
+ * 「从视频提示词开始」的项目：第一步显示为「已跳过：提示词起步」，判定直接落在
+ * 整集提示词看板，不再要求先有剧本/分镜。
  */
 
 export type ProjectStepKey =
@@ -41,8 +40,8 @@ export const PROJECT_STEPS: ProjectStepMeta[] = [
   },
   {
     key: 'extract_assets',
-    label: '提取资产',
-    description: '从剧本中提取角色、场景、道具等项目资产，并补齐资产描述',
+    label: '资产准备',
+    description: '提取人物/场景/道具/服装候选 → 审核 → 关联或新建 → 图片提示词 → 图片 → 定版',
     group: 'prep',
   },
   {
@@ -70,6 +69,68 @@ export const PROJECT_STEPS: ProjectStepMeta[] = [
     group: 'studio',
   },
 ]
+
+/**
+ * 用户可见的**五步**。
+ *
+ * `stepKeys` 是该展示步骤覆盖的内部 key（第 2 步覆盖 `extract_assets` 与 `image_prep`），
+ * 这样内部路由/深链不用改，步骤条也能按五步展示。
+ */
+export type DisplayStep = {
+  key: string
+  label: string
+  description: string
+  stepKeys: ProjectStepKey[]
+}
+
+export const DISPLAY_STEPS: DisplayStep[] = [
+  {
+    key: 'script_shots',
+    label: '剧本与分镜',
+    description: '录入或导入剧本（TXT / MD / DOCX），拆分或手工编辑分镜',
+    stepKeys: ['script'],
+  },
+  {
+    key: 'asset_prep',
+    label: '资产准备',
+    description:
+      '从剧本/分镜提取人物、场景、道具、服装 → 审核候选 → 关联资产库已有资产或新建 → 图片提示词 → 上传或生成图片 → 设为定版',
+    stepKeys: ['extract_assets', 'image_prep'],
+  },
+  {
+    key: 'episode_prompt',
+    label: '整集视频提示词',
+    description: '整集批量生成或批量导入提示词，统一预览确认后再进工作室逐镜检查',
+    stepKeys: ['video_prompt'],
+  },
+  {
+    key: 'asset_binding',
+    label: '资产与声音绑定',
+    description: '把角色、场景、道具与声音绑定到对应镜头',
+    stepKeys: ['binding'],
+  },
+  {
+    key: 'generate_deliver',
+    label: '生成与交付',
+    description: '生成镜头视频、检查成片并导出交付',
+    stepKeys: ['generate_deliver'],
+  },
+]
+
+/** 内部 step key → 用户可见的五步序号（0 起）与展示信息。 */
+export function getDisplayStepIndex(key: ProjectStepKey): number {
+  const index = DISPLAY_STEPS.findIndex((step) => step.stepKeys.includes(key))
+  return index >= 0 ? index : 0
+}
+
+export function getDisplayStep(key: ProjectStepKey): DisplayStep {
+  return DISPLAY_STEPS[getDisplayStepIndex(key)] ?? DISPLAY_STEPS[0]
+}
+
+/** 展示步骤对应的「主」内部 key（点击步骤条时用，第 2 步落在 `extract_assets`）。 */
+export function getDisplayStepEntryKey(step: DisplayStep): ProjectStepKey {
+  return step.stepKeys[0]
+}
 
 /** 默认落地步骤：全新项目没有章节时落在「剧本」。 */
 export const DEFAULT_PROJECT_STEP: ProjectStepKey = 'script'
@@ -122,6 +183,12 @@ export function getPrevProjectStepKey(key: ProjectStepKey): ProjectStepKey | nul
  *   否则项目会被永久钉在第 3 步。
  */
 export type ProjectStepInput = {
+  /**
+   * 项目起点（`projects.start_mode`）。
+   * - `script`（默认）：剧本 → 分镜 → 资产 → …
+   * - `prompts`：创建即自动建默认章节，直接进整集提示词看板；不要求先有剧本/分镜。
+   */
+  startMode?: 'script' | 'prompts' | null
   /** 项目章节总数 */
   chapterCount?: number | null
   /** 已录入原文（rawText 非空）的章节数 */
@@ -159,9 +226,9 @@ export type ProjectStepResolution = {
 }
 
 const NEXT_ACTION_LABEL: Record<ProjectStepKey, string> = {
-  script: '录入剧本',
-  extract_assets: '提取项目资产',
-  image_prep: '准备资产图片',
+  script: '剧本与分镜',
+  extract_assets: '开始资产准备',
+  image_prep: '继续资产准备',
   video_prompt: '编写视频提示词',
   binding: '关联绑定资产',
   generate_deliver: '进入生成与交付',
@@ -216,9 +283,37 @@ export function resolveProjectStep(input?: ProjectStepInput | null): ProjectStep
   const shotsWithVideoPromptCount = toCount(source.shotsWithVideoPromptCount)
   const shotsWithAssetLinkCount = toCount(source.shotsWithAssetLinkCount)
 
+  // 「从视频提示词开始」的项目：第一步（剧本与分镜）显示为「已跳过：提示词起步」，
+  // 判定不再要求先有剧本/分镜原文，直接落在整集提示词看板；资产/绑定/交付仍按下面的规则推进。
+  if (source.startMode === 'prompts') {
+    if (chapterCount <= 0) {
+      return buildResolution('script', '提示词起步的项目需要至少一个章节来承载镜头', ['还没有创建任何章节'])
+    }
+    if (shotsWithVideoPromptCount <= 0) {
+      return buildResolution('video_prompt', '提示词起步：先在整集提示词看板导入或批量生成提示词', [
+        '还没有任何视频提示词',
+      ])
+    }
+    if (totalAssets <= 0) {
+      return buildResolution('extract_assets', '已有视频提示词，但项目还没有角色/场景/道具资产', [
+        '还没有项目资产（角色 / 场景 / 道具）',
+      ])
+    }
+    const hasAssetImagesPrompts = assetsWithImagePromptCount === null ? assetImageCount > 0 : assetsWithImagePromptCount > 0
+    if (!hasAssetImagesPrompts) {
+      return buildResolution('image_prep', '资产已建立，但参考图片/图片提示词还没准备好', [
+        '资产还没有参考图片或图片提示词',
+      ])
+    }
+    if (shotsWithAssetLinkCount <= 0) {
+      return buildResolution('binding', '已有提示词与资产，接下来把资产与声音绑定到镜头', ['镜头还没有关联任何资产'])
+    }
+    return buildResolution('generate_deliver', '主流程前置条件已就绪，可以进入视频生成与交付', [])
+  }
+
   // 1. 没有章节，或没有任何章节原文 → 剧本
   if (chapterCount <= 0) {
-    return buildResolution('script', '项目还没有章节，六步流程从录入剧本开始', ['还没有创建任何章节'])
+    return buildResolution('script', '项目还没有章节，流程从录入剧本开始', ['还没有创建任何章节'])
   }
   if (chaptersWithTextCount <= 0) {
     const missing = [

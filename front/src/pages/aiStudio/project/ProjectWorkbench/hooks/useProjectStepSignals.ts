@@ -156,8 +156,10 @@ export function useProjectStepSignals(args: {
   projectId: string | undefined
   chapters: { id: string; rawText?: string; storyboardCount?: number }[]
   focusChapterId: string | null
+  /** 项目起点：prompts 时判定跳过剧本/分镜前置，直接落在整集提示词看板 */
+  startMode?: 'script' | 'prompts'
 }): ProjectStepSignalsResult {
-  const { projectId, chapters, focusChapterId } = args
+  const { projectId, chapters, focusChapterId, startMode = 'script' } = args
   // 初值必须为 true：落地判定要等第一轮信号抓完，否则工作台会拿着空快照先跳到「剧本」。
   const [loading, setLoading] = useState(true)
   const [assets, setAssets] = useState<ProjectSignalAsset[]>([])
@@ -353,6 +355,7 @@ export function useProjectStepSignals(args: {
         failedSources,
       })
       setInput({
+        startMode,
         chapterCount,
         chaptersWithTextCount,
         // 第 1-2 步与当前集绑定，镜头类信号按当前集口径传。
@@ -370,7 +373,7 @@ export function useProjectStepSignals(args: {
     return () => {
       cancelled = true
     }
-  }, [projectId, chaptersKey, focusChapterId, reloadToken])
+  }, [projectId, chaptersKey, focusChapterId, reloadToken, startMode])
 
   const reload = useCallback(() => setReloadToken((token) => token + 1), [])
 

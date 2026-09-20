@@ -46,6 +46,8 @@ import {
   type PromptBoardOrigin,
   type PromptBoardShot,
 } from '../../../../../services/llmPipelineApi'
+import { StudioShotsService } from '../../../../../services/generated'
+import { classifyGenerationFailure, failureText } from '../../../components/generationGate'
 
 type RowStatus = 'ok' | 'draft' | 'dry_run' | 'failed' | 'skipped' | 'unmatched' | 'duplicate'
 
@@ -91,6 +93,10 @@ type EpisodeVideoPromptBoardProps = {
   chapterLabel: string
   /** 进入分镜工作台（集级确认保存后再去逐镜绑定/生成） */
   onEnterStudio?: () => void
+  /** 保存后继续第 2 步「资产准备」 */
+  onContinueAssets?: () => void
+  /** 已有资产，直接去第 4 步「资产与声音绑定」 */
+  onGoBinding?: () => void
 }
 
 export function EpisodeVideoPromptBoard({
@@ -98,10 +104,13 @@ export function EpisodeVideoPromptBoard({
   chapterId,
   chapterLabel,
   onEnterStudio,
+  onContinueAssets,
+  onGoBinding,
 }: EpisodeVideoPromptBoardProps) {
   const [shots, setShots] = useState<PromptBoardShot[]>([])
   const [rows, setRows] = useState<PreviewRow[]>([])
   const [loading, setLoading] = useState(false)
+  const [creatingShots, setCreatingShots] = useState(false)
   const [mode, setMode] = useState<PromptBoardMode>('fill_empty')
   const [selectedShotIds, setSelectedShotIds] = useState<string[]>([])
   const [allowPartial, setAllowPartial] = useState(false)
@@ -346,6 +355,53 @@ export function EpisodeVideoPromptBoard({
     [toRow],
   )
 
+  /**
+   * 「提示词起步」的关键补位：本集还没有镜头（或镜头少于导入条数）时，
+   * 按导入顺序**创建缺失镜头**，然后重新解析一次让预览表把提示词匹配到新镜头上，
+   * 最后仍由用户点「确认保存」才写库。
+   *
+   * 为什么不做成自动保存：保存是写库动作，必须由用户在预览表里确认过。
+   */
+  const doCreateMissingShots = useCallback(async () => {
+    if (!chapterId) return
+    const missing = rows.length - shots.length
+    if (missing <= 0) {
+      message.info('当前镜头数已经不少于导入条数，无需创建')
+      return
+    }
+    setCreatingShots(true)
+    try {
+      const maxIndex = shots.reduce((max, shot) => Math.max(max, Number(shot.index) || 0), 0)
+      for (let offset = 1; offset <= missing; offset += 1) {
+        const row = rows[shots.length + offset - 1]
+        const prompt = (row?.prompt ?? '').trim()
+        const title = prompt.slice(0, 20) || `镜头 ${maxIndex + offset}`
+        await StudioShotsService.createShotApiV1StudioShotsPost({
+          requestBody: {
+            chapter_id: chapterId,
+            index: maxIndex + offset,
+            title,
+            script_excerpt: prompt,
+          } as never,
+        })
+      }
+      message.success(`已创建 ${missing} 个镜头，正在重新匹配提示词…`)
+      await loadBoard()
+      if (otherText.trim()) {
+        // 文本导入的原文还在，直接重解析一次即可把 rows 匹配到新镜头
+        const preview = await parsePromptImport(chapterId, otherText)
+        setIssues(preview.issues ?? [])
+        setCountMismatch(Boolean(preview.count_mismatch))
+        applyImportPreview(preview.entries ?? [], 'external_import')
+      }
+    } catch (error) {
+      const failure = classifyGenerationFailure(error, 'llm')
+      message.error(failureText(failure))
+    } finally {
+      setCreatingShots(false)
+    }
+  }, [applyImportPreview, chapterId, loadBoard, otherText, rows, shots.length])
+
   const doParseOtherImport = useCallback(async () => {
     if (!chapterId) return
     setParsing(true)
@@ -476,6 +532,17 @@ export function EpisodeVideoPromptBoard({
           <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadBoard()}>
             刷新镜头
           </Button>
+          {/* 提示词确认保存之后的两个业务出口（顺序与五步流程一致） */}
+          {onContinueAssets ? (
+            <Button size="small" type="link" onClick={onContinueAssets}>
+              继续准备资产 →
+            </Button>
+          ) : null}
+          {onGoBinding ? (
+            <Button size="small" type="link" onClick={onGoBinding}>
+              已有资产，直接进入绑定 →
+            </Button>
+          ) : null}
           {onEnterStudio ? (
             <Button size="small" type="link" onClick={onEnterStudio}>
               进入分镜工作台 →
@@ -703,6 +770,11 @@ export function EpisodeVideoPromptBoard({
       />
 
       <Space className="mt-3">
+        {rows.length > shots.length ? (
+          <Button loading={creatingShots} onClick={() => void doCreateMissingShots()}>
+            {`创建缺失镜头（${rows.length - shots.length} 个）并重新匹配`}
+          </Button>
+        ) : null}
         <Button type="primary" loading={saving} disabled={!includedCount} onClick={() => void doSave()}>
           {`确认保存（${includedCount} 条）`}
         </Button>

@@ -423,6 +423,49 @@ export interface ChapterAssetCandidates {
   notes: string[]
 }
 
+/* ------------------------------------------------- 剧本文档解析（TXT / MD / DOCX） */
+
+export interface ParsedDocument {
+  filename: string
+  format: string
+  text: string
+  char_count: number
+  paragraph_count: number
+  warnings: string[]
+}
+
+/**
+ * 解析剧本文档为纯文本。
+ *
+ * 后端只解析、不落盘、不写库、不上传对象存储（`POST /studio/documents/parse`），
+ * 因此 DRY_RUN 下也能用，且不会产生任何费用。
+ * 旧版 `.doc` 会返回明确错误（「请另存为 DOCX」），这里原样抛出给用户看。
+ */
+export async function parseScriptDocument(file: File): Promise<ParsedDocument> {
+  const form = new FormData()
+  form.append('file', file)
+  const response = await fetch(`${OpenAPI.BASE}/api/v1/studio/documents/parse`, {
+    method: 'POST',
+    body: form,
+  })
+  const text = await response.text()
+  let payload: AnyRecord | undefined
+  try {
+    payload = text ? (JSON.parse(text) as AnyRecord) : undefined
+  } catch {
+    payload = undefined
+  }
+  if (!response.ok) {
+    const meta = (payload?.meta ?? {}) as AnyRecord
+    const error = (meta.error ?? {}) as AnyRecord
+    throw new GenerationRequestError(
+      String(error.message ?? payload?.message ?? text ?? `HTTP ${response.status}`),
+      response.status,
+    )
+  }
+  return (payload?.data ?? null) as ParsedDocument
+}
+
 /** 章节提取候选聚合（只读：不建资产、不写库）。 */
 export function fetchChapterAssetCandidates(chapterId: string): Promise<ChapterAssetCandidates> {
   return callApi(`/api/v1/studio/chapters/${encodeURIComponent(chapterId)}/asset-candidates`)

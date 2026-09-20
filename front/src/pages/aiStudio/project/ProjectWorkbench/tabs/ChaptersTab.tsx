@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
-import { Card, Button, Tag, Space, Table, Empty, Modal, Input, Dropdown, Tooltip, message } from 'antd'
+import { Card, Button, Tag, Space, Table, Empty, Modal, Input, Dropdown, Tooltip, Upload, message } from 'antd'
 import type { MenuProps, TableColumnsType } from 'antd'
 import {
   EditOutlined,
@@ -10,6 +10,7 @@ import {
   ScissorOutlined,
   StopOutlined,
   SyncOutlined,
+  UploadOutlined,
 } from '@ant-design/icons'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ScriptProcessingService, StudioChaptersService } from '../../../../../services/generated'
@@ -22,6 +23,8 @@ import { loadChapterFlowStats, type ChapterFlowStats } from '../projectFlowStats
 import { executeTaskCancel } from '../../../components/taskActionHelpers'
 import { TASK_COPY } from '../../../components/taskCopy'
 import { nextChapterIndex } from '../../../chapter/chapterIndexing'
+import { parseScriptDocument } from '../../../../../services/llmPipelineApi'
+import { classifyGenerationFailure, failureText } from '../../../components/generationGate'
 import { useTaskPageContext } from '../../../components/taskPageContext'
 import { useTaskUiStore } from '../../../components/taskUiStore'
 import {
@@ -81,6 +84,7 @@ export function ChaptersTab() {
   const [editingChapter, setEditingChapter] = useState<Chapter | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
   const [createTitle, setCreateTitle] = useState('')
+  const [importingDoc, setImportingDoc] = useState(false)
   const [createContent, setCreateContent] = useState('')
   const [chapterFlowMap, setChapterFlowMap] = useState<Record<string, ChapterFlowStats>>({})
   const [chapterDivisionActionId, setChapterDivisionActionId] = useState<string | null>(null)
@@ -180,6 +184,33 @@ export function ChaptersTab() {
         openEditModal(chapter)
       },
     })
+  }
+
+  /**
+   * 导入剧本文档（TXT / MD / DOCX）→ 填入章节内容。
+   *
+   * 走后端纯解析端点（不落盘、不上传对象存储）；旧版 `.doc` 会被后端明确拒绝并提示
+   * 「请另存为 DOCX」，这里把原文照实显示给用户，不静默失败。
+   */
+  const handleImportDocument = async (file: File) => {
+    setImportingDoc(true)
+    try {
+      const parsed = await parseScriptDocument(file)
+      setCreateContent(parsed.text)
+      if (createTitle.trim() === '') {
+        setCreateTitle(parsed.filename.replace(/\.[^.]+$/, ''))
+      }
+      message.success(
+        `已导入 ${parsed.filename}（${parsed.format.toUpperCase()}，${parsed.char_count} 字），确认无误后点「创建」`,
+      )
+      for (const warning of parsed.warnings ?? []) message.warning(warning)
+    } catch (error) {
+      const failure = classifyGenerationFailure(error, 'llm')
+      message.error(failureText(failure))
+    } finally {
+      setImportingDoc(false)
+    }
+    return false
   }
 
   const handleCreateChapter = async () => {
@@ -597,10 +628,21 @@ export function ChaptersTab() {
               />
             </div>
             <div>
-              <span className="text-gray-600 text-sm">章节内容（可粘贴剧本）</span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-gray-600 text-sm">章节内容（粘贴或导入文档）</span>
+                <Upload
+                  accept=".txt,.md,.markdown,.docx,.doc"
+                  showUploadList={false}
+                  beforeUpload={(file) => handleImportDocument(file as unknown as File)}
+                >
+                  <Button size="small" icon={<UploadOutlined />} loading={importingDoc}>
+                    导入 TXT / MD / DOCX
+                  </Button>
+                </Upload>
+              </div>
               <TextArea
                 rows={6}
-                placeholder="粘贴文学剧本..."
+                placeholder="粘贴文学剧本，或点右上角导入 TXT / MD / DOCX 文档（老版 .doc 请先另存为 DOCX）"
                 value={createContent}
                 onChange={(e) => setCreateContent(e.target.value)}
                 className="mt-1 font-mono text-sm"

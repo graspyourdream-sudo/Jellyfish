@@ -2,10 +2,10 @@ import type { ReactNode } from 'react'
 import { Button, Card, Space, Spin, Tag, Tooltip } from 'antd'
 import { ArrowLeftOutlined, InfoCircleOutlined, RightOutlined } from '@ant-design/icons'
 import {
+  DISPLAY_STEPS,
+  getDisplayStep,
+  getDisplayStepIndex,
   getPrevProjectStepKey,
-  getProjectStepIndex,
-  getProjectStepMeta,
-  PROJECT_STEPS,
   type ProjectStepKey,
   type ProjectStepResolution,
 } from '../projectSteps'
@@ -58,11 +58,13 @@ export function ProjectStepSummaryStrip({
   continueLabel,
   devInfo,
 }: ProjectStepSummaryStripProps) {
-  const meta = getProjectStepMeta(step)
-  const index = getProjectStepIndex(step)
+  // 用户看到的是五步：第 2 步内部由 extract_assets + image_prep 共同构成
+  const display = getDisplayStep(step)
+  const index = getDisplayStepIndex(step)
   const prevStep = getPrevProjectStepKey(step)
-  const onResolvedStep = step === resolution.step
-  const isLastStep = index === PROJECT_STEPS.length - 1
+  // 同一个展示步骤内部的切换（extract_assets ↔ image_prep）不算「还没走到」
+  const onResolvedStep = getDisplayStepIndex(resolution.step) === index
+  const isLastStep = index === DISPLAY_STEPS.length - 1
 
   // 判定中：只说明正在判定，不摆任何结论（步骤标签、缺失项、继续按钮全部让位）。
   if (loading) {
@@ -91,10 +93,10 @@ export function ProjectStepSummaryStrip({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <Tag color="blue" className="mr-0">
-              第 {index + 1} 步 / 共 {PROJECT_STEPS.length} 步
+              第 {index + 1} 步 / 共 {DISPLAY_STEPS.length} 步
             </Tag>
-            <span className="font-medium">{meta.label}</span>
-            <span className="text-xs text-gray-500 truncate">{meta.description}</span>
+            <span className="font-medium">{display.label}</span>
+            <span className="text-xs text-gray-500 truncate">{display.description}</span>
             {chapterLabel ? (
               <Tag bordered={false} className="mr-0 text-[11px]">
                 当前集：{chapterLabel}
@@ -103,7 +105,9 @@ export function ProjectStepSummaryStrip({
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-gray-600">
             <span className="text-gray-500">
-              {onResolvedStep ? '当前缺失：' : `当前未完成步骤：第 ${getProjectStepIndex(resolution.step) + 1} 步 ${resolution.label} ·`}
+              {onResolvedStep
+                ? '当前缺失：'
+                : `当前未完成步骤：第 ${getDisplayStepIndex(resolution.step) + 1} 步 ${getDisplayStep(resolution.step).label} ·`}
             </span>
             {resolution.missing.length > 0 ? (
               resolution.missing.map((item) => (

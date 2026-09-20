@@ -2,6 +2,7 @@
 /* istanbul ignore file */
 /* tslint:disable */
 /* eslint-disable */
+import type { ProjectStartMode } from './ProjectStartMode';
 import type { ProjectVisualStyle } from './ProjectVisualStyle';
 export type ProjectUpdate = {
     name?: (string | null);
@@ -15,6 +16,7 @@ export type ProjectUpdate = {
     unify_style?: (boolean | null);
     progress?: (number | null);
     default_video_ratio?: (string | null);
+    start_mode?: (ProjectStartMode | null);
     stats?: (Record<string, any> | null);
 };
 

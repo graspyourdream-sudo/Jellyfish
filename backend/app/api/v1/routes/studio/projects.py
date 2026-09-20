@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import uuid
+
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.utils import apply_keyword_filter, apply_order, paginate
 from app.dependencies import get_db
-from app.models.studio import Project
-from app.models.types import ProjectStyle, ProjectVisualStyle
+from app.models.studio import Chapter, ChapterStatus, Project
+from app.models.types import ProjectStartMode, ProjectStyle, ProjectVisualStyle
 from app.schemas.common import ApiResponse, PaginatedData, created_response, empty_response, paginated_response, success_response
 from app.services.common import (
     create_and_refresh,
@@ -32,6 +36,48 @@ from app.schemas.studio.projects import (
 router = APIRouter()
 
 PROJECT_ORDER_FIELDS = {"name", "created_at", "updated_at", "progress"}
+
+#: 「从视频提示词开始」的项目自动创建的默认章节标题。
+DEFAULT_PROMPT_START_CHAPTER_TITLE = "默认章节"
+
+
+async def _next_chapter_index(db: AsyncSession, *, project_id: str) -> int:
+    """项目内下一个可用章节序号：现有最大 index + 1（不是数量 + 1）。"""
+    rows = (await db.execute(select(Chapter.index).where(Chapter.project_id == project_id))).scalars().all()
+    indexes = [int(value) for value in rows if value is not None and str(value).isdigit()]
+    return (max(indexes) if indexes else 0) + 1
+
+
+async def _ensure_default_chapter(db: AsyncSession, *, project_id: str) -> bool:
+    """确保项目至少有一个章节；已有章节时什么都不做。
+
+    为什么「从视频提示词开始」必须自动建章节：整集提示词看板是按章节承载镜头的
+    （`shot_details.video_prompt` 挂在镜头上），没有章节就没有承载物，导入预览与
+    确认写入都会被挡住。这里只补一个空章节，不写入任何剧本或提示词。
+    """
+    has_chapter = (
+        await db.execute(select(Chapter.id).where(Chapter.project_id == project_id).limit(1))
+    ).scalars().first()
+    if has_chapter:
+        return False
+    index = await _next_chapter_index(db, project_id=project_id)
+    chapter_id = f"{project_id}::EP{index:02d}"
+    if await db.get(Chapter, chapter_id) is not None:  # 极端情况下的 id 冲突兜底
+        chapter_id = f"{project_id}::EP{index:02d}-{uuid.uuid4().hex[:6]}"
+    await create_and_refresh(
+        db,
+        Chapter(
+            id=chapter_id,
+            project_id=project_id,
+            index=index,
+            title=DEFAULT_PROMPT_START_CHAPTER_TITLE,
+            summary="",
+            raw_text="",
+            storyboard_count=0,
+            status=ChapterStatus.draft,
+        ),
+    )
+    return True
 
 
 def _build_project_style_options() -> tuple[dict[ProjectVisualStyle, list[ProjectStyle]], dict[ProjectVisualStyle, ProjectStyle]]:
@@ -135,6 +181,10 @@ async def create_project(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     obj = await create_and_refresh(db, Project(**body.model_dump()))
+
+    # 「从视频提示词开始」：创建后必须能直接进整集提示词看板，因此补一个默认章节。
+    if obj.start_mode == ProjectStartMode.prompts.value:
+        await _ensure_default_chapter(db, project_id=obj.id)
     return created_response(ProjectRead.model_validate(obj))
 
 

@@ -4,6 +4,7 @@ import {
   Input,
   Button,
   Progress,
+  Radio,
   Statistic,
   Row,
   Col,
@@ -38,6 +39,14 @@ import { useProjectStyleOptions } from './useProjectStyleOptions'
 import { getChapterPreparationState } from './ProjectWorkbench/chapterPreparation'
 import { getChapterShotsPath } from './ProjectWorkbench/routes'
 import { loadProjectFlowStatsForChapters, type ProjectFlowStats } from './ProjectWorkbench/projectFlowStats'
+import {
+  OVERALL_STYLE_PRESETS,
+  START_MODE_OPTIONS,
+  resolveLandingStep,
+  resolveOverallStyleFields,
+  type OverallStyleKey,
+  type ProjectStartModeChoice,
+} from './projectStartPresets'
 
 type ViewMode = 'grid' | 'compact' | 'large'
 type FilterTab = 'all' | 'editRaw' | 'extractShots' | 'prepareShots' | 'generating' | 'ready'
@@ -406,6 +415,8 @@ const ProjectLobby: React.FC = () => {
       style: defaultStyle,
       unifyStyle: true,
       default_video_ratio: defaultVideoRatio,
+      startMode: 'script',
+      overallStyle: 'live_portrait',
     })
     setCreateModalOpen(true)
   }
@@ -417,28 +428,39 @@ const ProjectLobby: React.FC = () => {
     visual_style: ProjectVisualStyleChoice
     unifyStyle: boolean
     default_video_ratio?: string
+    startMode: ProjectStartModeChoice
+    overallStyle: OverallStyleKey
   }) => {
     try {
       const createdId = newProjectId()
+      const startMode: ProjectStartModeChoice = values.startMode ?? 'script'
+      // 「整体风格」预设覆盖三个既有列；选「其他自定义」时用用户自己填的值。
+      const preset = resolveOverallStyleFields(values.overallStyle)
       const res = await StudioProjectsService.createProjectApiV1StudioProjectsPost({
         requestBody: {
           id: createdId,
           name: values.name,
           description: values.description ?? '',
-          style: values.style,
-          visual_style: values.visual_style as any,
+          style: preset?.style ?? values.style,
+          visual_style: (preset?.visual_style ?? values.visual_style) as any,
           unify_style: values.unifyStyle,
-          default_video_ratio: values.default_video_ratio || null,
+          default_video_ratio: preset?.default_video_ratio ?? values.default_video_ratio ?? null,
+          start_mode: startMode as any,
           progress: 0,
         },
       })
       const created = res.data
       if (!created) throw new Error('empty project')
       const ui = toUIProject(created)
-      message.success('项目创建成功')
+      message.success(
+        startMode === 'prompts'
+          ? '项目创建成功：已自动创建默认章节，正在进入整集视频提示词看板'
+          : '项目创建成功',
+      )
       setCreateModalOpen(false)
       setProjects((prev) => (Array.isArray(prev) ? [...prev, ui] : [ui]))
-      navigate(`/projects/${ui.id}`)
+      // 两种起点汇入同一条生产流程，只是第一步不同
+      navigate(`/projects/${ui.id}?step=${resolveLandingStep(startMode)}`)
     } catch {
       message.error('创建失败')
     }
@@ -1003,7 +1025,44 @@ const ProjectLobby: React.FC = () => {
           <Form.Item name="description" label="项目简介（选填）">
             <Input.TextArea rows={4} placeholder="项目简介与风格说明，建议 80–120 字" />
           </Form.Item>
-          <ProjectVisualStyleAndStyleFields form={form} options={projectStyleOptions} />
+          {/* 第一步：先选生产方式（两种起点最后汇入同一条生产流程） */}
+          <Form.Item name="startMode" label="生产方式" rules={[{ required: true }]}>
+            <Radio.Group className="w-full">
+              <Space direction="vertical" size={4} className="w-full">
+                {START_MODE_OPTIONS.map((option) => (
+                  <Radio key={option.key} value={option.key}>
+                    <span className="text-sm">{option.label}</span>
+                    <span className="ml-2 text-[11px] text-gray-500">{option.description}</span>
+                  </Radio>
+                ))}
+              </Space>
+            </Radio.Group>
+          </Form.Item>
+          {/* 第二步：项目整体风格（预设直接写进既有列：视觉风格 + 视频风格 + 画幅） */}
+          <Form.Item name="overallStyle" label="整体风格" rules={[{ required: true }]}>
+            <Radio.Group className="w-full">
+              <Space wrap size={6}>
+                {OVERALL_STYLE_PRESETS.map((preset) => (
+                  <Radio.Button key={preset.key} value={preset.key}>
+                    {preset.label}
+                  </Radio.Button>
+                ))}
+              </Space>
+            </Radio.Group>
+          </Form.Item>
+          <Form.Item shouldUpdate noStyle>
+            {() =>
+              form.getFieldValue('overallStyle') === 'custom' ? (
+                <ProjectVisualStyleAndStyleFields form={form} options={projectStyleOptions} />
+              ) : (
+                <div className="mb-3 text-[11px] text-gray-500">
+                  {OVERALL_STYLE_PRESETS.find((p) => p.key === form.getFieldValue('overallStyle'))?.description ??
+                    '选择整体风格后，视觉风格、视频风格与默认画幅会一并写入项目配置。'}
+                  （如需自己指定视觉风格 / 视频风格，请选「其他自定义」）
+                </div>
+              )
+            }
+          </Form.Item>
           {/*
             全局种子值暂时隐藏：目前没有任何生成路径消费项目级 seed
             （图片/视频请求里的 seed 都是单次请求字段，前端也从不传），
