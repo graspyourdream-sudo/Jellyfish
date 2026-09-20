@@ -336,32 +336,17 @@ export function RolesTab() {
     void loadActorLibrary(actorKeyword, actorPage)
   }, [actorPickerOpen, actorKeyword, actorPage, loadActorLibrary])
 
-  /** 选中演员：写进表单 + 确保「演员↔本项目」关联存在（既有 upsert，重复选择不会建重复关系）。 */
-  const pickActorFromLibrary = useCallback(
-    async (actor: ActorLike) => {
-      if (!projectId) return
-      setFormActorId(actor.id)
-      setActorPickerOpen(false)
-      const alreadyLinked = projectActorLinks.some((link) => link.actor_id === actor.id)
-      if (!alreadyLinked) {
-        try {
-          await StudioShotLinksService.createProjectActorLinkApiV1StudioShotLinksActorPost({
-            requestBody: {
-              project_id: projectId,
-              chapter_id: null,
-              shot_id: null,
-              asset_id: actor.id,
-            },
-          })
-        } catch {
-          // 关联失败不阻断选择：角色仍会带 actor_id 保存，后续可再关联
-          message.warning('已选中该演员，但项目关联建立失败，可在「项目演员」里重试')
-        }
-      }
-      await loadProjectLinks()
-    },
-    [loadProjectLinks, projectActorLinks, projectId]
-  )
+  /**
+   * 选中演员：**只写进表单**，不在这里建立项目关联。
+   *
+   * 为什么：用户可能只是看看、或随后取消创建——这时不该在项目里留下关联行。
+   * 关联由后端在创建/更新角色的**同一事务**内幂等确保（见
+   * `services/studio/entity_crud.py::_ensure_character_actor_link`）。
+   */
+  const pickActorFromLibrary = useCallback((actor: ActorLike) => {
+    setFormActorId(actor.id)
+    setActorPickerOpen(false)
+  }, [])
 
   const actorOptions = useMemo(() => {
     return projectActorLinks.map((l) => {
@@ -580,6 +565,8 @@ export function RolesTab() {
         onCancel={() => setActorPickerOpen(false)}
         footer={null}
         width={680}
+        // 角色弹窗也是 Modal：不抬高层级会被它盖住，导致「选择」点不动（真实用户同样受影响）
+        zIndex={1200}
       >
         <div className="space-y-3">
           <div className="text-[11px] text-gray-500">

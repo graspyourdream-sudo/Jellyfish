@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Button,
   Card,
+  Dropdown,
   Empty,
   Input,
   Modal,
@@ -18,8 +19,7 @@ import {
 import type { TableColumnsType } from 'antd'
 import {
   ArrowRightOutlined,
-  EditOutlined,
-  FileTextOutlined,
+  MoreOutlined,
   PictureOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -43,6 +43,8 @@ import {
 import { AssetImagePromptLlmPanel } from './AssetImagePromptLlmPanel'
 import { GenerationGateBanner } from '../../../components/GenerationGateBanner'
 import { useGenerationGate } from '../../../components/generationGate'
+import { classifyGenerationFailure, failureText } from '../../../components/generationGate'
+import { StudioEntitiesService } from '../../../../../services/generated'
 import {
   ASSET_PREP_STATUSES,
   describeAssetPrepSummary,
@@ -183,6 +185,38 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
   const [planError, setPlanError] = useState('')
   /** 「查看定版图」预览的资产 */
   const [previewAsset, setPreviewAsset] = useState<ProjectSignalAsset | null>(null)
+  /** 提取面板锚点：「待确认」状态的主操作把用户送回上面的确认写入区域 */
+  const extractPanelRef = useRef<HTMLDivElement | null>(null)
+  /** 正在设为定版的资产 key */
+  const [settingPrimaryKey, setSettingPrimaryKey] = useState('')
+
+  /**
+   * 「设为定版」：每个资产只有**唯一主操作**——把该资产已有图片里的一张设为 `is_primary`。
+   * 复用既有的实体图片 PATCH 接口，不新建链路、不复制文件。
+   */
+  const handleSetPrimary = async (asset: ProjectSignalAsset) => {
+    const imageId = asset.firstImageId
+    if (!imageId) {
+      message.warning('该资产还没有图片，请先上传或生成图片')
+      return
+    }
+    setSettingPrimaryKey(assetKey(asset))
+    try {
+      await StudioEntitiesService.updateEntityImageApiV1StudioEntitiesEntityTypeEntityIdImagesImageIdPatch({
+        entityType: asset.type,
+        entityId: asset.id,
+        imageId,
+        requestBody: { is_primary: true } as never,
+      })
+      message.success(`已把「${asset.name}」的这张图设为定版`)
+      onReload?.()
+    } catch (error) {
+      const failure = classifyGenerationFailure(error, 'image')
+      message.error(failureText(failure))
+    } finally {
+      setSettingPrimaryKey('')
+    }
+  }
   /** 出图门禁/模型状态（点击前显示：被 DRY_RUN 拦住 ≠ 接口没接通） */
   const gate = useGenerationGate()
 
@@ -473,39 +507,70 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
         ),
     },
     {
-      title: '操作',
+      title: '下一步（唯一主操作）',
       key: 'action',
-      width: 250,
-      render: (_, record) => (
-        <Space size={6} wrap>
-          <Tooltip
-            title={
-              statusByAsset.get(assetKey(record))?.key === 'prompt_ready_image_todo' ||
-              statusByAsset.get(assetKey(record))?.key === 'image_ready_primary_todo' ||
-              statusByAsset.get(assetKey(record))?.key === 'done'
-                ? '进入资产编辑页并直接打开出图确认（复用既有 image-pipeline，不新建出图链路）'
-                : '该资产还缺图片提示词：先用「填提示词」补齐，再出图'
-            }
-          >
-            <Button
-              size="small"
-              type="primary"
-              icon={<PictureOutlined />}
-              onClick={() => openAssetEditor(record, { generate: true })}
+      width: 260,
+      render: (_: unknown, record) => {
+        const status = statusByAsset.get(assetKey(record)) ?? ASSET_PREP_STATUSES.pending_candidate
+        const busy = settingPrimaryKey === assetKey(record)
+        // 每个状态只给一个主按钮，其余入口退到次要位置（编辑 / 填提示词 / 查看）
+        const primaryButton = (() => {
+          switch (status.key) {
+            case 'pending_candidate':
+              return (
+                <Button size="small" type="primary" onClick={() => extractPanelRef.current?.scrollIntoView({ behavior: 'smooth' })}>
+                  确认写入
+                </Button>
+              )
+            case 'linked_prompt_todo':
+              return (
+                <Button size="small" type="primary" loading={editorLoading} onClick={() => void openPromptEditor(record)}>
+                  填提示词
+                </Button>
+              )
+            case 'prompt_ready_image_todo':
+              return (
+                <Tooltip title="进入资产编辑页并直接打开出图确认（复用既有 image-pipeline）">
+                  <Button size="small" type="primary" icon={<PictureOutlined />} onClick={() => openAssetEditor(record, { generate: true })}>
+                    生成图片
+                  </Button>
+                </Tooltip>
+              )
+            case 'image_ready_primary_todo':
+              return (
+                <Tooltip title="把该资产已有的一张图片设为定版（is_primary）">
+                  <Button size="small" type="primary" loading={busy} onClick={() => void handleSetPrimary(record)}>
+                    设为定版
+                  </Button>
+                </Tooltip>
+              )
+            default:
+              return (
+                <Button size="small" type="primary" onClick={() => setPreviewAsset(record)}>
+                  查看定版图
+                </Button>
+              )
+          }
+        })()
+
+        return (
+          <Space size={4} wrap>
+            {primaryButton}
+            <Dropdown
+              menu={{
+                items: [
+                  { key: 'edit', label: '编辑资产', onClick: () => openAssetEditor(record) },
+                  { key: 'prompt', label: '填/改图片提示词', onClick: () => void openPromptEditor(record) },
+                  { key: 'generate', label: '进入出图确认', onClick: () => openAssetEditor(record, { generate: true }) },
+                  { key: 'primary', label: '设为定版', disabled: !record.firstImageId, onClick: () => void handleSetPrimary(record) },
+                ],
+              }}
             >
-              生成
-            </Button>
-          </Tooltip>
-          <Button size="small" icon={<EditOutlined />} onClick={() => openAssetEditor(record)}>
-            编辑
-          </Button>
-          <Tooltip title="手工填写/修改这个资产的图片提示词并保存到 image_prompts（不调用大模型、不花钱）">
-            <Button size="small" type="text" icon={<FileTextOutlined />} onClick={() => void openPromptEditor(record)}>
-              填提示词
-            </Button>
-          </Tooltip>
-        </Space>
-      ),
+              <Button size="small" icon={<MoreOutlined />} />
+            </Dropdown>
+          </Space>
+        )
+      },
     },
   ]
 

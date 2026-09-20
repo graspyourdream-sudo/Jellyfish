@@ -115,3 +115,14 @@ export function describeAssetPrepSummary(summary: AssetPrepSummary): string {
     .map((key) => `${ASSET_PREP_STATUSES[key].label} ${summary.counts[key]}`)
   return `${summary.done}/${summary.total} 已定版｜${parts.join('｜')}`
 }
+
+/**
+ * 参与定版状态检查的资产集合。
+ *
+ * **不做任何截断**：就绪判定必须覆盖范围内的每一个资产，
+ * 否则第 25 个之后的资产会被漏掉，出现「前面都定版了就显示已就绪」的假象。
+ * 并发控制由调用方负责（例如分批请求），这里只负责「选谁」。
+ */
+export function collectPrimaryLookupTargets<T extends { id: string }>(assets: readonly T[]): T[] {
+  return [...assets]
+}

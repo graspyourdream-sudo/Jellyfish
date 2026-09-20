@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { StudioEntitiesService, StudioPromptDeliveryService, StudioShotLinksService, StudioShotsService } from '../../../../../services/generated'
 import type { ProjectStepInput } from '../projectSteps'
+import { collectPrimaryLookupTargets } from '../assetPrepStatus'
 
 /**
  * 六步流程判定所需的「轻量状态快照」抓取。
@@ -21,6 +22,8 @@ const LINK_PAGE_SIZE = 100
 const LINK_PAGE_LIMIT = 3
 /** 角色绑定抽样镜头数：`shot_character_links` 只有按镜头查询的接口，只能抽样。 */
 const BINDING_SAMPLE_LIMIT = 5
+/** 定版状态查询的并发批大小（数量不截断，只限制同时在飞的请求数）。 */
+const PRIMARY_LOOKUP_BATCH = 8
 
 export type ProjectSignalAssetType = 'character' | 'scene' | 'prop' | 'costume'
 
@@ -38,6 +41,8 @@ export type ProjectSignalAsset = {
    * null = 无法判定 —— 业务状态会停在「待设为定版」，不会误报「已定版」。
    */
   hasPrimary: boolean | null
+  /** 该资产的第一张图片 id（用于「设为定版」这个唯一主操作）；null = 没有图片 */
+  firstImageId?: number | null
   /** 已保存图片提示词；null = 本接口载荷没有暴露 `image_prompts`，无法判定 */
   hasImagePrompt: boolean | null
 }
@@ -276,6 +281,7 @@ export function useProjectStepSignals(args: {
           hasImage: toText(item.thumbnail) !== '',
           thumbnail: toText(item.thumbnail),
           hasPrimary: null,
+          firstImageId: null,
           hasImagePrompt: exposed ? imagePromptCount(item) > 0 : null,
         })
       })
@@ -302,17 +308,21 @@ export function useProjectStepSignals(args: {
             hasImage: toText(row.thumbnail) !== '',
             thumbnail: toText(row.thumbnail),
             hasPrimary: null,
+            firstImageId: null,
             hasImagePrompt: exposed ? imagePromptCount(row) > 0 : null,
           })
         })
       })
 
       // —— 定版状态：现有列表载荷没有 is_primary，只能按资产查图片表 ——
-      // 有界（最多 24 个资产）+ 并发 + 失败容忍；拿不到就是 null（业务状态不会跳到「已定版」）。
-      const primaryLookupTargets = nextAssets.slice(0, 24)
-      if (primaryLookupTargets.length > 0) {
+      // **覆盖范围内的每一个资产**（不截断，收口要求），分批并发控制请求量；
+      // 拿不到就是 null（业务状态不会跳到「已定版」，也不会阻塞步骤判定）。
+      const primaryLookupTargets = collectPrimaryLookupTargets(nextAssets)
+      let anyPrimaryLookupFailed = false
+      for (let start = 0; start < primaryLookupTargets.length; start += PRIMARY_LOOKUP_BATCH) {
+        const batch = primaryLookupTargets.slice(start, start + PRIMARY_LOOKUP_BATCH)
         const imageRows = await Promise.all(
-          primaryLookupTargets.map((asset) =>
+          batch.map((asset) =>
             safeRequest(
               StudioEntitiesService.listEntityImagesApiV1StudioEntitiesEntityTypeEntityIdImagesGet({
                 entityType: asset.type,
@@ -325,19 +335,21 @@ export function useProjectStepSignals(args: {
             ),
           ),
         )
-        let anyFailed = false
         imageRows.forEach((res, index) => {
-          const asset = primaryLookupTargets[index]
+          const asset = batch[index]
           if (!res) {
-            anyFailed = true
+            anyPrimaryLookupFailed = true
             return
           }
           const rows = (res.data?.items ?? []) as Record<string, unknown>[]
           asset.hasPrimary = rows.some((row) => row.is_primary === true)
+          // 记下第一张图片 id：资产准备面板的「设为定版」直接用它是唯一主操作
+          const first = rows[0]
+          asset.firstImageId = typeof first?.id === 'number' ? first.id : null
           if (rows.length > 0) asset.hasImage = true
         })
-        if (anyFailed) failedSources.push('资产图片表接口（定版状态）')
       }
+      if (anyPrimaryLookupFailed) failedSources.push('资产图片表接口（定版状态）')
 
       const assetCounts = {
         characters: nextAssets.filter((asset) => asset.type === 'character').length,
@@ -347,6 +359,8 @@ export function useProjectStepSignals(args: {
       }
       const assetImageCount = nextAssets.filter((asset) => asset.hasImage).length
       // 定版数量：只有真查过（非 null）才算，且不把「拿不到」当成「没有」
+      // 只要**有任何一个**资产的定版状态查到了，就按「全部资产」算数量；
+      // 拿不到的资产自然不计入已定版，不会出现虚假的「已就绪」。
       const assetsWithPrimaryCount = primaryLookupTargets.some((asset) => asset.hasPrimary !== null)
         ? nextAssets.filter((asset) => asset.hasPrimary === true).length
         : null

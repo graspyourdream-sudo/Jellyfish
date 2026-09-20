@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 
 import {
   ASSET_PREP_STATUSES,
+  collectPrimaryLookupTargets,
   describeAssetPrepSummary,
   resolveAssetPrepStatus,
   summarizeAssetPrep,
@@ -103,4 +104,52 @@ test('五个状态的标签与动作齐全（页面直接用它们渲染）', ()
     assert.ok(item.label.length > 0)
     assert.ok(item.nextActionLabel.length > 0)
   }
+})
+
+/* ---------------------------------------- 第 25 个及以后必须参与就绪判定 */
+
+function makeAssets(count: number) {
+  return Array.from({ length: count }, (_, index) => ({ id: `asset-${index + 1}` }))
+}
+
+test('collectPrimaryLookupTargets 不截断：30 个资产全部参与定版检查', () => {
+  const assets = makeAssets(30)
+  const targets = collectPrimaryLookupTargets(assets)
+  assert.equal(targets.length, 30, '不能只取前 24 个')
+  assert.equal(targets[29].id, 'asset-30', '第 30 个必须在内')
+})
+
+test('第 25 个及以后没定版时，整步不能判为就绪', () => {
+  const inputs = Array.from({ length: 30 }, (_, index) => ({
+    linked: true,
+    hasImagePrompt: true,
+    hasImage: true,
+    hasPrimary: index < 29, // 前 29 个已定版，第 30 个没有
+  }))
+  const summary = summarizeAssetPrep(inputs)
+  assert.equal(summary.total, 30)
+  assert.equal(summary.done, 29)
+  assert.equal(summary.allDone, false, '第 30 个没定版就不能算就绪（不能被前 24 个掩盖）')
+})
+
+test('只有第 25 个没定版时同样不能就绪', () => {
+  const inputs = Array.from({ length: 30 }, (_, index) => ({
+    linked: true,
+    hasImagePrompt: true,
+    hasImage: true,
+    hasPrimary: index !== 24,
+  }))
+  assert.equal(summarizeAssetPrep(inputs).allDone, false)
+})
+
+test('全部 30 个都定版才算就绪', () => {
+  const inputs = Array.from({ length: 30 }, () => ({
+    linked: true,
+    hasImagePrompt: true,
+    hasImage: true,
+    hasPrimary: true,
+  }))
+  const summary = summarizeAssetPrep(inputs)
+  assert.equal(summary.allDone, true)
+  assert.equal(summary.done, 30)
 })
