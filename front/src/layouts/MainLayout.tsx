@@ -17,6 +17,7 @@ import { useAppStore } from '../store/useAppStore'
 import { useTranslation } from 'react-i18next'
 import { TaskCenter } from '../pages/aiStudio/components/TaskCenter'
 import { TaskRuntimeProvider } from '../pages/aiStudio/components/TaskRuntimeProvider'
+import { RealRunModeBadge } from '../pages/aiStudio/components/RealRunModeBadge'
 
 const { Header, Sider, Content } = Layout
 
@@ -239,6 +240,9 @@ const MainLayout: React.FC = () => {
           </Space>
 
           <Space size="middle">
+            {/* 当前是「演练模式」还是「真实模式」：点开有各出口放行状态与中文开启步骤。
+                演练模式下被守卫拦住的记录也会在这里显示原因与开启办法。 */}
+            <RealRunModeBadge />
             <Select
               size="small"
               value={language}

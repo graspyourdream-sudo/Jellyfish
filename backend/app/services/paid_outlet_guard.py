@@ -10,7 +10,10 @@
 - :func:`outlet_for_task_kind` / :func:`task_kind_block_reason`：把
   ``GenerationTask.task_kind`` 映射到付费出口，供任务执行入口兜底
   （防的是「先建了任务，回放时才真花钱」）；
-- :func:`blocked_envelope`：自持路由复用统一的结构化 409 响应（``meta.error``）。
+- :func:`blocked_envelope`：自持路由复用统一的结构化 409 响应（``meta.error``）；
+- :class:`PaidOutletBlocked` / :func:`paid_outlet_blocked_handler`：依赖或服务层抛出的
+  拦截异常统一转成结构化 409（``code`` + 中文 ``message`` + 中文 ``how_to_enable``），
+  并明确区分「演练模式所以不发真实请求」与「真实模式已开但没确认」。
 
 为什么要接 legacy：
 
@@ -78,35 +81,97 @@ def is_blocked_exception(exc: BaseException) -> bool:
     return isinstance(exc, _blocked_types())
 
 
+class PaidOutletBlocked(HTTPException):
+    """守卫拦截 → 可抛出的 409 异常（机器可读 code + 中文 message + 中文 how_to_enable）。
+
+    为什么继承 ``HTTPException``：既有调用方按 ``status_code`` 与 ``str(detail)`` 消费
+    （服务层、测试都在用），行为保持不变；同时它带 :attr:`payload`，应用级异常处理器
+    （:func:`paid_outlet_blocked_handler`）据此还原成结构化 409（``meta.error``）。
+    """
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        super().__init__(
+            status_code=BLOCKED_STATUS_CODE,
+            detail=str(payload.get("message") or BLOCKED_ERROR_CODE),
+        )
+        self.payload = payload
+        self.error_code = str(payload.get("code") or BLOCKED_ERROR_CODE)
+        #: ``dry_run``（演练模式）或 ``real_call_not_confirmed``（真实模式已开但没确认）
+        self.reason = str(payload.get("reason") or "")
+
+    @property
+    def how_to_enable(self) -> str:
+        """中文「怎么开真实模式」的单段说明。"""
+        return str(self.payload.get("how_to_enable") or "")
+
+    @property
+    def enable_steps(self) -> list[str]:
+        """中文「怎么开真实模式」的分步说明。"""
+        raw = self.payload.get("enable_steps")
+        return [str(item) for item in raw] if isinstance(raw, list) else []
+
+
 def blocked_payload(exc: Exception) -> dict[str, Any]:
-    """被拦截异常 → 结构化明细（不含任何密钥）。"""
+    """被拦截异常 → 结构化明细（不含任何密钥）。
+
+    字段分三类：
+    - 机器可读：``code``（恒定 ``paid_outlet_blocked``）、``reason``（区分两种拦截原因）；
+    - 中文给用户看：``message`` / ``reason_text`` / ``how_to_enable`` / ``enable_steps``；
+    - 兼容既有前端与排查：``outlet`` / ``outlet_label`` / ``hint`` / ``guard``。
+    """
     d = _dry_run()
     outlet = str(getattr(exc, "outlet", OUTLET_LLM))
+    reason = str(getattr(exc, "reason_code", "") or d.blocked_reason_code() or "")
+    steps = getattr(exc, "enable_steps", None) or d.enable_steps()
     return {
         "code": BLOCKED_ERROR_CODE,
+        "reason": reason,
+        "reason_text": d.blocked_reason_text() or "",
         "outlet": outlet,
         "outlet_label": d.outlet_label(outlet),
         "message": str(exc),
         "hint": confirm_hint(),
+        "how_to_enable": str(getattr(exc, "how_to_enable", "") or d.how_to_enable_text()),
+        "enable_steps": [str(item) for item in steps],
+        "restore_steps": d.restore_steps(),
+        "mode": d.mode(),
+        "mode_label": d.mode_label(),
         "guard": d.state(),
     }
 
 
+def blocked_json_response(payload: dict[str, Any]) -> JSONResponse:
+    """结构化明细 → 统一 409 信封（``meta.error`` 里带原因与放开方式）。"""
+    return JSONResponse(
+        status_code=BLOCKED_STATUS_CODE,
+        content=ApiResponse[None](
+            code=BLOCKED_STATUS_CODE,
+            message=str(payload.get("message") or ""),
+            data=None,
+            meta={"error": payload},
+        ).model_dump(),
+    )
+
+
 def blocked_envelope(exc: Exception) -> JSONResponse:
     """被拦截 → 统一的 409 信封（``meta.error`` 里带出口与放开方式）。"""
-    payload = blocked_payload(exc)
-    body = ApiResponse[None](
-        code=BLOCKED_STATUS_CODE,
-        message=payload["message"],
-        data=None,
-        meta={"error": payload},
-    ).model_dump()
-    return JSONResponse(status_code=BLOCKED_STATUS_CODE, content=body)
+    return blocked_json_response(blocked_payload(exc))
 
 
-def blocked_http_error(exc: Exception) -> HTTPException:
-    """被拦截 → 可抛出的 ``HTTPException``（走全局错误信封）。"""
-    return HTTPException(status_code=BLOCKED_STATUS_CODE, detail=blocked_payload(exc)["message"])
+def blocked_http_error(exc: Exception) -> PaidOutletBlocked:
+    """被拦截 → 可抛出的 :class:`PaidOutletBlocked`（自带结构化 payload）。"""
+    return PaidOutletBlocked(blocked_payload(exc))
+
+
+async def paid_outlet_blocked_handler(request: Request, exc: Exception) -> JSONResponse:
+    """应用级异常处理器：把守卫拦截统一变成结构化 409。
+
+    挂在 ``app.main`` 上，覆盖所有**没有**自己 catch 守卫异常的路径（依赖式守卫、
+    legacy 路由都走这里），避免全局处理器把结构化 detail 压成一行字符串。
+    """
+    _ = request  # 处理器签名由 Starlette 固定，这里用不到请求对象
+    payload = exc.payload if isinstance(exc, PaidOutletBlocked) else blocked_payload(exc)
+    return blocked_json_response(payload)
 
 
 def require_outlet(detail: str = "", *, outlet: str = OUTLET_LLM) -> None:
@@ -173,12 +238,15 @@ __all__ = [
     "OUTLET_OSS",
     "OUTLET_VIDEO",
     "PAID_TASK_KIND_OUTLETS",
+    "PaidOutletBlocked",
     "blocked_envelope",
     "blocked_http_error",
+    "blocked_json_response",
     "blocked_payload",
     "confirm_hint",
     "is_blocked_exception",
     "outlet_for_task_kind",
+    "paid_outlet_blocked_handler",
     "require_image_outlet",
     "require_llm_outlet",
     "require_outlet",

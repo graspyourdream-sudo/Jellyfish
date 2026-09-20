@@ -74,11 +74,33 @@ def _error_envelope(*, code: int, detail: Any) -> JSONResponse:
     summary="LLM 编排层状态（DRY_RUN 守卫 + 词表）",
 )
 async def get_orchestration_status() -> ApiResponse[dict[str, Any]]:
-    """查询守卫状态与确定性词表，便于确认「当前不会真实付费」。"""
+    """查询守卫状态与确定性词表，便于确认「当前不会真实付费」。
+
+    演练/真实模式的字段（前端角标按这些字段渲染，全部中文可照做）：
+    - ``mode`` / ``mode_label`` / ``mode_description``：当前模式与一句话说明；
+    - ``outlet_states``：llm / image / video / oss 四个出口各自是否放行、被拦原因；
+    - ``enable_steps`` / ``how_to_enable``：怎么切到真实模式；``restore_steps``：怎么关回演练。
+    既有字段（``guard`` / ``guard_status_text`` / ``paid_outlet_guards`` / ``dry_run_audit``）
+    保持向后兼容，只做加法。
+    """
+    details = dry_run.mode_details()
     return success_response(
         {
             "guard": dry_run.state(),
             "guard_status_text": dry_run.short_status(),
+            # --- 模式标识：前端角标 + 被拦截时的「怎么开」都读这里 ---
+            "mode": details["mode"],
+            "mode_label": details["mode_label"],
+            "mode_description": details["mode_description"],
+            "is_real_mode": details["is_real_mode"],
+            "restart_required_on_change": details["restart_required_on_change"],
+            "outlet_states": details["outlets"],
+            "enable_steps": details["enable_steps"],
+            "how_to_enable": details["how_to_enable"],
+            "restore_steps": details["restore_steps"],
+            "how_to_restore": details["how_to_restore"],
+            "mode_doc": details["doc"],
+            "real_run_mode": details,
             "entity_type_whitelist": list(ENTITY_TYPE_WHITELIST),
             # 九槽位图片提示词的确定性定义（只读、不花钱）。
             # 生产页面用它渲染「手工填写提示词」表单：DRY_RUN 下无法真实调用大模型，

@@ -17,6 +17,16 @@
   2. ``JELLYFISH_REAL_LLM_CONFIRMED=1``，即用户明确确认过要真实付费。
 
 未设置 ``JELLYFISH_DRY_RUN`` 时按**开启**处理（默认安全）。
+
+**本地怎么切到真实模式（不需要改代码、不需要翻源码）**：
+设置上面两个环境变量 → **重启后端进程** → 用状态接口确认。具体命令、验证方法与
+「怎么关回演练」见 :func:`enable_steps` / :func:`restore_steps`，以及仓库文档
+``docs/real-run-mode.md``；前端顶部角标与 ``GET /api/v1/studio/llm/orchestration/status``
+也会把同样的步骤回显出来，被守卫拦住时错误体里带 ``how_to_enable``。
+
+注意：``backend/.env`` 只会被 pydantic-settings 读进 ``Settings``，**不会**进入
+``os.environ``，因此这两个开关**必须写进进程环境**（``export`` / 启动脚本 / 容器 env），
+写进 ``.env`` 是无效的。这是最常见的坑。
 """
 
 from __future__ import annotations
@@ -55,6 +65,36 @@ _OUTLET_LABELS: dict[str, str] = {
     OUTLET_OSS: "对象存储上传",
 }
 
+# --------------------------------------------------------------------------
+# 模式标识（机器可读 + 中文文案）
+#
+# 三种模式，前端的角标、状态接口、拦截错误体都用这里的取值，避免各处自己造词：
+#   dry_run           演练模式：不发任何真实请求（默认）
+#   real_unconfirmed  真实模式已开、但没确认：仍然不发真实请求（缺 CONFIRM_ENV）
+#   real              真实模式：允许真实调用（会花钱，成本确认/限额/去重仍然生效）
+# --------------------------------------------------------------------------
+
+MODE_DRY_RUN = "dry_run"
+MODE_REAL_UNCONFIRMED = "real_unconfirmed"
+MODE_REAL = "real"
+
+_MODE_LABELS: dict[str, str] = {
+    MODE_DRY_RUN: "演练模式",
+    MODE_REAL_UNCONFIRMED: "真实模式（未确认）",
+    MODE_REAL: "真实模式",
+}
+
+# 拦截原因（机器可读）：必须区分「演练模式所以不发真实请求」与「真实模式已开但没确认」。
+BLOCKED_REASON_DRY_RUN = "dry_run"
+BLOCKED_REASON_NOT_CONFIRMED = "real_call_not_confirmed"
+
+_BLOCKED_REASON_TEXTS: dict[str, str] = {
+    BLOCKED_REASON_DRY_RUN: f"当前是演练模式（{DRY_RUN_ENV} 未显式设为 0）：不会发起真实请求，也不会产生费用。",
+    BLOCKED_REASON_NOT_CONFIRMED: (
+        f"真实模式开关已开，但缺少付费确认（{CONFIRM_ENV} 不是 1）：仍然不会发起真实请求。"
+    ),
+}
+
 
 def outlet_label(outlet: str) -> str:
     """出口的中文名，用于给用户看的提示语。"""
@@ -62,7 +102,14 @@ def outlet_label(outlet: str) -> str:
 
 
 class DryRunBlocked(RuntimeError):
-    """DRY_RUN 拦截到付费出口。"""
+    """DRY_RUN 拦截到付费出口。
+
+    除了给用户看的 ``str(exc)``，还带机器可读的 ``reason_code`` 与「怎么开真实模式」的
+    中文步骤（``how_to_enable`` / ``enable_steps``），供接口与前端直接渲染。
+    """
+
+    #: 机器可读的拦截原因：
+    reason_code = BLOCKED_REASON_DRY_RUN
 
     def __init__(self, detail: str = "", outlet: str = OUTLET_LLM) -> None:
         label = _OUTLET_LABELS.get(outlet, outlet)
@@ -74,9 +121,21 @@ class DryRunBlocked(RuntimeError):
         self.outlet = outlet
         super().__init__(message)
 
+    @property
+    def how_to_enable(self) -> str:
+        """中文「怎么开真实模式」的单段说明。"""
+        return how_to_enable_text()
+
+    @property
+    def enable_steps(self) -> list[str]:
+        """中文「怎么开真实模式」的分步说明。"""
+        return enable_steps()
+
 
 class RealCallNotConfirmed(RuntimeError):
     """DRY_RUN 已被关闭，但没有拿到用户确认，仍然拒绝真实调用。"""
+
+    reason_code = BLOCKED_REASON_NOT_CONFIRMED
 
     def __init__(self, detail: str = "", outlet: str = OUTLET_LLM) -> None:
         label = _OUTLET_LABELS.get(outlet, outlet)
@@ -89,6 +148,16 @@ class RealCallNotConfirmed(RuntimeError):
         self.detail = detail
         self.outlet = outlet
         super().__init__(message)
+
+    @property
+    def how_to_enable(self) -> str:
+        """中文「怎么开真实模式」的单段说明（少一个确认变量）。"""
+        return how_to_enable_text()
+
+    @property
+    def enable_steps(self) -> list[str]:
+        """中文「怎么开真实模式」的分步说明（少一个确认变量）。"""
+        return enable_steps()
 
 
 # --------------------------------------------------------------------------
@@ -135,6 +204,164 @@ def blocked_reason(detail: str = "") -> str | None:
     if not real_call_confirmed():
         return f"未确认真实调用（需要 {CONFIRM_ENV}=1）：{detail}".strip("：")
     return None
+
+
+# --------------------------------------------------------------------------
+# 模式标识 / 中文操作步骤（前端角标与拦截错误体共用）
+# --------------------------------------------------------------------------
+
+#: 守护进程每次都实时读环境变量，但**外部改不了已启动进程的环境**，所以切换必须重启。
+RESTART_REQUIRED = True
+
+_START_COMMAND = "cd backend && uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000"
+_VERIFY_COMMAND = "curl -s http://localhost:8000/api/v1/studio/llm/orchestration/status"
+_DOC_PATH = "docs/real-run-mode.md"
+
+
+def mode() -> str:
+    """当前模式：``dry_run`` / ``real_unconfirmed`` / ``real``。"""
+    if dry_run_enabled():
+        return MODE_DRY_RUN
+    if not real_call_confirmed():
+        return MODE_REAL_UNCONFIRMED
+    return MODE_REAL
+
+
+def mode_label() -> str:
+    """当前模式的中文名（演练模式 / 真实模式（未确认） / 真实模式）。"""
+    return _MODE_LABELS.get(mode(), mode())
+
+
+def mode_description() -> str:
+    """当前模式的中文一句话说明：会不会发真实请求、会不会花钱。"""
+    current = mode()
+    if current == MODE_DRY_RUN:
+        return f"当前不发任何真实请求，也不会产生费用（{DRY_RUN_ENV} 未显式设为 0）。"
+    if current == MODE_REAL_UNCONFIRMED:
+        return f"真实模式开关已开，但 {CONFIRM_ENV} 不是 1：仍然不发真实请求，不产生费用。"
+    return "真实模式已开：会发起真实付费调用，仍受成本确认、批量上限与去重幂等约束。"
+
+
+def is_real_mode() -> bool:
+    """真实模式是否**真的**放行（两个条件都满足）。"""
+    return mode() == MODE_REAL
+
+
+def is_dry_run_mode() -> bool:
+    """是否处于演练模式（默认值）。"""
+    return mode() == MODE_DRY_RUN
+
+
+def enable_steps() -> list[str]:
+    """「怎么开真实模式」的分步中文说明（照做即可，不需要改代码；纯文本，前端直接渲染）。"""
+    return [
+        f"第 1 步｜在启动后端的那个终端里导出两个环境变量（必须是同一个 shell）："
+        f"export {DRY_RUN_ENV}=0 与 export {CONFIRM_ENV}=1。"
+        f"注意：写进 backend/.env 无效——.env 只会被 Settings 读取，不会进入进程环境。",
+        f"第 2 步｜重启后端进程（外部改不了已启动进程的环境变量，必须重启）：{_START_COMMAND}。",
+        f"第 3 步｜验证当前模式：执行 {_VERIFY_COMMAND}，确认 data.mode 为 \"real\"、"
+        f"data.guard.real_call_confirmed 为 true；页面顶部角标应显示「真实模式」。",
+        f"第 4 步｜恢复演练：unset {DRY_RUN_ENV} {CONFIRM_ENV} 后重启进程，角标回到「演练模式」。"
+        f"完整说明见 {_DOC_PATH}。",
+    ]
+
+
+def how_to_enable_text() -> str:
+    """「怎么开真实模式」的单段中文说明（塞进错误体用）。"""
+    return (
+        f"开启真实模式：在启动后端的终端里 export {DRY_RUN_ENV}=0 且 export {CONFIRM_ENV}=1，"
+        f"然后重启后端进程（写 backend/.env 无效）；用 {_VERIFY_COMMAND} 确认 data.mode=\"real\"。"
+        f"详见 {_DOC_PATH}。"
+    )
+
+
+def restore_steps() -> list[str]:
+    """「怎么关回演练」的分步中文说明。"""
+    return [
+        f"第 1 步｜在启动后端的终端里 unset {DRY_RUN_ENV} {CONFIRM_ENV}"
+        f"（或显式 export {DRY_RUN_ENV}=1）。",
+        "第 2 步｜重启后端进程。",
+        f"第 3 步｜验证：执行 {_VERIFY_COMMAND}，确认 data.mode 为 \"dry_run\"、"
+        f"data.guard.dry_run 为 true；页面角标应显示「演练模式」。",
+    ]
+
+
+def how_to_restore_text() -> str:
+    """「怎么关回演练」的单段中文说明。"""
+    return (
+        f"恢复演练模式：unset {DRY_RUN_ENV} {CONFIRM_ENV}（或 {DRY_RUN_ENV}=1）后重启后端进程，"
+        f"未设置时默认就是演练模式。"
+    )
+
+
+def blocked_reason_code() -> str | None:
+    """被拦截原因的机器可读代号；允许真实调用时返回 ``None``。
+
+    与 :func:`blocked_reason`（给人看的中文）配对使用：
+    前端据此把「演练模式所以不发」和「真实模式已开但没确认」分开提示。
+    拦截原因只由两个开关决定，与出口无关，因此四个出口共用同一代号。
+    """
+    current = mode()
+    if current == MODE_REAL:
+        return None
+    if current == MODE_DRY_RUN:
+        return BLOCKED_REASON_DRY_RUN
+    return BLOCKED_REASON_NOT_CONFIRMED
+
+
+def blocked_reason_text() -> str | None:
+    """被拦截原因的中文说明；允许真实调用时返回 ``None``。"""
+    code = blocked_reason_code()
+    if code is None:
+        return None
+    return _BLOCKED_REASON_TEXTS[code]
+
+
+def outlet_state(outlet: str) -> dict[str, Any]:
+    """单个出口的放行状态（前端逐出口渲染用）。"""
+    allowed = is_real_mode()
+    code = None if allowed else blocked_reason_code()
+    if allowed:
+        reason_text = "允许真实调用（会产生真实费用）。"
+    elif code == BLOCKED_REASON_DRY_RUN:
+        reason_text = _BLOCKED_REASON_TEXTS[BLOCKED_REASON_DRY_RUN]
+    else:
+        reason_text = _BLOCKED_REASON_TEXTS[BLOCKED_REASON_NOT_CONFIRMED]
+    return {
+        "outlet": outlet,
+        "label": outlet_label(outlet),
+        "allowed": allowed,
+        "reason": code,
+        "reason_text": reason_text,
+        "dry_run": dry_run_enabled(),
+        "real_call_confirmed": real_call_confirmed(),
+    }
+
+
+def outlet_states() -> list[dict[str, Any]]:
+    """四个出口（llm / image / video / oss）各自的放行状态。"""
+    return [outlet_state(outlet) for outlet in OUTLETS]
+
+
+def mode_details() -> dict[str, Any]:
+    """模式 + 出口状态 + 中文开启/恢复步骤的完整快照（状态接口与前端共用）。"""
+    return {
+        "mode": mode(),
+        "mode_label": mode_label(),
+        "mode_description": mode_description(),
+        "is_real_mode": is_real_mode(),
+        "dry_run": dry_run_enabled(),
+        "real_call_confirmed": real_call_confirmed(),
+        "env": DRY_RUN_ENV,
+        "confirm_env": CONFIRM_ENV,
+        "restart_required_on_change": RESTART_REQUIRED,
+        "outlets": outlet_states(),
+        "enable_steps": enable_steps(),
+        "how_to_enable": how_to_enable_text(),
+        "restore_steps": restore_steps(),
+        "how_to_restore": how_to_restore_text(),
+        "doc": _DOC_PATH,
+    }
 
 
 def assert_outbound_allowed(detail: str = "", *, outlet: str = OUTLET_LLM) -> None:
@@ -196,7 +423,12 @@ def clear_audit_log() -> None:
 
 
 def state() -> dict[str, Any]:
-    """守卫状态快照，便于健康检查与排查。"""
+    """守卫状态快照，便于健康检查与排查。
+
+    既有字段（``dry_run`` / ``real_call_confirmed`` / ``env`` / ``confirm_env`` /
+    ``network_guard`` / ``outlets`` / ``blocked_count``）保持向后兼容，只做加法：
+    新增 ``mode`` / ``mode_label`` / ``blocked_reason``。
+    """
     return {
         "dry_run": dry_run_enabled(),
         "real_call_confirmed": real_call_confirmed(),
@@ -205,6 +437,10 @@ def state() -> dict[str, Any]:
         "network_guard": network_guard_installed(),
         "outlets": list(OUTLETS),
         "blocked_count": len([x for x in audit_log() if x["action"].startswith("blocked")]),
+        # --- 新增（前端角标 / 拦截错误体共用同一套口径） ---
+        "mode": mode(),
+        "mode_label": mode_label(),
+        "blocked_reason": blocked_reason_code(),
     }
 
 

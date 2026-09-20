@@ -13,6 +13,7 @@ from app.bootstrap import bootstrap_all_registries
 from app.config import settings
 from app.core.storage import init_storage, is_local_storage, local_storage_path
 from app.schemas.common import ApiResponse
+from app.services.paid_outlet_guard import PaidOutletBlocked, paid_outlet_blocked_handler
 
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,9 @@ app = FastAPI(
 # 统一错误响应格式：{ code, message, data: null }
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(HTTPException, http_exception_handler)
+# 付费出口守卫的拦截单独走结构化 409（code + 中文 message + how_to_enable），
+# 必须在 HTTPException 之上注册，否则会被上面那条压成一行字符串。
+app.add_exception_handler(PaidOutletBlocked, paid_outlet_blocked_handler)
 app.add_exception_handler(Exception, http_exception_handler)
 
 # 本机开发服务器的端口会漂移（vite 5173、preview 7788、streamlit 8501 等），
