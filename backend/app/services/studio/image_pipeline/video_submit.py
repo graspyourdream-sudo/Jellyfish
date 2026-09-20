@@ -432,6 +432,38 @@ def video_media_candidates(
     return candidates
 
 
+async def preflight_video_input_media(
+    input_payload: dict[str, Any],
+    *,
+    provider: str,
+    hint: str = "",
+    preflight: Callable[..., Any] | None = None,
+) -> reference_preflight.PreflightReport | None:
+    """**所有出视频入口共用**的提交前可达性预检（直提出视频 + legacy ``/film/tasks/video``）。
+
+    为什么要有这一层（而不是各入口自己写一遍）：
+
+    - 候选抽取只有一份实现：``video_media_candidates``（首/尾/关键帧 + 参考音频）；
+    - 「上游是否吃得下内嵌 base64」只有一处判定：``vendor_accepts_data_url(provider)``；
+    - 探活只有一份实现：``reference_preflight.preflight_or_raise``（匿名 HEAD→GET，带真实状态码）。
+
+    legacy 入口以前只有**形态级**校验（``_assert_frames_vendor_acceptable``：这个地址形状能不能
+    给上游），不做匿名可达性探活 —— 于是「本机相对路径 / 内网地址 / 404 的对象」照样被当成可用
+    参考图发给上游，上游抓不到 → 任务 failed（故障 A 原文「无法获取输入媒体 URL（404/410）」）。
+
+    返回 ``None`` 表示本次请求**没有任何要发的媒体**（例如 text_only），此时不探活。
+    不可达时由 ``preflight`` 抛 ``ReferencePreflightBlocked``（409），调用方**不得**再建任务 / 写库。
+    """
+    candidates = video_media_candidates(
+        input_payload,
+        allow_data_url=vendor_accepts_data_url(provider),
+    )
+    if not candidates:
+        return None
+    runner = preflight or reference_preflight.preflight_or_raise
+    return await runner(candidates, hint=hint)
+
+
 async def submit_video(
     db: AsyncSession,
     *,
@@ -545,14 +577,14 @@ async def submit_video(
 
     # 提交前预检（纵深防御的第二层，第一层是计划预览的供应商可用性判定）：
     # 把**真正会发给供应商**的媒体地址逐张匿名探活。不可达就**不发请求**（不花钱）。
+    # 候选抽取 / 上游 base64 口径 / 探活实现全部走共用入口（legacy 出视频入口用的是同一个）。
     if preflight is not None:
-        vendor = str(run_args.get("provider") or plan.provider or "")
-        candidates = video_media_candidates(
+        await preflight_video_input_media(
             input_payload,
-            allow_data_url=vendor_accepts_data_url(vendor),
+            provider=str(run_args.get("provider") or plan.provider or ""),
+            hint=f"直提出视频 shot_id={body.shot_id}",
+            preflight=preflight,
         )
-        if candidates:
-            await preflight(candidates, hint=f"直提出视频 shot_id={body.shot_id}")
 
     factory = task_factory
     if factory is None:

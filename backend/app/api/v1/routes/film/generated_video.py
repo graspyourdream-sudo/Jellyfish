@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,7 +13,12 @@ from app.models.task_links import GenerationTaskLink
 from app.schemas.studio.shots import ShotVideoPromptPackRead
 from app.services.film.generated_video import build_run_args, preview_prompt_and_images
 from app.services.paid_outlet_guard import require_video_outlet
-from app.services.studio.image_pipeline.video_submit import validate_legacy_video_input
+from app.services.studio.image_pipeline import reference_preflight
+from app.services.studio.image_pipeline.video_submit import (
+    preflight_video_input_media,
+    validate_legacy_video_input,
+)
+from app.services.studio.llm_orchestration import dry_run
 from app.services.studio.video_audio_input import attach_shot_audio_to_video_input
 from app.services.studio.shot_status import mark_shot_generating
 from app.tasks.execute_task import enqueue_task_execution
@@ -24,6 +30,26 @@ from .video_request import VideoGenerationTaskRequest
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _preflight_blocked_envelope(exc: reference_preflight.ReferencePreflightBlocked) -> JSONResponse:
+    """参考图不可达 → 409 + 结构化中文错误（明细放 ``meta.error``）。
+
+    为什么要在这层自己造信封：应用级 ``HTTPException`` 处理器只留一行 ``message``
+    （``meta`` 恒为 null），而页面要读到 ``code`` / ``unreachable[]``（哪张图、真实 HTTP
+    状态码）/ ``how_to_fix`` / ``paid_call_made`` 才能说清"为什么没提交、怎么修"。
+    与出图管线 ``routes/studio/image_pipeline.py`` 的 ``_error_envelope`` 同一口径
+    （同一份 ``detail`` 由 ``reference_preflight.build_blocked_detail`` 生产，不另写文案）。
+    """
+    detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+    status_code = reference_preflight.BLOCKED_STATUS_CODE
+    body = ApiResponse[None](
+        code=status_code,
+        message=str(detail.get("message") or reference_preflight.UNREACHABLE_ERROR_CODE),
+        data=None,
+        meta={"error": detail},
+    ).model_dump()
+    return JSONResponse(status_code=status_code, content=body)
 
 
 class VideoPromptPreviewResponse(BaseModel):
@@ -116,6 +142,29 @@ async def create_video_generation_task(
         option_warnings.extend(audio_warnings)
         for item in audio_warnings:
             logger.info("视频生成音频入参：%s", item)
+
+        # 提交前**匿名可达性**预检（建任务 / 写 generation_tasks 之前）：
+        # 与直提出视频端点 `POST /studio/image-pipeline/video-submit` 复用**同一套**
+        # 候选抽取（`video_media_candidates`）+ 探活（`reference_preflight.preflight_or_raise`）。
+        #
+        # 为什么 legacy 也要有：本模块此前只有形态级校验（地址形状能不能给上游），
+        # 不做匿名探活 —— 本机相对路径 / 内网地址 / 404 的对象照样被当成可用参考图发出去，
+        # 上游匿名抓不到 → 任务建出来再 failed（故障 A 原文「无法获取输入媒体 URL（404/410）」）。
+        # 探活不通过就整单拒绝：**不建任务、不写库、不出网给上游**（也就不会花钱）。
+        #
+        # DRY_RUN 下一次都不探活（与 dry_run 守卫同口径：演练模式不触网）。
+        if not dry_run.dry_run_enabled():
+            try:
+                await preflight_video_input_media(
+                    video_input,
+                    provider=str(run_args.get("provider") or ""),
+                    hint=f"legacy 出视频 shot_id={body.shot_id}",
+                )
+            except reference_preflight.ReferencePreflightBlocked as exc:
+                logger.warning("出视频参考图不可达，已拒绝建任务：%s", exc.detail)
+                return _preflight_blocked_envelope(exc)
+        else:
+            logger.info("DRY_RUN 开启：跳过出视频参考图可达性预检（不触网）。")
 
     task_record = await tm.create(
         task=_CreateOnlyTask(),
