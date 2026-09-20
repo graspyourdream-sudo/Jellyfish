@@ -42,6 +42,9 @@ _STORYBOARD_PAGE_PATH = "/api/video/v1/video-storyboard/getStoryboardPage"
 _DEFAULT_PAGE_SIZE = 10
 _DEFAULT_STORYBOARD_SIZE = 100
 
+#: 翻页安全上限：接口自报总数 / 短页 / 空页都能正常收尾，这个只是防死循环。
+_MAX_STORYBOARD_PAGES = 200
+
 # 上游 ``data.enc`` 里认识的编码（不认识的只如实报出来，绝不猜）
 SUPPORTED_PAYLOAD_ENCODINGS = frozenset({"msgpack", "msgpack5"})
 
@@ -189,6 +192,68 @@ def build_storyboard_page_request(
     }
     return (api_url, "POST", body)
 
+
+# ---------------------------------------------------------------------------
+# 脚本组（scriptId 分组）：默认不跨 scriptId 合并
+# ---------------------------------------------------------------------------
+
+# 第一步 ``getScriptPage`` 的字段名没有对外文档，真实响应里到底叫什么没人知道。
+# 因此标题 / 时间一律**多候选兜底**，并把**实际命中的字段名**报出去
+# （``title_source`` / ``created_source`` / ``updated_source``），下一轮就能对上真实字段；
+# 一个都没命中就留空字符串 —— **不许编造时间**。
+SCRIPT_ID_KEYS: Tuple[str, ...] = ("id", "scriptId", "script_id", "videoScriptId", "scriptid")
+SCRIPT_TITLE_KEYS: Tuple[str, ...] = (
+    "title",
+    "name",
+    "scriptTitle",
+    "scriptName",
+    "script_title",
+    "episodeTitle",
+    "videoScriptTitle",
+)
+SCRIPT_CREATED_AT_KEYS: Tuple[str, ...] = (
+    "createdAt",
+    "createTime",
+    "created_at",
+    "gmtCreate",
+    "created",
+    "createDate",
+)
+SCRIPT_UPDATED_AT_KEYS: Tuple[str, ...] = (
+    "updateTime",
+    "updatedAt",
+    "updated_at",
+    "modifyTime",
+    "gmtModified",
+    "lastModified",
+    "updateDate",
+)
+
+# ``raw_keys`` 里连**字段名**都不该出现的键：凭证类字段名同样是线索，不该外泄。
+_SENSITIVE_KEY_MARKERS: Tuple[str, ...] = (
+    "cookie",
+    "authorization",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "session",
+    "sign",
+    "apikey",
+    "api_key",
+)
+
+# 采样记录的截断长度（只用于让用户肉眼确认「正文 / 序号 / 提示词」解析正确）
+_PROMPT_HEAD_CHARS = 60
+_SUMMARY_HEAD_CHARS = 40
+_MAX_SAMPLE_RECORDS = 3
+
+# 「疑似同一脚本的不同版本」的判定阈值：标题归一化后相同，或分镜正文**集合重合度**
+# 达到这个比例。只在有证据时才给版本提示，证据不足一律不给（不瞎猜）。
+_SAME_SCRIPT_OVERLAP_THRESHOLD = 0.5
+
+_TITLE_NOISE_RE = re.compile(r"[\s\-_·、,，.。:：;；()（）\[\]【】<>《》\"'`]+")
 
 # ---------------------------------------------------------------------------
 # JSON / HTML 解析工具
@@ -451,6 +516,168 @@ def _sanitize(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _payload_total(text: str) -> Optional[int]:
+    """响应里如果自报了「一共多少条」，把它读出来（读不到返回 ``None``，不猜）。
+
+    真实形状未知，所以多候选兜底：``total`` / ``totalCount`` / ``total_count`` /
+    ``recordsTotal`` / ``totalNum`` / ``count``。只在**持有 records 的那一层**里找，
+    避免把某些字段的计数误当总数。
+    """
+    for _encoding, obj in _decoded_candidates(text):
+        containers: List[dict] = []
+        if isinstance(obj, dict):
+            data = obj.get("data")
+            if isinstance(data, dict):
+                containers.append(data)
+            containers.append(obj)
+        for container in containers:
+            if not isinstance(container.get("records"), list):
+                continue
+            for key in ("total", "totalCount", "total_count", "recordsTotal", "totalNum"):
+                value = container.get(key)
+                if isinstance(value, bool):
+                    continue
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, str) and value.strip().isdigit():
+                    return int(value.strip())
+    return None
+
+
+def _record_identity(record: dict) -> str:
+    """去重用的记录标识（翻页时同一页被重复返回也不能重复计数）。"""
+    for key in ("agent_id", "sbid"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return f"{key}:{value}:{record.get('seqNum') or ''}"
+    return f"raw:{record.get('raw_data') or ''}"
+
+
+def fetch_script_storyboards(
+    source_url: str,
+    script_id: str,
+    cookie_text: str,
+    authorization: str = "",
+    referer: str = "",
+    api_url_override: str = "",
+    clip_id: str = "",
+    project_id: str = "",
+    size: int = _DEFAULT_STORYBOARD_SIZE,
+) -> dict:
+    """翻页取某个 scriptId 的**全部**分镜 —— 不做任何数量截断。
+
+    为什么必须翻页：第二步是 ``getStoryboardPage/{page}/{size}``，默认一页 100 条。
+    真实三组是 41/37/31（一页够），但只要某一组超过一页，只取第一页就会**静默丢数据**，
+    而「整组导入」是用户口径。翻页会多打几次免费接口，这是允许的。
+
+    停止条件（任一命中）：
+      * 响应自报总数且已取满；
+      * 拿到空页；
+      * 拿到的条数少于 ``size``（短页 = 最后一页，老接口没有 total 时靠这条）；
+      * 某一页没有带来任何新记录（接口忽略分页参数时不能死循环）；
+      * 达到安全上限 ``_MAX_STORYBOARD_PAGES``。
+
+    Returns:
+        ``{"records": [...], "pages_fetched": int, "total_reported": int|None,
+           "attempts": [...], "warnings": [...], "request_facts": [...]}``
+    """
+    records: List[dict] = []
+    seen: set = set()
+    attempts: List[dict] = []
+    warnings: List[str] = []
+    request_facts: List[dict] = []
+    pages_fetched = 0
+    total_reported: Optional[int] = None
+    page = 1
+
+    while page <= _MAX_STORYBOARD_PAGES:
+        try:
+            sb_url, sb_method, sb_body = build_storyboard_page_request(
+                source_url, script_id=script_id, clip_id=clip_id, project_id=project_id,
+                api_url_override=api_url_override, page=page, size=size,
+            )
+        except (TypeError, ValueError) as exc:
+            # scriptId 不是数字时上游 URL 都拼不出来：如实记一条，不许把整条链路炸掉
+            attempts.append({
+                "script_id": script_id, "page": page, "status": None,
+                "error": f"无法构造分镜请求（scriptId 需为数字）：{exc}",
+            })
+            pages_fetched += 1
+            warnings.append(f"scriptId={script_id} 无法构造分镜请求：{exc}")
+            break
+        sb_result = fetch_agent_platform_with_cookie(
+            sb_url, cookie_text, method=sb_method, json_body=sb_body,
+            authorization=authorization, referer=referer,
+        )
+        pages_fetched += 1
+        # 逐步留证：第二步是最容易「静默 0 条」的地方，没证据就只能猜。
+        # 只留状态码 / 错误串 / 脱敏后的响应片段（_sanitize 会把 JWT 换成 <JWT>）。
+        attempt = {
+            "script_id": script_id,
+            "page": page,
+            "url": sb_url,
+            "status": sb_result.get("status"),
+            "error": str(sb_result.get("error") or "")[:160],
+            "body_preview": _sanitize(
+                str(sb_result.get("text") or sb_result.get("response_preview") or "")
+            )[:300],
+        }
+        attempts.append(attempt)
+        if not sb_result.get("ok"):
+            warnings.append(f"scriptId={script_id} 第 {page} 页分镜接口失败: {sb_result.get('error')}")
+            request_facts.append(sb_result.get("request_facts") or {})
+            break
+
+        text = str(sb_result.get("text") or "")
+        page_records = _extract_records_from_response(text)
+        if total_reported is None:
+            total_reported = _payload_total(text)
+        fresh = _extract_storyboard_records(
+            text, script_id,
+            script_title="", script_index=0,
+        )
+        # 只保留这一页里**新增**的记录（接口忽略分页参数时不能重复计数）
+        new_here: List[dict] = []
+        for record in fresh:
+            key = _record_identity(record)
+            if key in seen:
+                continue
+            seen.add(key)
+            new_here.append(record)
+        records.extend(new_here)
+        attempt["parsed_count"] = len(page_records)
+        attempt["parsed_new_records"] = len(new_here)
+        attempt["total_reported"] = total_reported
+        if not fresh:
+            # 解析出 0 条时把「响应到底长什么样」留下来：
+            # 是接口真 0 条，还是有数据但解析器没识别（例如 msgpack 载荷）。
+            attempt["payload_shape"] = describe_payload_shape(text)
+            break
+        if total_reported is not None and len(records) >= total_reported:
+            break
+        if len(fresh) < size:
+            break
+        if not new_here:
+            warnings.append(
+                f"scriptId={script_id} 第 {page} 页没有新增记录（疑似接口忽略分页参数），已提前停止翻页"
+            )
+            break
+        page += 1
+    else:
+        warnings.append(
+            f"scriptId={script_id} 翻页达到上限 {_MAX_STORYBOARD_PAGES} 页，可能仍有未取到的分镜"
+        )
+
+    return {
+        "records": records,
+        "pages_fetched": pages_fetched,
+        "total_reported": total_reported,
+        "attempts": attempts,
+        "warnings": warnings,
+        "request_facts": request_facts,
+    }
+
+
 def fetch_all_storyboards(
     source_url: str,
     cookie_text: str,
@@ -459,11 +686,12 @@ def fetch_all_storyboards(
     api_url_override: str = "",
     storyboard_size: int = _DEFAULT_STORYBOARD_SIZE,
 ) -> dict:
-    """两步导入流程。
+    """两步导入流程（第二步**逐页取全**）。
 
     Returns:
         {"ok": True/False, "scripts": [...], "storyboards": [...],
-         "warnings": [...], "diagnostics": {...}}
+         "warnings": [...], "diagnostics": {...},
+         "storyboard_pages": {script_id: 页数}, "storyboard_totals": {script_id: 自报总数}}
     """
     diag: Dict[str, Any] = {}
     warnings: List[str] = []
@@ -491,58 +719,54 @@ def fetch_all_storyboards(
                 "warnings": ["未获取到脚本记录。"],
                 "diagnostics": diag}
 
-    # Step 2: getStoryboardPage for each script
+    # Step 2: getStoryboardPage（逐页）for each script
     pid, cid = extract_project_clip_from_url(source_url)
     all_storyboards: List[dict] = []
     fetched_script_ids: List[str] = []
     sb_counts: Dict[str, int] = {}
+    sb_pages: Dict[str, int] = {}
+    sb_totals: Dict[str, Optional[int]] = {}
 
     for idx, script in enumerate(scripts, start=1):
-        sid = str(script.get("id", ""))
+        # 字段名多候选兜底：id 就叫 id 的假设上一轮赌对了，标题叫什么没人知道
+        #（title / name / scriptTitle / scriptName …），取不到就留空，不编造。
+        sid = pick_script_id(script)
         if not sid:
             continue
         fetched_script_ids.append(sid)
-        script_title = str(script.get("title", ""))
+        script_title = pick_script_title(script)
         script_index = idx
 
-        sb_url, sb_method, sb_body = build_storyboard_page_request(
-            source_url, script_id=sid, clip_id=cid, project_id=pid,
-            api_url_override=api_url_override, size=storyboard_size,
-        )
-        diag.setdefault("storyboard_urls", []).append(sb_url)
-
-        sb_result = fetch_agent_platform_with_cookie(
-            sb_url, cookie_text, method=sb_method, json_body=sb_body,
+        fetched = fetch_script_storyboards(
+            source_url, script_id=sid, cookie_text=cookie_text,
             authorization=authorization, referer=referer,
+            api_url_override=api_url_override, clip_id=cid, project_id=pid,
+            size=storyboard_size,
         )
-        # 逐步留证：第二步是最容易「静默 0 条」的地方，没证据就只能猜。
-        # 只留状态码 / 错误串 / 脱敏后的响应片段（_sanitize 会把 JWT 换成 <JWT>）。
-        attempt = {
-            "script_id": sid,
-            "status": sb_result.get("status"),
-            "error": str(sb_result.get("error") or "")[:160],
-            "body_preview": _sanitize(
-                str(sb_result.get("text") or sb_result.get("response_preview") or "")
-            )[:300],
-        }
-        diag.setdefault("storyboard_attempts", []).append(attempt)
-        if not sb_result.get("ok"):
-            warnings.append(f"scriptId={sid} 分镜接口失败: {sb_result.get('error')}")
-            diag.setdefault("storyboard_request_facts", []).append(
-                sb_result.get("request_facts") or {}
-            )
-            continue
+        diag.setdefault("storyboard_attempts", []).extend(fetched["attempts"])
+        diag.setdefault("storyboard_request_facts", []).extend(fetched["request_facts"])
+        diag.setdefault("storyboard_urls", []).extend(
+            url for url in (attempt.get("url") for attempt in fetched["attempts"]) if url
+        )
+        warnings.extend(fetched["warnings"])
 
-        sbs = _extract_storyboard_records(
-            sb_result.get("text", ""), sid,
-            script_title=script_title, script_index=script_index,
-        )
-        attempt["parsed_count"] = len(sbs)
-        if not sbs:
-            # 解析出 0 条时把「响应到底长什么样」留下来：
-            # 是接口真 0 条，还是有数据但解析器没识别（例如 msgpack 载荷）。
-            attempt["payload_shape"] = describe_payload_shape(sb_result.get("text", ""))
+        sbs: List[dict] = []
+        for record in fetched["records"]:
+            # 标题 / 段号在这里补：翻页函数不认识第一步的脚本记录
+            ep = f"EP{script_index:02d}" if script_index else ""
+            sbid = str(record.get("sbid") or "")
+            title_part = f"｜{script_title}" if script_title else ""
+            display_name = (
+                f"{ep}{title_part}｜分镜 {sbid}" if ep or title_part else f"分镜 {sbid}"
+            )
+            record["agent_name"] = display_name
+            record["source_script_title"] = script_title
+            record["source_script_index"] = script_index
+            record["episode_hint"] = ep
+            sbs.append(record)
         sb_counts[sid] = len(sbs)
+        sb_pages[sid] = fetched["pages_fetched"]
+        sb_totals[sid] = fetched["total_reported"]
         all_storyboards.extend(sbs)
 
     # 排序：script_index → seqNum
@@ -552,14 +776,19 @@ def fetch_all_storyboards(
     diag["storyboard_page_size"] = storyboard_size
     diag["storyboard_records_count"] = len(all_storyboards)
     diag["parsed_prompts_count_by_script"] = sb_counts
+    # 「整组取全」的证据：每组翻了几页、接口自报多少条
+    diag["storyboard_pages_by_script"] = sb_pages
+    diag["storyboard_totals_by_script"] = sb_totals
 
     if not all_storyboards:
         return {"ok": False, "scripts": scripts, "storyboards": [],
                 "warnings": warnings + ["已获取 scriptId，但未解析到分镜。"],
-                "diagnostics": diag}
+                "diagnostics": diag,
+                "storyboard_pages": sb_pages, "storyboard_totals": sb_totals}
 
     return {"ok": True, "scripts": scripts, "storyboards": all_storyboards,
-            "warnings": warnings, "diagnostics": diag}
+            "warnings": warnings, "diagnostics": diag,
+            "storyboard_pages": sb_pages, "storyboard_totals": sb_totals}
 
 
 def _records_from_object(obj: Any) -> List[dict]:
@@ -735,6 +964,463 @@ def _extract_storyboard_records(
 
 
 # ---------------------------------------------------------------------------
+# 脚本组：第一步记录 + 已解析分镜 → 「一个 scriptId 一组」
+# ---------------------------------------------------------------------------
+
+
+def _scalar_text(value: Any) -> str:
+    """把标量转成去空白的字符串；bool / 容器一律当取不到（不许把 True 当时间戳）。"""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, (str, int, float)):
+        return str(value).strip()
+    return ""
+
+
+def pick_field(record: Any, keys: Tuple[str, ...]) -> Tuple[str, str]:
+    """按候选键顺序取第一个非空标量，返回 ``(值, 命中的字段名)``。"""
+    if not isinstance(record, dict):
+        return ("", "")
+    for key in keys:
+        text = _scalar_text(record.get(key))
+        if text:
+            return (text, key)
+    return ("", "")
+
+
+def pick_script_id(record: Any) -> str:
+    return pick_field(record, SCRIPT_ID_KEYS)[0]
+
+
+def pick_script_title(record: Any) -> str:
+    return pick_field(record, SCRIPT_TITLE_KEYS)[0]
+
+
+def is_sensitive_key(name: Any) -> bool:
+    """字段名是否属于凭证类（这类名字不进 ``raw_keys``）。"""
+    lowered = str(name or "").strip().lower()
+    return any(marker in lowered for marker in _SENSITIVE_KEY_MARKERS)
+
+
+def record_key_names(record: Any) -> List[str]:
+    """第一步记录的字段名列表 —— **只有名字，永远不含值**。"""
+    if not isinstance(record, dict):
+        return []
+    return [str(key) for key in record if not is_sensitive_key(key)]
+
+
+def _head(text: Any, limit: int) -> str:
+    return str(text or "")[:limit]
+
+
+def _seq_sort_key(row: dict) -> Tuple[int, int, str]:
+    seq = str(row.get("seqNum") or "").strip()
+    if seq.lstrip("-").isdigit():
+        return (0, int(seq), "")
+    return (1, 0, seq)
+
+
+def _script_metrics(rows: List[dict]) -> Dict[str, Any]:
+    """用**该组已解析出来的分镜**算条数与序号范围（不拿接口声称的数字顶替）。"""
+    seq_field = ""
+    if any(str(row.get("seqNum") or "").strip() for row in rows):
+        seq_field = "seqNum"
+    elif any(str(row.get("sbid") or "").strip() for row in rows):
+        seq_field = "sbid"
+    values = [str(row.get(seq_field) or "").strip() for row in rows] if seq_field else []
+    values = [value for value in values if value]
+    seq_min = seq_max = ""
+    if values:
+        if all(value.lstrip("-").isdigit() for value in values):
+            seq_min = min(values, key=int)
+            seq_max = max(values, key=int)
+        else:
+            seq_min, seq_max = min(values), max(values)
+    return {
+        "record_count": len(rows),
+        "seq_min": seq_min,
+        "seq_max": seq_max,
+        "seq_field": seq_field,
+    }
+
+
+def _sample_records(rows: List[dict]) -> List[dict]:
+    """最多 3 条采样：让用户肉眼确认正文 / 序号 / 提示词解析正确。
+
+    ``prompt_head`` 只截前 60 字，``summary_head`` 只截前 40 字。
+    """
+    samples: List[dict] = []
+    for row in sorted(rows, key=_seq_sort_key)[:_MAX_SAMPLE_RECORDS]:
+        prompt = str(row.get("prompt_text") or "")
+        samples.append({
+            "seq": str(row.get("seqNum") or ""),
+            "sbid": str(row.get("sbid") or ""),
+            "prompt_head": _head(prompt, _PROMPT_HEAD_CHARS),
+            "prompt_length": len(prompt),
+            "summary_head": _head(row.get("shot_summary"), _SUMMARY_HEAD_CHARS),
+        })
+    return samples
+
+
+def build_script_groups(
+    scripts: Optional[List[dict]],
+    storyboards: Optional[List[dict]],
+    pages_by_script: Optional[Dict[str, int]] = None,
+) -> List[dict]:
+    """按 scriptId 分组成「脚本组」：**永远一组一条，默认不合并**。
+
+    用户口径（2026-09-20）：一次「获取整集提示词」抓到的多个 scriptId 是
+    **不同的脚本**（或同一脚本的不同版本），第二步返回的分镜条数（41 / 37 / 31）
+    不能当成同一集的连续镜头。所以这里按 scriptId 切组，
+    条数 / 序号范围只用**该组已解析出来的分镜**计算（**不截断**）。
+
+    Args:
+        pages_by_script: 每组实际翻了几页（``fetch_all_storyboards`` 的取证），
+            原样写进 ``pages_fetched``，让「整组取全」这件事可核对。
+
+    Returns:
+        每组一条，字段见契约：``script_id`` / ``title`` / ``title_source`` /
+        ``created_at`` / ``updated_at`` / ``record_count`` / ``seq_min`` / ``seq_max`` /
+        ``seq_field`` / ``pages_fetched`` / ``sample_records`` / ``raw_keys`` /
+        ``facts`` / ``likely_newest`` / ``version_reasons`` / ``version_hint``。
+    """
+    pages_by_script = pages_by_script or {}
+    groups: List[dict] = []
+    seen: Dict[str, int] = {}
+    rows_by_sid: Dict[str, List[dict]] = {}
+    for row in storyboards or []:
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("source_script_id") or "").strip()
+        if sid:
+            rows_by_sid.setdefault(sid, []).append(row)
+
+    def _append(sid: str, record: Any, title_fallback: str = "") -> None:
+        record = record if isinstance(record, dict) else {}
+        title, title_source = pick_field(record, SCRIPT_TITLE_KEYS)
+        if not title and title_fallback:
+            # 标题来自分镜记录的 source_script_title（第一步没列这个 scriptId 时的兜底）；
+            # 此时 title_source 留空，避免谎报命中字段。
+            title = title_fallback
+        created, created_source = pick_field(record, SCRIPT_CREATED_AT_KEYS)
+        updated, updated_source = pick_field(record, SCRIPT_UPDATED_AT_KEYS)
+        rows = rows_by_sid.get(sid, [])
+        metrics = _script_metrics(rows)
+        groups.append({
+            "script_id": sid,
+            "title": title,
+            "title_source": title_source,
+            "created_at": created,
+            "created_source": created_source,
+            "updated_at": updated,
+            "updated_source": updated_source,
+            **metrics,
+            "pages_fetched": int(pages_by_script.get(sid, 0) or 0),
+            "sample_records": _sample_records(rows),
+            "raw_keys": record_key_names(record),
+            "facts": [],
+            "likely_newest": False,
+            "version_reasons": [],
+            "version_hint": "",
+        })
+
+    for script in scripts or []:
+        if not isinstance(script, dict):
+            continue
+        sid = pick_script_id(script)
+        if not sid or sid in seen:
+            continue
+        seen[sid] = len(groups)
+        _append(sid, script)
+
+    # 第一步没列出来、但第二步确实返回了分镜的 scriptId 也要成组：**不丢数据**。
+    for sid in sorted(rows_by_sid):
+        if sid in seen:
+            continue
+        seen[sid] = len(groups)
+        fallback = ""
+        for row in rows_by_sid[sid]:
+            fallback = str(row.get("source_script_title") or "").strip()
+            if fallback:
+                break
+        _append(sid, {}, title_fallback=fallback)
+
+    annotate_script_versions(groups, storyboards)
+    return groups
+
+
+def _parse_timestamp(value: str) -> Optional[datetime]:
+    """把上游时间戳解析成 ``datetime`` 以便比较；解析不了返回 ``None``。
+
+    支持 ``2026-09-19 10:00:00`` / ISO（含 ``T`` 与 ``Z``）/ 纯数字（秒或毫秒）。
+    带时区的值统一去掉时区后按**字面量**比较 —— 同一接口返回，格式一致。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        number = int(text)
+        if number > 10 ** 12:  # 毫秒
+            number //= 1000
+        try:
+            return datetime.fromtimestamp(number)
+        except (OverflowError, OSError, ValueError):
+            return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00").replace("/", "-"))
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y%m%d%H%M%S"):
+            try:
+                parsed = datetime.strptime(text, pattern)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return None
+    return parsed.replace(tzinfo=None)
+
+
+def _normalize_title(title: Any) -> str:
+    """标题归一化：去空白与常见标点后小写（「第 1 集」== 「第1集」）。"""
+    return _TITLE_NOISE_RE.sub("", str(title or "").strip().lower())
+
+
+def _prompt_signatures(storyboards: Optional[List[dict]]) -> Dict[str, set]:
+    signatures: Dict[str, set] = {}
+    for row in storyboards or []:
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("source_script_id") or "").strip()
+        prompt = str(row.get("prompt_text") or "").strip()
+        if sid and prompt:
+            signatures.setdefault(sid, set()).add(prompt)
+    return signatures
+
+
+def _pair_evidence(left: dict, right: dict, sigs: Dict[str, set]) -> List[Dict[str, Any]]:
+    """两组之间**指向同一脚本**的可复核证据；没有证据就返回空列表。
+
+    只返回事实本身（标题 / 重合度），**不带对方 id** —— id 要由调用方按
+    「站在哪一组的角度」补上（否则会写成「与 2933351 标题相同」出现在 2933351 自己身上）。
+    """
+    evidence: List[Dict[str, Any]] = []
+    left_title = str(left.get("title") or "").strip()
+    right_title = str(right.get("title") or "").strip()
+    normalized = _normalize_title(left_title)
+    if normalized and normalized == _normalize_title(right_title):
+        evidence.append({
+            "kind": "title",
+            "left_title": left_title,
+            "right_title": right_title,
+            "normalized": normalized,
+        })
+    left_sig = sigs.get(left["script_id"], set())
+    right_sig = sigs.get(right["script_id"], set())
+    if left_sig and right_sig:
+        intersection = len(left_sig & right_sig)
+        union = len(left_sig | right_sig)
+        if union:
+            overlap = intersection / union
+            if overlap >= _SAME_SCRIPT_OVERLAP_THRESHOLD:
+                evidence.append({
+                    "kind": "overlap",
+                    "percent": int(round(overlap * 100)),
+                    "intersection": intersection,
+                    "union": union,
+                })
+    return evidence
+
+
+def _format_evidence(item: Dict[str, Any], other_id: str) -> str:
+    """把一条事实写成「站在本组角度」的中文依据（可复核：带具体数字）。"""
+    if item["kind"] == "title":
+        if item["left_title"] == item["right_title"]:
+            return f"与 {other_id} 标题归一化后相同（{item['left_title']}）"
+        return (
+            f"与 {other_id} 标题归一化后相同"
+            f"（「{item['left_title']}」/「{item['right_title']}」）"
+        )
+    return (
+        f"与 {other_id} 分镜正文重合度 {item['percent']}%"
+        f"（{item['intersection']} 条完全相同 / 合计 {item['union']} 条）"
+    )
+
+
+def _compact_evidence(item: Dict[str, Any]) -> str:
+    """同一事实的短句版（给 ``version_hint`` 用，读起来像一句话）。"""
+    if item["kind"] == "title":
+        return "标题相同"
+    return f"内容重合度 {item['percent']}%"
+
+
+def _baseline_facts(group: Dict[str, Any]) -> List[str]:
+    """每组的**客观事实**（与版本判断无关，也可单独渲染）。"""
+    facts = [f"记录数 {group.get('record_count', 0)}"]
+    if group.get("seq_field"):
+        facts.append(
+            f"巨日禄序号范围 {group.get('seq_min')}–{group.get('seq_max')}"
+            f"（字段 {group.get('seq_field')}）"
+        )
+    if group.get("pages_fetched"):
+        facts.append(f"分镜接口共取 {group['pages_fetched']} 页（整组取全，未截断）")
+    if group.get("updated_at"):
+        facts.append(
+            f"更新时间 {group.get('updated_source') or 'updatedAt'}={group['updated_at']}"
+        )
+    if group.get("created_at"):
+        facts.append(
+            f"创建时间 {group.get('created_source') or 'createdAt'}={group['created_at']}"
+        )
+    if not group.get("updated_at") and not group.get("created_at"):
+        facts.append("未取到创建 / 更新时间字段（无时间戳，无法判断先后）")
+    return facts
+
+
+def _timestamp_decision(
+    members: List[int], groups: List[dict]
+) -> Tuple[Optional[int], str, str]:
+    """只在**真实拿到可比较的时间戳**时判断先后。
+
+    用户口径（2026-09-21）：「没有可靠时间证据时不要标记『最新版本』，只能陈述客观信息。」
+    因此这里**不再**用「scriptId 更大所以更新」这类推测；判不出来就返回
+    ``(None, "", 原因)``，由调用方改成中立陈述。
+
+    判定要求（全部满足才给出结论）：
+      * 每一个成员组都有可解析的时间戳（拿不到就没有可比性）；
+      * 最大时间戳**不并列**（并列 = 分不出先后）。
+
+    Returns:
+        ``(最晚的那一组下标 或 None, 判定依据, 判不出来的原因)``
+    """
+    timed: List[Tuple[int, datetime, str, str]] = []
+    for index in members:
+        group = groups[index]
+        stamp = str(group.get("updated_at") or "").strip()
+        field = str(group.get("updated_source") or "") or "updated_at"
+        if not stamp:
+            stamp = str(group.get("created_at") or "").strip()
+            field = str(group.get("created_source") or "") or "created_at"
+        parsed = _parse_timestamp(stamp)
+        if stamp and parsed is not None:
+            timed.append((index, parsed, field, stamp))
+    if not timed:
+        return (None, "", "无时间戳")
+    if len(timed) < len(members):
+        return (None, "", "只有部分组有时间戳")
+    if len({item[1] for item in timed}) == 1:
+        return (None, "", "各组时间戳完全相同")
+    timed.sort(key=lambda item: (item[1], item[0]))
+    if timed[-2][1] == timed[-1][1]:
+        return (None, "", "最新时间戳并列（多组相同）")
+    index, _parsed, field, stamp = timed[-1]
+    return (
+        index,
+        f"{groups[index]['script_id']} 的 {field}={stamp} 最晚（可比较的时间戳里最新）",
+        "",
+    )
+
+
+def annotate_script_versions(
+    groups: List[dict],
+    storyboards: Optional[List[dict]] = None,
+) -> None:
+    """就地填 ``facts`` / ``likely_newest`` / ``version_reasons`` / ``version_hint``。
+
+    **客观 vs 判断分开**：
+
+    * ``facts``：客观信息逐条（记录数 / 序号范围 / 翻了几页 / 时间戳字段与值 /
+      与其它组的标题是否相同、正文重合度多少）—— 任何情况下都给。
+    * ``version_reasons``：只在**确实按时间戳判出先后**时给出结论；
+      没有时间证据时这里只保留客观事实，不写「最可能是最新版」这类判断。
+    * ``likely_newest``：**只有**真实拿到可比较的时间戳、且能分出先后时才为 true，
+      并且依据里写明是哪个字段、什么值。**id 大小一律不作为依据。**
+    * ``version_hint``：同一脚本多版本的中立陈述（含「请你确认」），无证据时为空串。
+
+    成团（= 疑似同一脚本的不同版本）的证据：标题归一化后相同，或分镜正文集合
+    重合度 >= 50%（Jaccard）。证据不足一律 ``likely_newest=False`` / 空列表 / 空串。
+    """
+    if not groups:
+        return
+    signatures = _prompt_signatures(storyboards)
+    for group in groups:
+        group["facts"] = _baseline_facts(group)
+
+    parent = list(range(len(groups)))
+
+    def _find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    evidence: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
+    for i, left in enumerate(groups):
+        for j in range(i + 1, len(groups)):
+            items = _pair_evidence(left, groups[j], signatures)
+            if not items:
+                continue
+            evidence[(i, j)] = items
+            root_i, root_j = _find(i), _find(j)
+            if root_i != root_j:
+                parent[max(root_i, root_j)] = min(root_i, root_j)
+
+    clusters: Dict[int, List[int]] = {}
+    for index in range(len(groups)):
+        clusters.setdefault(_find(index), []).append(index)
+
+    for members in clusters.values():
+        if len(members) < 2:
+            continue
+        winner, decisive, no_claim = _timestamp_decision(members, groups)
+        for index in members:
+            group = groups[index]
+            facts: List[str] = []
+            short: List[str] = []
+            by_other: Dict[str, List[str]] = {}
+            for (i, j), items in evidence.items():
+                if index not in (i, j):
+                    continue
+                other = str(groups[j if index == i else i]["script_id"])
+                for item in items:
+                    text = _format_evidence(item, other)
+                    if text not in facts:
+                        facts.append(text)
+                    by_other.setdefault(other, []).append(_compact_evidence(item))
+            for other, briefs in by_other.items():
+                short.append(f"与 {other} " + "、".join(dict.fromkeys(briefs)))
+            group["facts"] = group["facts"] + facts
+            others = _other_ids(members, groups, index)
+
+            if index == winner:
+                group["likely_newest"] = True
+                group["version_reasons"] = facts + [
+                    decisive,
+                    "仍需用户确认：本轮只给线索，不自动选择脚本组",
+                ]
+                group["version_hint"] = (
+                    f"疑似与 {others} 为同一脚本的不同版本；{decisive}。仍需用户确认"
+                )
+                continue
+
+            group["version_reasons"] = facts
+            if winner is None:
+                # 没有可靠时间证据：只陈述客观信息，绝不写「最新版本」
+                group["version_hint"] = (
+                    f"{'、'.join(short)}；{no_claim}，无法判断先后，请你确认"
+                )
+                continue
+            group["version_hint"] = (
+                f"疑似与 {others} 为同一脚本的不同版本；{decisive}。仍需用户确认"
+            )
+
+
+def _other_ids(members: List[int], groups: List[dict], index: int) -> str:
+    return "/".join(str(groups[i]["script_id"]) for i in members if i != index)
+
+
+# ---------------------------------------------------------------------------
 # parse_agent_platform_response — kept for backward compat
 # ---------------------------------------------------------------------------
 
@@ -813,6 +1499,11 @@ def parse_agent_platform_response(fetch_result: dict) -> dict:
 
 
 def normalize_external_agent_prompts(agents: List[dict]) -> List[dict]:
+    """把抓到的分镜标准化成条目（**一条都不丢**，不做任何数量截断）。
+
+    ``script_id`` / ``seq`` / ``sbid`` 一并带出来：统一预览要能逐行显示
+    「脚本组 + 巨日禄序号」，配对时也靠 ``seq`` 做「编号优先」匹配。
+    """
     entries: List[dict] = []
     for index, agent in enumerate(agents, start=1):
         prompt_text = str(agent.get("prompt_text") or "").strip()
@@ -829,6 +1520,9 @@ def normalize_external_agent_prompts(agents: List[dict]) -> List[dict]:
             "resolution": str(agent.get("resolution") or "720p"),
             "agent_name": agent_name,
             "agent_id": str(agent.get("agent_id") or ""),
+            "script_id": str(agent.get("source_script_id") or agent.get("scriptId") or ""),
+            "seq": str(agent.get("seqNum") or ""),
+            "sbid": str(agent.get("sbid") or ""),
             "source_platform": JURILU_AGENT_PLATFORM_NAME,
             "source_url": str(agent.get("source_url") or ""),
             "fetched_at": str(agent.get("fetched_at") or ""),

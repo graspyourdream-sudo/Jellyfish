@@ -13,8 +13,13 @@
   3. 出口 A 空范围：返回 404（不是返回空文件）；
   4. 巨日禄导入预览：抓取失败时返回 502 且带脱敏诊断（Cookie 不出现）；
   5. 巨日禄导入预览：章节不存在 → 404；章节不属于项目 → 400；
-  6. 巨日禄导入预览：桩掉抓取后返回完整配对计划；
-  7. 巨日禄导入提交：桩掉写库后验证路由把计划正确交给写库层。
+  6. 巨日禄导入预览（**单数语义**）：没选组 → 只回脚本组、不匹配；选两组 → 400；
+     恰好一组 → 完整配对计划（只含该组）；
+  7. 巨日禄导入提交：桩掉写库后验证路由把该组的计划正确交给写库层。
+
+库怎么选：优先 ``JELLYFISH_SELFCHECK_DB``，其次 ``DATABASE_URL`` 里的 sqlite 路径
+（应用读哪个库，这里就指纹哪个库），最后回退 ``backend/jellyfish.db``；
+库不可用会明确跳过并说明原因（见 ``tests/selfcheck_db.py``）。
 
 跑法（需提权，沙箱会杀 sqlalchemy）：
     cd /Users/apple/Documents/Jellyfish/backend
@@ -34,10 +39,18 @@ BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
 os.environ.setdefault("JELLYFISH_CELERY_EAGER", "1")
 
-DB = BACKEND / "jellyfish.db"
+from tests.selfcheck_db import resolve_db_path, skip_note, unusable_reason  # noqa: E402
+
+DB = resolve_db_path(BACKEND)
 PASS = 0
 FAIL = 0
 FAKE_COOKIE = "SESSION_MARKER_DO_NOT_LEAK_9f3a1c"
+
+#: 自检用的脚本组（新契约：一次只能导入**一个**脚本组）
+SCRIPT_ID = "SC1"
+OTHER_SCRIPT_ID = "SC2"
+#: 桩里的分镜条数（= 该脚本组的条数）
+STUB_GROUP_SIZE = 3
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -59,35 +72,48 @@ def fingerprint() -> str:
 
 
 def pick_project_and_chapter():
-    """找一个含 jurilu 提示词的项目 + 该项目的一个章节 + 一个不属于它的章节。"""
+    """找一个含 jurilu 提示词的项目 + 该项目的一个章节 + 一个不属于它的章节。
+
+    数据不足（没有 jurilu 提示词 / 只有一个项目）时返回 ``None``，
+    由调用方打印明确的「跳过」原因，而不是抛一个看不懂的 ``NoneType`` 异常。
+    """
     con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
-    cur = con.cursor()
-    project_id = cur.execute(
-        """
-        SELECT c.project_id FROM shot_details d
-        JOIN shots s ON s.id = d.id
-        JOIN chapters c ON c.id = s.chapter_id
-        WHERE d.video_prompt_source = 'jurilu' AND TRIM(d.video_prompt) <> ''
-        GROUP BY c.project_id ORDER BY COUNT(*) DESC LIMIT 1
-        """
-    ).fetchone()[0]
-    chapter_id = cur.execute(
-        "SELECT id FROM chapters WHERE project_id = ? ORDER BY rowid LIMIT 1", (project_id,)
-    ).fetchone()[0]
-    expected = cur.execute(
-        """
-        SELECT COUNT(*) FROM shot_details d
-        JOIN shots s ON s.id = d.id
-        JOIN chapters c ON c.id = s.chapter_id
-        WHERE c.project_id = ? AND d.video_prompt_source = 'jurilu'
-              AND TRIM(d.video_prompt) <> ''
-        """,
-        (project_id,),
-    ).fetchone()[0]
-    other_chapter = cur.execute(
-        "SELECT id FROM chapters WHERE project_id <> ? LIMIT 1", (project_id,)
-    ).fetchone()[0]
-    con.close()
+    try:
+        cur = con.cursor()
+        row = cur.execute(
+            """
+            SELECT c.project_id FROM shot_details d
+            JOIN shots s ON s.id = d.id
+            JOIN chapters c ON c.id = s.chapter_id
+            WHERE d.video_prompt_source = 'jurilu' AND TRIM(d.video_prompt) <> ''
+            GROUP BY c.project_id ORDER BY COUNT(*) DESC LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return None
+        project_id = row[0]
+        chapter_row = cur.execute(
+            "SELECT id FROM chapters WHERE project_id = ? ORDER BY rowid LIMIT 1", (project_id,)
+        ).fetchone()
+        other_row = cur.execute(
+            "SELECT id FROM chapters WHERE project_id <> ? LIMIT 1", (project_id,)
+        ).fetchone()
+        if chapter_row is None or other_row is None:
+            return None
+        chapter_id = chapter_row[0]
+        other_chapter = other_row[0]
+        expected = cur.execute(
+            """
+            SELECT COUNT(*) FROM shot_details d
+            JOIN shots s ON s.id = d.id
+            JOIN chapters c ON c.id = s.chapter_id
+            WHERE c.project_id = ? AND d.video_prompt_source = 'jurilu'
+                  AND TRIM(d.video_prompt) <> ''
+            """,
+            (project_id,),
+        ).fetchone()[0]
+    finally:
+        con.close()
     return project_id, chapter_id, other_chapter, expected
 
 
@@ -95,9 +121,24 @@ async def main() -> int:  # noqa: C901
     import httpx
 
     from app.main import app
+    from app.services.external import jurilu_agent_import as jurilu
     from app.services.external import jurilu_import_service as svc
 
-    project_id, chapter_id, other_chapter, expected_exportable = pick_project_and_chapter()
+    reason = unusable_reason(DB)
+    if reason:
+        print(skip_note(DB, reason))
+        return 0
+
+    picked = pick_project_and_chapter()
+    if picked is None:
+        print(skip_note(
+            DB,
+            "库里没有可用于自检的数据（需要：至少一个含 jurilu 提示词的项目，"
+            "以及另一个项目的章节）",
+        ))
+        return 0
+    project_id, chapter_id, other_chapter, expected_exportable = picked
+    print(f"  库={DB}")
     print(f"  项目={project_id}")
     print(f"  章节={chapter_id}")
     print(f"  独立重算的可导出条数={expected_exportable}")
@@ -137,7 +178,7 @@ async def main() -> int:  # noqa: C901
 
         print("\n== 3. 出口 A 空范围应 404 ==")
         r3 = await client.get(
-            f"/api/v1/studio/prompt-delivery/__nonexistent_project__/export",
+            "/api/v1/studio/prompt-delivery/__nonexistent_project__/export",
             params={"scope": "episodes"},
         )
         check("HTTP 404", r3.status_code == 404, str(r3.status_code))
@@ -183,44 +224,105 @@ async def main() -> int:  # noqa: C901
         )
         check("章节不属于该项目 → 400", r6.status_code == 400, f"{r6.status_code} {r6.text[:120]}")
 
-        print("\n== 6. 巨日禄导入：桩掉抓取 → 完整配对计划 ==")
-        fixture = [
+        print("\n== 6. 巨日禄导入（单数语义）：没选组 / 选两组 / 恰好一组 ==")
+        # 桩在**抓取层**（而不是 fetch_entries）：这样分组、单数校验、过滤、配对
+        # 全都是真代码在跑，桩只负责「假装抓到了这个脚本组的分镜」。
+        stub_storyboards = [
             {
-                "shot_label": f"S{i:03d}",
-                "description": f"第{i}个分镜",
-                "final_prompt": f"提示词内容{i}",
+                "agent_name": f"EP01｜第一集｜分镜 S{i:03d}",
+                "shot_summary": f"第{i}个分镜",
+                "prompt_text": f"提示词内容{i}",
+                "agent_id": f"agent-{i}",
+                "sbid": f"S{i:03d}",
+                "seqNum": str(i),
+                "source_script_id": SCRIPT_ID,
+                "source_script_title": "第一集",
+                "source_script_index": 1,
             }
-            for i in range(1, 4)
+            for i in range(1, STUB_GROUP_SIZE + 1)
         ]
-        original_fetch = svc.fetch_entries
-        svc.fetch_entries = lambda **kwargs: {  # type: ignore[assignment]
-            "entries": fixture,
-            "diagnostics": {"script_records_count": 1, "has_cookie": True},
+        original_fetch = jurilu.fetch_all_storyboards
+        jurilu.fetch_all_storyboards = lambda **kwargs: {  # type: ignore[assignment]
+            "ok": True,
+            "scripts": [{"id": SCRIPT_ID, "title": "第一集"}],
+            "storyboards": stub_storyboards,
             "warnings": [],
-            "scripts": [],
-            "project_id": "P1",
-            "clip_id": "C1",
+            "diagnostics": {"getScriptPage_url": "stub://getScriptPage",
+                            "script_records_count": 1},
+            "storyboard_pages": {SCRIPT_ID: 1},
+            "storyboard_totals": {SCRIPT_ID: None},
         }
         # 目标章节的镜头本来就带 jurilu 提示词，这里显式开覆盖，
         # 否则会被正确判成 conflict（那是另一条分支，第 5 节已验证）
         payload_overwrite = {**payload, "overwrite": True}
-        r7 = await client.post(
+
+        print("  6.1 没选组 → 只回脚本组、不做匹配")
+        r_none = await client.post(
             f"/api/v1/studio/jurilu-import/{project_id}/preview", json=payload_overwrite
+        )
+        check("HTTP 200", r_none.status_code == 200, f"{r_none.status_code} {r_none.text[:200]}")
+        ndata = (r_none.json() or {}).get("data") or {}
+        check("requires_script_selection=true", ndata.get("requires_script_selection") is True,
+              str(ndata.get("requires_script_selection")))
+        check("rows 为空（默认不跨 scriptId 合并）", (ndata.get("rows") or []) == [],
+              str(len(ndata.get("rows") or [])))
+        check("entry_count=0", ndata.get("entry_count") == 0, str(ndata.get("entry_count")))
+        check("plan_summary 为空", ndata.get("plan_summary") == "", repr(ndata.get("plan_summary")))
+        check("仍返回脚本组",
+              [g.get("script_id") for g in ndata.get("script_groups") or []] == [SCRIPT_ID],
+              str(ndata.get("script_groups")))
+        check("note 写明默认不合并",
+              "默认不跨 scriptId 合并" in str(ndata.get("note")), str(ndata.get("note")))
+
+        print("  6.2 选了两组 → 400（一次只能导入一个脚本组）")
+        r_two = await client.post(
+            f"/api/v1/studio/jurilu-import/{project_id}/preview",
+            json={**payload_overwrite, "script_ids": [SCRIPT_ID, OTHER_SCRIPT_ID]},
+        )
+        check("HTTP 400", r_two.status_code == 400, f"{r_two.status_code} {r_two.text[:200]}")
+        two_body = r_two.json() or {}
+        check("code=400", two_body.get("code") == 400, str(two_body.get("code")))
+        check("中文说明「一次只能导入一个脚本组」",
+              "一次只能导入一个脚本组" in str(two_body.get("message")),
+              str(two_body.get("message"))[:160])
+        check("data 为 null（结构化错误）", two_body.get("data") is None, str(two_body.get("data")))
+
+        print(f"  6.3 恰好选一组 → 该组 {STUB_GROUP_SIZE} 条全部进计划")
+        r7 = await client.post(
+            f"/api/v1/studio/jurilu-import/{project_id}/preview",
+            json={**payload_overwrite, "script_ids": [SCRIPT_ID]},
         )
         check("HTTP 200", r7.status_code == 200, f"{r7.status_code} {r7.text[:200]}")
         pdata = (r7.json() or {}).get("data") or {}
-        check("entry_count=3", pdata.get("entry_count") == 3, str(pdata.get("entry_count")))
-        check("rows 长度=3", len(pdata.get("rows") or []) == 3, str(len(pdata.get("rows") or [])))
+        rows = pdata.get("rows") or []
+        check(f"entry_count={STUB_GROUP_SIZE}", pdata.get("entry_count") == STUB_GROUP_SIZE,
+              str(pdata.get("entry_count")))
+        check(f"rows 长度={STUB_GROUP_SIZE}", len(rows) == STUB_GROUP_SIZE, str(len(rows)))
+        check("selected_script_id 为所选组", pdata.get("selected_script_id") == SCRIPT_ID,
+              str(pdata.get("selected_script_id")))
+        check("requires_script_selection=false",
+              pdata.get("requires_script_selection") is False,
+              str(pdata.get("requires_script_selection")))
         check("带 plan_summary", bool(pdata.get("plan_summary")), str(pdata.get("plan_summary")))
         check(
             "所有行来源为 jurilu",
-            all(row.get("source") == "jurilu" for row in pdata.get("rows") or []),
-            str([row.get("source") for row in (pdata.get("rows") or [])]),
+            all(row.get("source") == "jurilu" for row in rows),
+            str([row.get("source") for row in rows]),
+        )
+        check(
+            "所有行都属于所选组（不会混进别的脚本组）",
+            {row.get("script_id") for row in rows} == {SCRIPT_ID},
+            str({row.get("script_id") for row in rows}),
+        )
+        check(
+            "每行都带巨日禄序号 + 镜头编号 + 匹配状态",
+            all(row.get("seq") and row.get("index") and row.get("matched_by") for row in rows),
+            str(rows[:1]),
         )
         check(
             "开覆盖后行级动作全为 overwrite",
-            all(row.get("action") == "overwrite" for row in pdata.get("rows") or []),
-            str([row.get("action") for row in (pdata.get("rows") or [])]),
+            all(row.get("action") == "overwrite" for row in rows),
+            str([row.get("action") for row in rows]),
         )
 
         print("\n== 7. 巨日禄导入：提交把计划交给写库层（写库桩化，不落盘） ==")
@@ -232,6 +334,7 @@ async def main() -> int:  # noqa: C901
 
             rows = planner.writable_rows(plan["rows"])
             captured["writable"] = len(rows)
+            captured["script_ids"] = {row.get("script_id") for row in rows}
             return {
                 "chapter_id": chapter_id,
                 "updated": len(rows),
@@ -243,16 +346,31 @@ async def main() -> int:  # noqa: C901
 
         original_apply = svc.apply_plan
         svc.apply_plan = fake_apply  # type: ignore[assignment]
-        r8 = await client.post(
+        print("  7.1 没选组 → 400（写库端点必须恰好一个）")
+        r_no_pick = await client.post(
             f"/api/v1/studio/jurilu-import/{project_id}/apply", json=payload_overwrite
+        )
+        check("HTTP 400", r_no_pick.status_code == 400, f"{r_no_pick.status_code}")
+        check("中文提示要求指定 script_ids",
+              "script_ids" in str((r_no_pick.json() or {}).get("message")),
+              str((r_no_pick.json() or {}).get("message"))[:160])
+        check("写库层没有被调用过", captured == {}, str(captured))
+
+        print(f"  7.2 恰好选一组 → 该组 {STUB_GROUP_SIZE} 条交给写库层")
+        r8 = await client.post(
+            f"/api/v1/studio/jurilu-import/{project_id}/apply",
+            json={**payload_overwrite, "script_ids": [SCRIPT_ID]},
         )
         check("HTTP 200", r8.status_code == 200, f"{r8.status_code} {r8.text[:200]}")
         adata = (r8.json() or {}).get("data") or {}
         check("写库层收到正确章节", captured.get("chapter_id") == chapter_id, str(captured))
-        check("写库层收到 3 条可写行", captured.get("writable") == 3, str(captured))
-        check("返回 written=3", adata.get("written") == 3, str(adata))
+        check(f"写库层收到 {STUB_GROUP_SIZE} 条可写行",
+              captured.get("writable") == STUB_GROUP_SIZE, str(captured))
+        check("写库层收到的行都属于所选组",
+              captured.get("script_ids") == {SCRIPT_ID}, str(captured))
+        check(f"返回 written={STUB_GROUP_SIZE}", adata.get("written") == STUB_GROUP_SIZE, str(adata))
 
-        svc.fetch_entries = original_fetch  # type: ignore[assignment]
+        jurilu.fetch_all_storyboards = original_fetch  # type: ignore[assignment]
         svc.apply_plan = original_apply  # type: ignore[assignment]
 
     after = fingerprint()

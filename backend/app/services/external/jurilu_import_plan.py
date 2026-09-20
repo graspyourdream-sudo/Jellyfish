@@ -18,13 +18,20 @@
 --------------------------
 中控台按 ``shot_label``（巨日禄的 agent_name）去匹配已有镜头，匹配不上就新建。
 Jellyfish 迁移过来的镜头 id 是重新生成的，跟巨日禄的 agent_name 不同源，
-按 label 匹配必然全落空。因此这里改为**按顺序匹配**：第 i 条分镜 → 章节内第 i 个镜头。
-这是迁移后唯一还成立的对应关系（分镜顺序 = 镜头 index 顺序）。
+按 label 匹配必然全落空。因此这里改为两级匹配：
+
+1. **编号优先**：分镜的巨日禄序号（``seqNum``）能对上章节里某个镜头的 ``index``
+   → 就写到那个镜头上（用户口径：「编号优先匹配」）；
+2. **顺序兜底**：序号对不上（缺失 / 该镜头已被占用）→ 用按 index 排序后
+   **下一个还没用过的镜头**，与迁移后「分镜顺序 = 镜头 index 顺序」一致。
+
+一条分镜仍然只占一个镜头（一个镜头最多一条提示词）。每一行都会带
+``matched_by``（``seq`` / ``order`` / ``created`` / ``none``）说明它是怎么配上的。
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 # 与中控台 app.py:18378 保持一致的来源标记；出口 A 依赖这个值。
 JURILU_SOURCE = "jurilu"
@@ -38,6 +45,12 @@ ACTION_CREATE = "create"          # 章节镜头不够，需要新建镜头
 ACTION_SKIP_EMPTY = "skip_empty"  # 条目没有提示词正文
 ACTION_SKIP_NO_SHOT = "skip_no_shot"  # 章节镜头不够且不允许新建
 
+#: 这一行是**怎么**配到那个镜头上的（user 口径：匹配状态与原因要能带出来）
+MATCHED_BY_SEQ = "seq"          # 巨日禄序号 == 镜头 index
+MATCHED_BY_ORDER = "order"      # 顺序兜底（下一个没用过的镜头）
+MATCHED_BY_CREATED = "created"  # 章节镜头不够，新建
+MATCHED_BY_NONE = "none"        # 没配上（空正文 / 不允许新建）
+
 
 def build_import_plan(
     entries: Sequence[Dict[str, Any]],
@@ -50,7 +63,9 @@ def build_import_plan(
     """把规范化后的分镜条目配对到章节镜头，产出可执行计划（不写库）。
 
     Args:
-        entries: ``normalize_external_agent_prompts`` 的输出，已按分镜顺序排列。
+        entries: ``normalize_external_agent_prompts`` 的输出，已按分镜顺序排列；
+            元素可带 ``seq``（巨日禄 seqNum）与 ``script_id``，用于编号优先匹配
+            与预览展示。
         shots: 目标章节已有镜头，元素形如
             ``{"id": str, "index": int, "title": str, "video_prompt": str}``；
             顺序无所谓，这里会按 index 重排。
@@ -59,10 +74,19 @@ def build_import_plan(
         source: 写入 ``video_prompt_source`` 的值。
 
     Returns:
-        ``{"rows": [...], "counts": {...}, "next_index": int}``
+        ``{"rows": [...], "counts": {...}, "next_index": int}``；
+        每行带 ``script_id`` / ``seq`` / ``order`` / ``index`` / ``title`` /
+        ``summary`` / ``prompt`` / ``action`` / ``reason`` / ``matched_by`` /
+        ``shot_id`` / ``source``。**不做任何数量截断**：有几条分镜就有几行。
     """
     ordered = sorted(shots, key=lambda s: _int(s.get("index")))
     top_index = max((_int(s.get("index")) for s in ordered), default=0)
+    by_index: Dict[int, Dict[str, Any]] = {}
+    for shot in ordered:
+        index = _int(shot.get("index"))
+        if index and index not in by_index:
+            by_index[index] = shot
+    used_shot_ids: set = set()
 
     rows: List[Dict[str, Any]] = []
     for position, entry in enumerate(entries):
@@ -70,12 +94,14 @@ def build_import_plan(
         text = str(entry.get("final_prompt") or "").strip()
         label = str(entry.get("shot_label") or "").strip() or f"镜头 {order}"
         summary = str(entry.get("description") or "").strip()
+        seq = _int(entry.get("seq"))
+        script_id = str(entry.get("script_id") or entry.get("source_script_id") or "")
+        target, matched_by = _pick_target(entry, ordered, by_index, used_shot_ids)
 
         if not text:
             # 空正文条目**仍占它那一格**：巨日禄一条分镜对应一个镜头，
             # 分镜序号即镜头序号，空分镜的镜头依然存在。这里只记录它对应
             # 哪个镜头以便排查，不产生写入。
-            target = ordered[position] if position < len(ordered) else None
             rows.append(
                 _row(
                     ACTION_SKIP_EMPTY,
@@ -88,12 +114,14 @@ def build_import_plan(
                     shot_id=str((target or {}).get("id") or ""),
                     index=_int((target or {}).get("index")) or order,
                     title=str((target or {}).get("title") or "").strip(),
+                    script_id=script_id,
+                    seq=seq,
+                    matched_by=matched_by or MATCHED_BY_NONE,
                 )
             )
             continue
 
-        if position < len(ordered):
-            target = ordered[position]
+        if target is not None:
             current = str(target.get("video_prompt") or "").strip()
             shot_id = str(target.get("id") or "")
             index = _int(target.get("index")) or order
@@ -118,6 +146,9 @@ def build_import_plan(
                     shot_id=shot_id,
                     index=index,
                     title=title,
+                    script_id=script_id,
+                    seq=seq,
+                    matched_by=matched_by,
                 )
             )
             continue
@@ -135,6 +166,9 @@ def build_import_plan(
                     reason="章节镜头不足，新建镜头",
                     index=top_index,
                     title=label,
+                    script_id=script_id,
+                    seq=seq,
+                    matched_by=MATCHED_BY_CREATED,
                 )
             )
         else:
@@ -148,6 +182,9 @@ def build_import_plan(
                     source=source,
                     reason="章节镜头不足且未允许新建",
                     index=top_index,
+                    script_id=script_id,
+                    seq=seq,
+                    matched_by=MATCHED_BY_NONE,
                 )
             )
 
@@ -156,6 +193,39 @@ def build_import_plan(
         counts[row["action"]] = counts.get(row["action"], 0) + 1
 
     return {"rows": rows, "counts": counts, "next_index": top_index}
+
+
+def _pick_target(
+    entry: Dict[str, Any],
+    ordered: Sequence[Dict[str, Any]],
+    by_index: Dict[int, Dict[str, Any]],
+    used_shot_ids: set,
+) -> Tuple[Any, str]:
+    """给一条分镜挑目标镜头：**编号优先、顺序兜底**。
+
+    返回 ``(镜头或 None, matched_by)``；挑中的镜头立刻在 ``used_shot_ids`` 里占位，
+    保证一个镜头不会被两条分镜重复写入。
+    """
+    seq = _int(entry.get("seq"))
+    if seq:
+        candidate = by_index.get(seq)
+        if candidate is not None and str(candidate.get("id")) not in used_shot_ids:
+            used_shot_ids.add(str(candidate.get("id")))
+            return (candidate, MATCHED_BY_SEQ)
+    for shot in ordered:
+        if str(shot.get("id")) not in used_shot_ids:
+            used_shot_ids.add(str(shot.get("id")))
+            return (shot, MATCHED_BY_ORDER)
+    return (None, MATCHED_BY_NONE)
+
+
+def empty_plan() -> Dict[str, Any]:
+    """空计划：**用户还没选脚本组**时用它，保证 ``rows`` / ``counts`` 一定是空的。
+
+    默认不跨 scriptId 合并 —— 没选组就不该有任何一行计划，
+    否则「109 条 = 同一集连续镜头」这个错误前提会被悄悄写进预览。
+    """
+    return {"rows": [], "counts": {}, "next_index": 0}
 
 
 def _row(
@@ -170,7 +240,11 @@ def _row(
     shot_id: str = "",
     index: int = 0,
     title: str = "",
+    script_id: str = "",
+    seq: int = 0,
+    matched_by: str = MATCHED_BY_NONE,
 ) -> Dict[str, Any]:
+    """一行计划。字段刻意"自解释"：前端统一预览直接照抄即可。"""
     return {
         "action": action,
         "order": order,
@@ -182,6 +256,9 @@ def _row(
         "shot_id": shot_id,
         "index": index,
         "title": title,
+        "script_id": script_id,
+        "seq": seq,
+        "matched_by": matched_by,
     }
 
 
@@ -225,7 +302,12 @@ __all__ = [
     "ACTION_CREATE",
     "ACTION_SKIP_EMPTY",
     "ACTION_SKIP_NO_SHOT",
+    "MATCHED_BY_SEQ",
+    "MATCHED_BY_ORDER",
+    "MATCHED_BY_CREATED",
+    "MATCHED_BY_NONE",
     "build_import_plan",
+    "empty_plan",
     "writable_rows",
     "plan_summary",
 ]
