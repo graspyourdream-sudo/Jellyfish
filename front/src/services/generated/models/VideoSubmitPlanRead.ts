@@ -80,3 +80,4 @@ export type VideoSubmitPlanRead = {
     guard_status?: string;
     note?: string;
 };
+

@@ -5,6 +5,7 @@
 import type { ApiResponse_dict_ } from '../models/ApiResponse_dict_';
 import type { ApiResponse_FileDetailRead_ } from '../models/ApiResponse_FileDetailRead_';
 import type { ApiResponse_FileRead_ } from '../models/ApiResponse_FileRead_';
+import type { ApiResponse_FileUploadRead_ } from '../models/ApiResponse_FileUploadRead_';
 import type { ApiResponse_NoneType_ } from '../models/ApiResponse_NoneType_';
 import type { ApiResponse_PaginatedData_FileRead__ } from '../models/ApiResponse_PaginatedData_FileRead__';
 import type { Body_upload_file_api_api_v1_studio_files_upload_post } from '../models/Body_upload_file_api_api_v1_studio_files_upload_post';
@@ -90,8 +91,9 @@ export class StudioFilesService {
         });
     }
     /**
-     * 上传文件并创建 FileItem 记录
-     * @returns ApiResponse_FileRead_ Successful Response
+     * 上传文件并创建 FileItem 记录（响应附带地址匿名可达性）
+     * 上传文件到对象存储并落库。响应在原有文件字段之外，**新增** ``url`` / ``url_reachable`` / ``url_probe`` / ``warnings``：说明这个地址**上游能不能匿名取到**（真实故障 A：本机可读、公网 404 的地址交给上游 → 上游任务失败）。不可达**不阻断上传**（文件已落库），但会如实告警并给出修法。
+     * @returns ApiResponse_FileUploadRead_ Successful Response
      * @throws ApiError
      */
     public static uploadFileApiApiV1StudioFilesUploadPost({
@@ -100,7 +102,7 @@ export class StudioFilesService {
     }: {
         formData: Body_upload_file_api_api_v1_studio_files_upload_post,
         name?: (string | null),
-    }): CancelablePromise<ApiResponse_FileRead_> {
+    }): CancelablePromise<ApiResponse_FileUploadRead_> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/api/v1/studio/files/upload',

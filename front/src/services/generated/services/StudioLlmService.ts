@@ -22,6 +22,9 @@ export class StudioLlmService {
      * 演练/真实模式的字段（前端角标按这些字段渲染，全部中文可照做）：
      * - ``mode`` / ``mode_label`` / ``mode_description``：当前模式与一句话说明；
      * - ``outlet_states``：llm / image / video / oss 四个出口各自是否放行、被拦原因；
+     * - ``switch_source`` / ``switch_source_label`` / ``guard.source``：两个开关**写在哪**
+     * （``env`` 进程环境变量 / ``dotenv`` backend/.env / ``default`` 都没写）；
+     * ``dotenv_real_mode`` 为 ``true`` 表示真实模式是由 ``.env`` 打开的（此时后端启动会告警）；
      * - ``enable_steps`` / ``how_to_enable``：怎么切到真实模式；``restore_steps``：怎么关回演练。
      * 既有字段（``guard`` / ``guard_status_text`` / ``paid_outlet_guards`` / ``dry_run_audit``）
      * 保持向后兼容，只做加法。
