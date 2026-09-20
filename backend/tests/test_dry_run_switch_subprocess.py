@@ -22,8 +22,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 
 #: 子进程里执行的最小探针：只导入守卫、把最终解析结果打成一行 JSON。

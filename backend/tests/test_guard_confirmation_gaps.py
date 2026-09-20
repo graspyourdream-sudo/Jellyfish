@@ -29,9 +29,13 @@ CONFIRM_ENV = "JELLYFISH_REAL_LLM_CONFIRMED"
 GUARD_ENV = "JELLYFISH_NETWORK_GUARD"
 
 
+class _NoSwitchSettings:
+    """空替身：让守卫在测试里只看环境变量，绝不读仓库里的 ``backend/.env``。"""
+
+
 def _only_env(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
     """把两个开关归零后按需设置（不读 ``.env``，测试与仓库里的 .env 解耦）。"""
-    monkeypatch.setattr(dry_run, "_settings", lambda: type("_S", (), {})())
+    monkeypatch.setattr(dry_run, "_settings", _NoSwitchSettings)
     for name in (DRY_RUN_ENV, CONFIRM_ENV, GUARD_ENV):
         monkeypatch.delenv(name, raising=False)
     for name, value in values.items():

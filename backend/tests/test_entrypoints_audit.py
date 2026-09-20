@@ -59,7 +59,7 @@ def _isolate_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """每个用例前后都回到「两处都没写开关」的默认演练态，并清审计日志。"""
     monkeypatch.delenv(DRY_RUN_ENV, raising=False)
     monkeypatch.delenv(CONFIRM_ENV, raising=False)
-    monkeypatch.setattr(dry_run, "_settings", lambda: _NoSwitchSettings())
+    monkeypatch.setattr(dry_run, "_settings", _NoSwitchSettings)
     dry_run.clear_audit_log()
     yield
     dry_run.clear_audit_log()
@@ -114,7 +114,7 @@ def _force_real_mode(monkeypatch: pytest.MonkeyPatch, *, confirm: bool) -> None:
         monkeypatch.setenv(CONFIRM_ENV, "1")
     else:
         monkeypatch.delenv(CONFIRM_ENV, raising=False)
-    monkeypatch.setattr(dry_run, "_settings", lambda: _NoSwitchSettings())
+    monkeypatch.setattr(dry_run, "_settings", _NoSwitchSettings)
 
 
 def _blocked_error(body: dict[str, Any]) -> dict[str, Any]:
@@ -209,7 +209,7 @@ def test_legacy_video_route_carries_the_video_outlet_dependency() -> None:
     )
     assert "create_video_generation_task" in source
     # 路由装饰器上必须出现 require_video_outlet -- 这是真实模式下唯一放行入口
-    decorator_region = source.split("async def create_video_generation_task")[0].rsplit("@router.post", 1)[-1]
+    decorator_region = source.split("async def create_video_generation_task", 1)[0].rsplit("@router.post", 1)[-1]
     assert "require_video_outlet" in decorator_region, "legacy 视频路由丢了视频出口守卫依赖"
 
 
