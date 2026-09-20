@@ -221,12 +221,15 @@ async def call_text_llm(
 ) -> LLMCompletion:
     """真实发起一次文本 LLM 调用。
 
-    DRY_RUN 开启时**不会**走到 httpx：守卫会先抛 ``DryRunBlocked``。
+    DRY_RUN 开启时**不会**走到 httpx：守卫会先抛 ``DryRunBlocked``；
+    真实模式但没确认时抛 ``RealCallNotConfirmed``。
     ``transport`` 仅用于测试注入（MockTransport），生产留空。
     """
-    if dry_run.dry_run_enabled():
-        # 调服务层应该早就返回占位结果了；这里兜底，防止新路径忘了守卫。
-        dry_run.assert_llm_outbound_allowed(f"call_text_llm(model={target.model_name})")
+    # 2026-09-21 修掉的一个真花钱缺口：这句以前包在 `if dry_run.dry_run_enabled():` 里，
+    # 于是「关演练但没确认」（real_unconfirmed）这条路把**付费确认检查整段跳过**，
+    # 请求会真的发出去 —— 与状态接口/文档承诺的「未确认仍然不发真实请求」相矛盾。
+    # 现在是单一口径：演练 / 未确认 / 已确认真实 三种情况都由守卫自己判定。
+    dry_run.assert_llm_outbound_allowed(f"call_text_llm(model={target.model_name})")
 
     payload = build_chat_payload(
         prompt=prompt,

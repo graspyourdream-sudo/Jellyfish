@@ -107,7 +107,7 @@ def _patch_route(
     with_audio: bool = False,
 ) -> dict[str, list[Any]]:
     """按既有方式打桩路由依赖；返回调用记录（派发 / 状态标记）。"""
-    seen: dict[str, list[Any]] = {"enqueued": [], "marked": [], "probed": []}
+    seen: dict[str, list[Any]] = {"enqueued": [], "spawned": [], "marked": [], "probed": []}
 
     async def _build_run_args(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
         return run_args
@@ -354,7 +354,12 @@ async def test_reachable_reference_still_creates_the_task(monkeypatch: pytest.Mo
         seen["enqueued"].append(task_id)
         return object()
 
+    def _inline_spawn(task_id: str, **_kwargs: Any) -> bool:
+        seen["spawned"].append(task_id)
+        return True  # 有运行中的事件循环 → 同进程内联执行（2026-09-21 起的默认派发）
+
     monkeypatch.setattr(route, "enqueue_task_execution", _enqueue_only)
+    monkeypatch.setattr(route, "spawn_inline_task_execution", _inline_spawn)
 
     db, engine = await build_session()
     async with db:
@@ -365,7 +370,9 @@ async def test_reachable_reference_still_creates_the_task(monkeypatch: pytest.Mo
     assert response.data is not None and response.data.task_id
     assert rows == 1, "可达时必须照旧建 1 条 generation_tasks"
     assert len(_SpyStore.calls) == 1
-    assert seen["enqueued"] == [response.data.task_id]
+    # 派发口径：优先同进程内联（本机没有 worker）；只有拿不到事件循环才退回队列
+    assert seen["spawned"] == [response.data.task_id]
+    assert seen["enqueued"] == []
     await engine.dispose()
 
 

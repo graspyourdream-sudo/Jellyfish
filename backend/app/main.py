@@ -61,6 +61,22 @@ async def validation_exception_handler(request: Request, exc: Exception) -> JSON
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时初始化，关闭时清理。"""
+    # 启动时：守卫模式点名。真实模式若是由 backend/.env 打开的，这里打一条醒目中文告警
+    # （.env 通常被 gitignore，改它不进代码评审，是最容易「悄悄开出去」的一条路）。
+    from app.services.studio.llm_orchestration import dry_run
+
+    warning = dry_run.startup_warning()
+    if warning:
+        logger.warning(warning)
+
+    # 出站兜底（按需）：默认不装，避免静默改变本地「演练模式下仍可做只读外部读取」的用法；
+    # 显式设 JELLYFISH_NETWORK_GUARD=1 才安装，安装后只放行「真实模式且已确认」+ 本机/白名单。
+    if dry_run.network_guard_requested():
+        dry_run.install_network_guard()
+        logger.warning(
+            "已按 JELLYFISH_NETWORK_GUARD=1 安装出站兜底：非真实模式（演练 / 未确认）下"
+            "外部 httpx 主机一律拦截（本机地址与 JELLYFISH_DRY_RUN_ALLOW_HOSTS 白名单除外）。"
+        )
     # 启动时：供应商注册 + 任务执行器注册（幂等）
     bootstrap_all_registries()
     # 启动时：初始化存储（S3 或本地磁盘，二选一）

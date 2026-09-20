@@ -603,12 +603,19 @@ def state() -> dict[str, Any]:
         "env": DRY_RUN_ENV,
         "confirm_env": CONFIRM_ENV,
         "network_guard": network_guard_installed(),
+        "network_guard_requested": network_guard_requested(),
         "outlets": list(OUTLETS),
         "blocked_count": len([x for x in audit_log() if x["action"].startswith("blocked")]),
         # --- 新增（前端角标 / 拦截错误体共用同一套口径） ---
         "mode": mode(),
         "mode_label": mode_label(),
         "blocked_reason": blocked_reason_code(),
+        # --- 新增（开关来源：进程环境变量 / backend/.env / 默认值） ---
+        "source": source(),
+        "source_label": source_label(),
+        "dry_run_source": flag_source(DRY_RUN_ENV),
+        "real_call_confirmed_source": flag_source(CONFIRM_ENV),
+        "dotenv_real_mode": is_dotenv_real_mode(),
     }
 
 
@@ -618,6 +625,21 @@ def state() -> dict[str, Any]:
 
 _guard_lock = threading.Lock()
 _guard_state: dict[str, Any] = {"installed": False, "patched": {}}
+
+
+#: 出站兜底的**显式开关**（进程环境变量或 ``backend/.env``）：``JELLYFISH_NETWORK_GUARD=1``。
+#:
+#: 为什么是显式开关而不是默认安装（2026-09-21 的决定，写清楚免得后人误解）：
+#: 兜底一旦装上，**演练模式与「未确认的真实模式」下所有外部 httpx 主机都会被拦**，
+#: 这会顺带影响「采纳历史生成图」这类**只读**外部读取的本地用法。所以默认不装，
+#: 需要更强防护的环境（CI、演示环境、多人共用的机器）显式打开；测试里按需直接调用
+#: :func:`install_network_guard`。状态接口会如实回报是否已装（``guard.network_guard``）。
+NETWORK_GUARD_ENV = "JELLYFISH_NETWORK_GUARD"
+
+
+def network_guard_requested() -> bool:
+    """本次进程是否**显式要求**安装出站兜底（默认否）。"""
+    return flag_source(NETWORK_GUARD_ENV) != "default" and flag_text(NETWORK_GUARD_ENV) == TRUE
 
 
 def network_guard_installed() -> bool:
