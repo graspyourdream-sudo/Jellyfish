@@ -430,10 +430,6 @@ const PROJECT_STEP_TO_STUDIO_STEP: Record<string, StudioStepKey> = {
 
 const STUDIO_STEP_PARAM = 'studio'
 
-function getStudioStepMeta(step: StudioStepKey): StudioStepMeta {
-  return STUDIO_STEPS.find((item) => item.key === step) ?? STUDIO_STEPS[0]
-}
-
 /** 从 URL 的 `?studio=` 推导初始步骤；非法/缺失一律落在第一步。
  *
  * 需要同时认两种取值：
@@ -5209,33 +5205,7 @@ function Inspector(props: {
         </Space>
       </div>
 
-      {/* 工作室三步（＝项目第 4-6 步）：视频提示词 → 关联绑定 → 生成与交付。
-          只切换页签分组，当前分镜与已选镜头集合都不受影响。 */}
-      <div className="px-3 pb-2 border-b border-gray-100">
-        <Segmented
-          block
-          size="small"
-          value={studioStepKey}
-          onChange={(value) => handleStudioStepChange(value as StudioStepKey)}
-          options={STUDIO_STEPS.map((item, index) => ({
-            value: item.key,
-            label: `${STUDIO_STEP_INDEX_OFFSET + index}. ${item.label}`,
-          }))}
-        />
-        <div className="mt-1 text-xs text-gray-500">{getStudioStepMeta(studioStepKey).hint}</div>
-      </div>
-
-      {/* 本集进度（只读）：把「还差什么」放在干活的地方，而不是只留在工作台的深链页面里。 */}
-      <div className="px-3 pb-1">
-        <Space size={6} wrap>
-          <Tag color={STEP_STATE_META[scopeState].color}>
-            {`${(selectedShotIds ?? []).length ? '选中范围' : '本集'}：${STEP_STATE_META[scopeState].label}`}
-          </Tag>
-          <Typography.Text type="secondary" className="text-[11px]">
-            {`范围 ${scopeReadiness.length} 镜 · 可生成 ${scopeReadiness.filter((item) => item.canGenerate).length} · 可导出 ${scopeReadiness.filter((item) => item.canExport).length}`}
-          </Typography.Text>
-        </Space>
-      </div>
+      {/* 步骤切换 / 范围统计 / 头部都在「本镜生产」工作区里统一提供（这里不再重复一套）。 */}
       <ExportScopeModal
         open={exportScopeOpen}
         onClose={() => setExportScopeOpen(false)}
