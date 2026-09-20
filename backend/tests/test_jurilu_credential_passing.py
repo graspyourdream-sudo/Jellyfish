@@ -31,6 +31,29 @@ class _Captured(Exception):
         super().__init__("captured")
 
 
+class _FakeHeaders:
+    def get(self, key, default=""):  # noqa: ANN001, ANN202
+        return "application/json" if key.lower() == "content-type" else default
+
+
+class _FakeResponse:
+    """最小可用的 urlopen 返回值：让两步流程走完而完全不出网。"""
+
+    def __init__(self, body: str, status: int = 200) -> None:
+        self._body = body.encode("utf-8")
+        self.status = status
+        self.headers = _FakeHeaders()
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):  # noqa: ANN204
+        return self
+
+    def __exit__(self, *args):  # noqa: ANN002, ANN204
+        return False
+
+
 def _capture(monkeypatch) -> list[urllib.request.Request]:
     seen: list[urllib.request.Request] = []
 
@@ -211,3 +234,58 @@ def test_fetch_entries_flattens_request_shape_into_diagnostics(monkeypatch) -> N
     assert diag["cookie_has_authorization_item"] is True
     assert "cookie" in diag["request_header_names"]
     assert "abc.def.ghi" not in repr(diag)
+
+
+def test_storyboard_attempts_are_recorded_when_zero_records(monkeypatch) -> None:
+    """第一步 200、第二步解析出 0 条时，必须留下可诊断的证据。
+
+    真实踩过：getScriptPage 返回 200 并拿到 3 个 scriptId，但三个
+    getStoryboardPage 全部解析出 0 条，只看汇总根本分不清是「401」还是
+    「返回体结构变了」——没有状态码和响应片段就只能猜。
+    """
+    bodies = {
+        "getScriptPage": '{"code":0,"data":{"records":[{"id":2936083,"title":"第1集"}]}}',
+        "getStoryboardPage": '{"code":401,"msg":"token invalid","data":null}',
+    }
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+        url = request.full_url
+        for key, body in bodies.items():
+            if key in url:
+                return _FakeResponse(body)
+        return _FakeResponse("{}")
+
+    monkeypatch.setattr(jurilu.urllib.request, "urlopen", fake_urlopen)
+    result = jurilu.fetch_all_storyboards(
+        source_url=URL, cookie_text=COOKIE, authorization="", referer=URL,
+    )
+    assert result["ok"] is False, "解析不出分镜就不能算成功"
+    diag = result["diagnostics"]
+    assert diag["script_status"] == 200
+    assert diag["script_records_count"] == 1
+    attempts = diag["storyboard_attempts"]
+    assert len(attempts) == 1
+    assert attempts[0]["script_id"] == "2936083"
+    assert attempts[0]["status"] == 200
+    assert "token invalid" in attempts[0]["body_preview"]
+    # 仍然不许回显凭证
+    assert "abc.def.ghi" not in repr(diag)
+
+
+def test_storyboard_attempts_record_http_error_status(monkeypatch) -> None:
+    """第二步直接 HTTP 断言时，状态码要如实写进证据里。"""
+
+    def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202
+        url = request.full_url
+        if "getScriptPage" in url:
+            return _FakeResponse('{"code":0,"data":{"records":[{"id":7,"title":"T"}]}}')
+        raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(jurilu.urllib.request, "urlopen", fake_urlopen)
+    result = jurilu.fetch_all_storyboards(
+        source_url=URL, cookie_text=COOKIE, authorization="", referer=URL,
+    )
+    attempts = result["diagnostics"]["storyboard_attempts"]
+    assert attempts[0]["status"] == 401
+    assert attempts[0]["error"] == "HTTP 401"
+    assert any("分镜接口失败" in w for w in result["warnings"])

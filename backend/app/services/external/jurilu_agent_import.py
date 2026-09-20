@@ -505,6 +505,17 @@ def fetch_all_storyboards(
             sb_url, cookie_text, method=sb_method, json_body=sb_body,
             authorization=authorization, referer=referer,
         )
+        # 逐步留证：第二步是最容易「静默 0 条」的地方，没证据就只能猜。
+        # 只留状态码 / 错误串 / 脱敏后的响应片段（_sanitize 会把 JWT 换成 <JWT>）。
+        attempt = {
+            "script_id": sid,
+            "status": sb_result.get("status"),
+            "error": str(sb_result.get("error") or "")[:160],
+            "body_preview": _sanitize(
+                str(sb_result.get("text") or sb_result.get("response_preview") or "")
+            )[:300],
+        }
+        diag.setdefault("storyboard_attempts", []).append(attempt)
         if not sb_result.get("ok"):
             warnings.append(f"scriptId={sid} 分镜接口失败: {sb_result.get('error')}")
             diag.setdefault("storyboard_request_facts", []).append(
@@ -516,6 +527,7 @@ def fetch_all_storyboards(
             sb_result.get("text", ""), sid,
             script_title=script_title, script_index=script_index,
         )
+        attempt["parsed_count"] = len(sbs)
         sb_counts[sid] = len(sbs)
         all_storyboards.extend(sbs)
 
