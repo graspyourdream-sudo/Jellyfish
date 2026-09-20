@@ -21,5 +21,13 @@ export type BoardSaveRequest = {
      * 是否允许「仅保存已匹配项」。默认 false = 提交条数与本集镜头数不一致时拒绝整体保存；用户在预览页显式切换为「仅保存已匹配项」后前端才传 true。
      */
     allow_partial?: boolean;
+    /**
+     * 巨日禄脚本组 ID（**单数**；origin=jurilu_import 时必填）
+     */
+    script_id?: string;
+    /**
+     * 已废弃的复数写法：传它一律 400，请改用单数 script_id
+     */
+    script_ids?: any;
 };
 

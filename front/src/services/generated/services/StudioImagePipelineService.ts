@@ -60,6 +60,9 @@ export class StudioImagePipelineService {
     /**
      * 提交出图任务（DRY_RUN 下返回占位结果，不触网）
      * 受守卫的出图提交。默认 DRY_RUN：返回占位 task_id 与不可达占位地址。
+     *
+     * 提交前会逐张探活每一条垫图 URL（``preflight_guard``）：不可达就**一个请求都不提交**，
+     * 返回结构化中文错误（哪张图 / 哪个资产 / 实际状态码 / 怎么修），且不产生任何付费调用。
      * @returns ApiResponse_ImageSubmitRead_ Successful Response
      * @throws ApiError
      */
@@ -124,6 +127,10 @@ export class StudioImagePipelineService {
     /**
      * 直提出视频（默认被 DRY_RUN 拦截，不产生费用）
      * 同步提交一次视频生成；DRY_RUN 开启时返回 dry_run 占位结果，不发任何请求。
+     *
+     * 真实提交前会做**第二层可达性复核**（``preflight_guard``）：本次真正发往供应商的
+     * 首/尾/关键帧参考图与参考音频地址，逐张匿名探活；不可达就不发请求、不产生费用
+     * （真实故障 A 就是这里把只在本机可读的地址交给了上游）。
      * @returns ApiResponse_VideoSubmitRead_ Successful Response
      * @throws ApiError
      */
@@ -169,6 +176,9 @@ export class StudioImagePipelineService {
      *
      * 为什么不用队列：本机没有 broker/worker，队列路径只会留下一条永远不执行的「排队中」，
      * 用户看到的就是「点了生成什么也没发生」。同进程内联执行是 P3 直提端点既有的做法。
+     *
+     * 提交前会逐张探活参考图（``preflight_guard``）：不可达就在**写库/建任务之前**拒绝，
+     * 返回结构化中文错误，一次付费调用都不产生。
      * @returns ApiResponse_FrameSubmitRead_ Successful Response
      * @throws ApiError
      */

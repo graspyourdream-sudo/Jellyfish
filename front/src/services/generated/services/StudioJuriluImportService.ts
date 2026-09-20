@@ -10,7 +10,7 @@ import { OpenAPI } from '../core/OpenAPI';
 import { request as __request } from '../core/request';
 export class StudioJuriluImportService {
     /**
-     * 巨日禄导入预览（抓取 + 配对，不写库）
+     * 巨日禄导入预览（抓取 + 分组 + 配对，不写库）
      * @returns ApiResponse_JuriluPreviewRead_ Successful Response
      * @throws ApiError
      */
@@ -35,7 +35,7 @@ export class StudioJuriluImportService {
         });
     }
     /**
-     * 巨日禄导入提交（抓取 + 配对 + 写库）
+     * 巨日禄导入提交（抓取 + 分组 + 配对 + 写库）
      * @returns ApiResponse_JuriluApplyRead_ Successful Response
      * @throws ApiError
      */

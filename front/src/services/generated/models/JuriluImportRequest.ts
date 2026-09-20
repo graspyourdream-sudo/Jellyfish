@@ -3,7 +3,7 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
- * 导入入参。字段命名对齐中控台面板的 5 个输入 + 2 个开关。
+ * 导入入参。字段命名对齐中控台面板的 5 个输入 + 2 个开关（外加脚本组选择）。
  */
 export type JuriluImportRequest = {
     /**
@@ -42,5 +42,9 @@ export type JuriluImportRequest = {
      * 目标镜头已有不同提示词时是否覆盖
      */
     overwrite?: boolean;
+    /**
+     * 用户选择的脚本组：**一次只能传 1 个** scriptId。空数组 = 还没选组：只返回 script_groups，不做任何匹配（默认不跨 scriptId 合并）；传 2 个及以上会被 400 拒绝
+     */
+    script_ids?: Array<string>;
 };
 

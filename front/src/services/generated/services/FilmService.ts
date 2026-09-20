@@ -69,7 +69,7 @@ export class FilmService {
         });
     }
     /**
-     * 镜头分镜帧提示词生成（任务版）
+     * 镜头分镜帧提示词生成（同进程内联执行的任务版）
      * @returns ApiResponse_TaskCreated_ Successful Response
      * @throws ApiError
      */

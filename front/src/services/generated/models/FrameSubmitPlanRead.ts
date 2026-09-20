@@ -17,6 +17,10 @@ export type FrameSubmitPlanRead = {
      * 实际会送出的参考图 file_id
      */
     reference_file_ids?: Array<string>;
+    /**
+     * 与 reference_file_ids 一一对应的**可读名**（新）：例如「角色「林晓」的定版图」/「显式指定的参考图 1」。页面文案只用这个，不要把 file_id 显示给用户。
+     */
+    reference_labels?: Array<string>;
     reference_count?: number;
     target_ratio?: string;
     /**

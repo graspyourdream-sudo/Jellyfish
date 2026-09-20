@@ -18,6 +18,13 @@ export class StudioLlmService {
     /**
      * LLM 编排层状态（DRY_RUN 守卫 + 词表）
      * 查询守卫状态与确定性词表，便于确认「当前不会真实付费」。
+     *
+     * 演练/真实模式的字段（前端角标按这些字段渲染，全部中文可照做）：
+     * - ``mode`` / ``mode_label`` / ``mode_description``：当前模式与一句话说明；
+     * - ``outlet_states``：llm / image / video / oss 四个出口各自是否放行、被拦原因；
+     * - ``enable_steps`` / ``how_to_enable``：怎么切到真实模式；``restore_steps``：怎么关回演练。
+     * 既有字段（``guard`` / ``guard_status_text`` / ``paid_outlet_guards`` / ``dry_run_audit``）
+     * 保持向后兼容，只做加法。
      * @returns ApiResponse_dict_str__Any__ Successful Response
      * @throws ApiError
      */
