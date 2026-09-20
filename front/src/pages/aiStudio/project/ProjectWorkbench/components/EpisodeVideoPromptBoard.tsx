@@ -70,19 +70,20 @@ import { useChapters, newId } from '../hooks/useProjectData'
 import { nextChapterIndex } from '../../../chapter/chapterIndexing'
 import JuriluScriptGroupPicker from './JuriluScriptGroupPicker'
 import {
-  activeGroupLabel,
   applyGroupSwitch,
   buildJuriluEntries,
   clearRowsBeforeMatch,
   countMatchedEntries,
   groupCoverageNotice,
   normalizeScriptGroups,
+  planCreateMissingShots,
   planGroupMatch,
-  planShotShortage,
+  resolveJuriluFlow,
   resolveScriptSelection,
   saveButtonText,
   summarizeScriptGroups,
   wholeGroupSaveNotice,
+  type JuriluMatch,
   type JuriluPreviewEntry,
   type ShortageOptionKey,
 } from './juriluScriptGroups'
@@ -234,10 +235,9 @@ export function EpisodeVideoPromptBoard({
       setIssues([])
       setCountMismatch(false)
       setAllowPartial(false)
-      setMatchedScriptId('')
-      setMatchedRowCount(0)
+      setJuriluMatch(null)
       setShortageDismissed(false)
-      if (!opts.silent) message.info('已切换目标章节：预览表已清空（不会把上一集的匹配结果带过去）', 6)
+      if (!opts.silent) message.info('已切换目标章节：预览表已清空，缺口与已匹配标记也清空（不会把上一集的匹配结果带过去）', 6)
     },
     [targetChapterId],
   )
@@ -328,8 +328,8 @@ export function EpisodeVideoPromptBoard({
    */
   const [scriptGroups, setScriptGroups] = useState<JuriluScriptGroup[]>([])
   const [selectedScriptId, setSelectedScriptId] = useState('')
-  const [matchedScriptId, setMatchedScriptId] = useState('')
-  const [matchedRowCount, setMatchedRowCount] = useState(0)
+  /** 已完成匹配的唯一凭证（后端 preview 已返回并进表）：哪一组 + 哪一集 + 后端报告的本集镜头数。 */
+  const [juriluMatch, setJuriluMatch] = useState<JuriluMatch | null>(null)
   const [juriluMatching, setJuriluMatching] = useState(false)
   /** 脚本组状态机给出的中文提示（选组 / 换组 / 后端要求重选时逐条展示） */
   const [juriluNotices, setJuriluNotices] = useState<string[]>([])
@@ -882,20 +882,6 @@ export function EpisodeVideoPromptBoard({
   }, [otherText])
 
   /** 当前选中的脚本组（'' = 未选组）；整组导入的目标条数就来自它的 record_count。 */
-  const selectedGroup = useMemo(
-    () => scriptGroups.find((group) => group.script_id === selectedScriptId) ?? null,
-    [scriptGroups, selectedScriptId],
-  )
-  /** 已匹配进表的那一组有多少条记录（用于"整组保存"说明与覆盖率提示）。 */
-  const matchedGroupRecordCount = useMemo(
-    () => scriptGroups.find((group) => group.script_id === matchedScriptId)?.record_count ?? 0,
-    [matchedScriptId, scriptGroups],
-  )
-  const juriluTargetCount = Math.max(0, Math.trunc(selectedGroup?.record_count ?? 0))
-
-  /** 还需要创建几个镜头（取「预览行数」「文本段数」「选中脚本组记录数」的最大者）。 */
-  const missingShotCount = Math.max(rows.length, pendingBlockCount, juriluTargetCount) - shots.length
-
   /**
    * 当前表里**匹配正常**的巨日禄条数（"仅保存已经匹配的条目（N 条）"用的就是它）。
    * 复用纯函数 `countMatchedEntries`，避免这里和纯逻辑各写一套判定。
@@ -918,22 +904,40 @@ export function EpisodeVideoPromptBoard({
     [rows],
   )
   /**
-   * 镜头不足 → **明确显示缺少数量 + 三个选项**（用户升级要求）。
+   * **巨日禄流程的唯一真相**（2026-09-20 复测修复的核心）。
    *
-   * 判定放在纯函数 `planShotShortage`（有测试）；这里只负责把它的选项接到动作上：
-   * ① 创建缺失镜头后完整匹配（复用下面同一条建镜链路）② 仅保存已匹配 ③ 返回调整。
+   * 判定全在纯函数 `resolveJuriluFlow`（有测试）：
+   * - 未选组 / 选了组但没点匹配 / 匹配请求在飞 / 匹配结果因换组或换章节作废
+   *   → **缺口面板与一切建镜头入口一律不出现**；
+   * - 只有 matched（后端预览已返回，且组与章节都对得上）才给出**后端真实**镜头数与缺口；
+   * - 目标章节文案（名称 + ID 末段 + 镜头数）也由它一份产出，页面各处不会各写各的。
    */
-  const shortage = useMemo(
+  const juriluFlow = useMemo(
     () =>
-      planShotShortage({
-        shotCount: shots.length,
-        // 有匹配结果时以"进表条数"为准；还没匹配（例如本集 0 镜）时用选中组的记录数算缺口
-        entryCount: matchedScriptId ? rows.length : 0,
-        matchedCount: juriluMatchedCount,
-        groupRecordCount: juriluTargetCount || matchedGroupRecordCount,
+      resolveJuriluFlow({
+        scriptGroups,
+        selectedScriptId,
+        match: juriluMatch,
+        matching: juriluMatching,
+        chapterId,
+        chapterLabel,
+        entryCount: rows.filter((row) => row.origin === 'jurilu_import').length,
+        matchedRowCount: juriluMatchedCount,
       }),
-    [juriluMatchedCount, juriluTargetCount, matchedGroupRecordCount, matchedScriptId, rows.length, shots.length],
+    [chapterId, chapterLabel, juriluMatch, juriluMatching, juriluMatchedCount, rows, scriptGroups, selectedScriptId],
   )
+  const shortage = juriluFlow.shortage
+  /** 缺口计算的目标条数（**只有已匹配才有值**；绝不来自"仅仅选中"的组）。 */
+  const juriluTargetCount = juriluFlow.targetCount
+  /** 已匹配的脚本组 id（保存和整组说明都用它；未匹配时恒为空串）。 */
+  const matchedScriptId = juriluFlow.matchedScriptId
+
+  /**
+   * 还需要创建几个镜头（取「预览行数」「文本段数」「**已匹配**脚本组条数」的最大者）。
+   * `juriluTargetCount` 只有 matched 才有值 —— 只是选中组时恒为 0，不会提前冒出缺口或建镜头入口。
+   */
+  const missingShotCount = Math.max(rows.length, pendingBlockCount, juriluTargetCount) - shots.length
+
   const [shortageDismissed, setShortageDismissed] = useState(false)
 
 
@@ -1002,8 +1006,8 @@ export function EpisodeVideoPromptBoard({
       // 旧组的状态一律清干净：换一次抓取就是一次全新的选择
       setScriptGroups(groups)
       setSelectedScriptId('')
-      setMatchedScriptId('')
-      setMatchedRowCount(0)
+      setJuriluMatch(null)
+      setShortageDismissed(false)
       setAllowPartial(false)
 
       if (groups.length) {
@@ -1077,8 +1081,8 @@ export function EpisodeVideoPromptBoard({
     juriluSessionRef.current = null
     setScriptGroups([])
     setSelectedScriptId('')
-    setMatchedScriptId('')
-    setMatchedRowCount(0)
+    setJuriluMatch(null)
+    setShortageDismissed(false)
     setJuriluNotices([])
     clearJuriluCredentials()
     message.info('已放弃本次巨日禄导入：脚本组与凭证都已清空（未写库）')
@@ -1102,12 +1106,9 @@ export function EpisodeVideoPromptBoard({
       setCountMismatch(false)
       setAllowPartial(false)
       setSelectedScriptId(outcome.selectedId)
-      // 结论作废：换组后"镜头不足"的处理方式要重新确认
+      // 换组 = 上一组的匹配作废（缺口、镜头数、已匹配标记一起清）
+      setJuriluMatch(null)
       setShortageDismissed(false)
-      if (outcome.resetMatched) {
-        setMatchedScriptId('')
-        setMatchedRowCount(0)
-      }
       if (outcome.notice) message.info(outcome.notice, 6)
     },
     [rows.length, selectedScriptId],
@@ -1180,8 +1181,7 @@ export function EpisodeVideoPromptBoard({
       if (selection.dropRows) {
         // 后端仍要求选组却给了 rows：一条都不进表
         setRows([])
-        setMatchedScriptId('')
-        setMatchedRowCount(0)
+        setJuriluMatch(null)
         setCountMismatch(false)
         message.warning('后端仍要求重新选择脚本组：这次返回的分镜不会进入预览表，请重新选一组再匹配', 8)
         return
@@ -1189,13 +1189,22 @@ export function EpisodeVideoPromptBoard({
       setCountMismatch((preview.chapter_shot_count ?? 0) !== entries.length)
       setAllowPartial(false)
       applyImportPreview(entries, 'jurilu_import')
-      setMatchedScriptId(plan.scriptIds[0])
-      setMatchedRowCount(entries.length)
+      // **唯一凭证据点**：后端预览已经返回 → 记下"哪一组 + 哪一集 + 后端报告的本集镜头数"
+      setJuriluMatch({
+        scriptId: plan.scriptIds[0],
+        chapterId,
+        entryCount: entries.length,
+        matchedCount: countMatchedEntries(entries),
+        groupRecordCount,
+        chapterShotCount: Math.max(0, Math.trunc(preview.chapter_shot_count ?? 0)),
+      })
       message.success(
         `已用脚本组 ${plan.scriptIds[0]} 整组匹配 ${entries.length} 条巨日禄提示词（默认不合并、未写库）：请在下面的预览表里核对后确认保存`,
         8,
       )
     } catch (error) {
+      // 匹配失败 → 不作数：清掉"已匹配"凭证，缺口与建镜头入口一起收回去
+      setJuriluMatch(null)
       const text = error instanceof Error ? error.message : '巨日禄匹配失败（Cookie 是否有效？）'
       const diag = extractJuriluDiagnostics(error)
       if (diag) {
@@ -1213,15 +1222,25 @@ export function EpisodeVideoPromptBoard({
    * 按导入顺序**创建缺失镜头**，然后重新匹配（预览表马上显示正确编号/内容/状态），
    * 最后由用户点「确认保存」才写库 —— **没有任何自动写库、自动建镜头**。
    *
-   * 巨日禄整组导入（升级要求第 2 条）：目标条数取自**选中脚本组的记录数**，
+   * 巨日禄整组导入：目标条数取自**已匹配**脚本组的记录数（`juriluFlow.targetCount`），
    * 所以「本集 0 镜 + 该组 31 条」也能一次补齐 31 个镜头，然后用**同一组**重新匹配
    * （复用这条既有链路，不另造割裂流程）。
+   *
+   * 硬闸门（2026-09-20 复测要求）：
+   * - 巨日禄链路上**必须已匹配**（后端预览已返回）且由用户**明确点击**才允许创建；
+   * - 一次点击只发一轮请求（`createShotsInFlightRef` 同步闸门 + `planCreateMissingShots` 判定）；
+   * - 缺口用**后端最新镜头数**算（先 `fetchPromptBoard` 再算），不依赖页面缓存。
    *
    * 为什么放在 `matchSelectedGroup` **后面**：它要复用匹配链路，放在前面会踩
    * useCallback 依赖数组的 TDZ（数组在渲染时就求值）。
    */
   const doCreateMissingShots = useCallback(async () => {
     if (!chapterId) return
+    // 巨日禄链路：没拿到后端预览结果（未匹配）之前，一颗镜头都不许建
+    if (selectedScriptId && juriluFlow.stage !== 'matched') {
+      message.warning('请先点「用这一组匹配镜头」拿到后端预览结果，再决定是否创建缺失镜头')
+      return
+    }
     // 防重复点击：按钮 loading/disabled 之外再加一道同步闸门（状态更新是异步的）
     if (createShotsInFlightRef.current) return
     createShotsInFlightRef.current = true
@@ -1232,12 +1251,19 @@ export function EpisodeVideoPromptBoard({
       const latest = await fetchPromptBoard(chapterId)
       const latestShots = latest.shots ?? []
       const target = Math.max(rows.length, pendingBlockCount, juriluTargetCount)
-      const missing = target - latestShots.length
-      if (missing <= 0) {
-        message.info('当前镜头数已经不少于导入条数，无需创建')
+      const plan = planCreateMissingShots({
+        latestShotCount: latestShots.length,
+        targetCount: target,
+        inFlight: false,
+      })
+      const missing = plan.count
+      if (!plan.allowed) {
+        // 后端最新数据说已经够了（或闸门拦下）→ 一轮请求都不发
+        message.info(plan.reason)
         await loadBoard()
         return
       }
+      message.info(plan.reason)
       const baseIndex = latestShots.reduce((max, shot) => Math.max(max, Number(shot.index) || 0), 0)
       let created = 0
       const failures: string[] = []
@@ -1293,6 +1319,7 @@ export function EpisodeVideoPromptBoard({
   }, [
     applyImportPreview,
     chapterId,
+    juriluFlow.stage,
     juriluTargetCount,
     loadBoard,
     matchSelectedGroup,
@@ -1373,11 +1400,9 @@ export function EpisodeVideoPromptBoard({
       if (failures.length) message.warning(`有 ${failures.length} 条未写入：${failures.slice(0, 3).join('；')}`, 8)
       await loadBoard()
       setRows([])
-      // 表清空了：「已匹配组」标记与条数也要跟着清（否则抬头与按钮还在指上一组）
-      if (matchedScriptId) {
-        setMatchedScriptId('')
-        setMatchedRowCount(0)
-      }
+      // 表清空了：「已匹配」凭证与缺口跟着清（否则面板还会按上一组算缺口）
+      setJuriluMatch(null)
+      setShortageDismissed(false)
       // 保存后草稿可能已被服务端清掉，但其它镜头（失败/未保存）的草稿要在表里继续可见
       await restoreFromServer()
     } catch (error) {
@@ -1427,8 +1452,8 @@ export function EpisodeVideoPromptBoard({
   }, [chapterId, restoreFromServer])
 
   const includedCount = rows.filter((row) => row.include && row.prompt.trim()).length
-  /** 巨日禄流程是否正在进行（选了组或已匹配过一组）：镜头不足面板 / 归属横幅只在它成立时出现。 */
-  const juriluFlowActive = Boolean(selectedScriptId || matchedScriptId)
+  /** 缺口面板是否真的显示（用它统一决定"数量不一致"提示要不要让位）。 */
+  const shortageVisible = Boolean(shortage?.show) && !shortageDismissed
   const draftDoneCount = statuses.filter((item) => item.phase === 'draft_ok').length
 
   if (!chapterId) {
@@ -1673,9 +1698,9 @@ export function EpisodeVideoPromptBoard({
             setRows([])
             setIssues([])
             setCountMismatch(false)
-            // 表清空了，"已匹配组"标记也要跟着清（否则抬头会指着一组已经没有的 rows）
-            setMatchedScriptId('')
-            setMatchedRowCount(0)
+            // 表清空了，"已匹配"凭证也要跟着清（否则缺口面板还会按上一组算）
+            setJuriluMatch(null)
+            setShortageDismissed(false)
             clearJuriluCredentials()
             message.info('已清空预览表（服务端草稿仍保留，点「从服务端恢复草稿」可找回）')
           }}
@@ -1685,7 +1710,7 @@ export function EpisodeVideoPromptBoard({
         </Button>
       </Space>
 
-      {countMismatch && !(juriluFlowActive && shortage.show && !shortageDismissed) ? (
+      {countMismatch && !shortageVisible ? (
         <Alert
           type="warning"
           showIcon
@@ -1727,7 +1752,7 @@ export function EpisodeVideoPromptBoard({
           onMatch={() => void matchSelectedGroup()}
           matching={juriluMatching}
           matchedId={matchedScriptId}
-          matchedRowCount={matchedRowCount}
+          matchedRowCount={juriluMatch?.entryCount ?? 0}
           notices={juriluNotices}
           onAbandon={abandonJuriluImport}
           chapterOptions={chapterOptions}
@@ -1736,17 +1761,25 @@ export function EpisodeVideoPromptBoard({
           chaptersLoading={chaptersLoading}
           onCreateChapter={createChapter}
           creatingChapter={creatingChapter}
+          /* 目标章节与流程状态与缺口面板**同源**：都来自 juriluFlow，不会互相矛盾 */
+          targetChapterText={juriluFlow.chapterText}
+          flowStatusText={juriluFlow.statusText}
+          stage={juriluFlow.stage}
         />
       ) : null}
 
-      {scriptGroups.length || matchedScriptId ? (
+      {scriptGroups.length ? (
         <Alert
           type="info"
           showIcon
           className="mb-2"
-          data-testid="jurilu-active-group-banner"
-          message={`巨日禄表内容归属：${activeGroupLabel(scriptGroups, matchedScriptId)}`}
-          description="默认不跨 scriptId 合并：下面这张表里的巨日禄分镜只来自当前匹配的那一组；换组会先清空这张表再重新匹配。选中一组就是整组导入，不截断、不抽样。"
+          data-testid="jurilu-flow-banner"
+          message={`巨日禄流程状态：${juriluFlow.statusText}`}
+          description={
+            juriluFlow.matchedScriptId
+              ? `下面这张表里的巨日禄分镜全部来自脚本组 ${juriluFlow.matchedScriptId}（${juriluMatch?.entryCount ?? 0} 条，不截断、不与其他 scriptId 混合）；换组或换目标章节都会先清空这张表、清掉缺口与已匹配标记。`
+              : '下面这张表里没有巨日禄分镜：在完成该组的「用这一组匹配镜头」之前，页面不会显示镜头缺口，也不会提供任何创建镜头的入口。'
+          }
         />
       ) : null}
 
@@ -1884,7 +1917,7 @@ export function EpisodeVideoPromptBoard({
       />
 
       {/* 镜头不足：明确写出缺少数量 + 三个选项（都靠用户点击，没有任何自动写库/自动建镜头） */}
-      {juriluFlowActive && shortage.show && !shortageDismissed ? (
+      {shortageVisible && shortage ? (
         <Alert
           type="warning"
           showIcon
@@ -1921,7 +1954,11 @@ export function EpisodeVideoPromptBoard({
       ) : null}
 
       <Space className="mt-3">
-        {missingShotCount > 0 && (rows.length > 0 || pendingBlockCount > 0 || juriluTargetCount > 0) ? (
+        {/* 巨日禄链路进行中（选了组/在匹配/已匹配）时**隐藏**这条通用按钮：
+            创建入口只留缺口面板里的那一个 primary，避免两个入口同时可点。 */}
+        {juriluFlow.showBottomCreateButton &&
+        missingShotCount > 0 &&
+        (rows.length > 0 || pendingBlockCount > 0 || juriluTargetCount > 0) ? (
           <Tooltip title="按导入顺序补齐本集缺失的镜头，再用同一批（或同一组）提示词重新匹配（建完仍需你点「确认保存」）">
             <Button
               loading={creatingShots}
@@ -1947,7 +1984,7 @@ export function EpisodeVideoPromptBoard({
         <Typography.Text type="secondary" className="text-[11px]" data-testid="prompt-board-save-note">
           保存后即写入各镜的提示词（正式列）；工作室与交付导出读的就是这份已保存内容。草稿不会被自动保存。
           {matchedScriptId
-            ? ` ${wholeGroupSaveNotice(includedCount, matchedScriptId, matchedGroupRecordCount)}`
+            ? ` ${wholeGroupSaveNotice(includedCount, matchedScriptId, juriluMatch?.groupRecordCount ?? 0)}`
             : ''}
         </Typography.Text>
       </Space>

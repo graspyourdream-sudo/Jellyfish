@@ -28,6 +28,7 @@ import {
   summarizeScriptGroups,
   versionInfo,
   wholeGroupNotice,
+  type JuriluStage,
   type SampleRow,
 } from './juriluScriptGroups'
 
@@ -61,6 +62,13 @@ export interface JuriluScriptGroupPickerProps {
   /** 新建章节：复用项目既有的建章节能力（调用方负责调接口与刷新列表） */
   onCreateChapter: (input: { title: string; summary: string }) => Promise<void>
   creatingChapter: boolean
+  /**
+   * 目标章节文案（**名称 + ID 末段 + 镜头数**）与流程状态文案，
+   * 都由页面的 `resolveJuriluFlow` 一份产出（与缺口面板同源，不会互相矛盾）。
+   */
+  targetChapterText: string
+  flowStatusText: string
+  stage: JuriluStage
 }
 
 export default function JuriluScriptGroupPicker({
@@ -79,6 +87,9 @@ export default function JuriluScriptGroupPicker({
   chaptersLoading,
   onCreateChapter,
   creatingChapter,
+  targetChapterText,
+  flowStatusText,
+  stage,
 }: JuriluScriptGroupPickerProps) {
   const summary = summarizeScriptGroups(groups)
   const selected = groups.find((group) => group.script_id === selectedId) ?? null
@@ -149,19 +160,32 @@ export default function JuriluScriptGroupPicker({
               placeholder="选择本项目已有章节"
               data-testid="jurilu-target-chapter-select"
               onChange={(value) => onTargetChapterChange(String(value))}
-              options={chapterOptions.map((item) => ({
-                value: item.value,
-                label: `${item.label}（现有 ${item.shotCount} 个镜头）`,
-              }))}
+              options={chapterOptions.map((item) => ({ value: item.value, label: item.label }))}
             />
             <Button loading={creatingChapter} onClick={() => setCreateOpen(true)} data-testid="jurilu-target-chapter-create">
               新建章节
             </Button>
           </Space>
-          <Typography.Text type="secondary" className="text-[11px]" data-testid="jurilu-target-chapter-hint">
-            {target
-              ? `当前目标：${target.label}（现有 ${target.shotCount} 个镜头）`
-              : '还没有选择目标章节：请先选一集，或点「新建章节」直接建一集。'}
+          {/*
+            目标章节身份必须一眼可查（用户复测踩到过「我说 0 镜头、页面显示 3 个」——
+            根因是页面没切到新章节，而页面上没有任何地方写着当前是哪一集）。
+            这里显示：名称 + ID 末段 + 镜头数（镜头数是**后端真实值**，匹配后才展示）。
+          */}
+          <Typography.Text strong className="text-[12px]" data-testid="jurilu-target-chapter-info">
+            {targetChapterText}
+          </Typography.Text>
+          {!target ? (
+            <Typography.Text type="warning" className="text-[11px]">
+              还没有选择目标章节：请先选一集，或点「新建章节」直接建一集（URL 里的 ?chapter= 会是默认目标）。
+            </Typography.Text>
+          ) : null}
+          {/* 流程状态：与下面的缺口面板同一个来源，不会出现"未选组"和"缺少 N 个"同时显示 */}
+          <Typography.Text
+            type={stage === 'matched' ? 'success' : 'secondary'}
+            className="text-[11px]"
+            data-testid="jurilu-flow-status"
+          >
+            {flowStatusText}
           </Typography.Text>
         </Space>
       </Card>

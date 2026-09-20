@@ -11,7 +11,11 @@
  * 7) 后端说 `requires_script_selection=true` 却给了 rows → 那些 rows 一条都不用；
  * 8) 组内**全部**记录都进预览（不截断）；
  * 9) 镜头不足时**三个选项**都产出，且明确写出缺少数量；
- * 10) 保存按钮只显示当前勾选条数（**不再有「最多 3 条」**）。
+ * 10) 保存按钮只显示当前勾选条数（**不再有「最多 3 条」**）；
+ * 11) **状态不矛盾**（2026-09-20 页面复测）：未选组 / 选了组但没匹配 / 正在匹配 → 缺口面板与
+ *     建镜头入口**一律不出现**；只有 matched（后端预览已返回）才出现，且只给**一个**创建按钮；
+ * 12) 目标章节文案必须含 **名称 + ID 末段 + 真实镜头数**（匹配后才展示真实镜头数）；
+ * 13) 换章节 / 换组 → 缺口、勾选、已匹配标记全部清空。
  */
 
 import { test } from 'node:test'
@@ -26,24 +30,30 @@ import {
   activeGroupLabel,
   applyGroupSwitch,
   buildJuriluEntries,
+  chapterIdTail,
   clearRowsBeforeMatch,
   countMatchedEntries,
   defaultScriptSelection,
   groupCoverageNotice,
   groupFieldTexts,
   normalizeScriptGroups,
+  planCreateMissingShots,
   planGroupMatch,
   planShotShortage,
   rawKeysText,
   reasonHasTimestampEvidence,
+  resolveJuriluFlow,
   resolveScriptSelection,
   sampleRows,
   sampleSectionTitle,
   saveButtonText,
   summarizeScriptGroups,
+  targetChapterText,
   versionInfo,
   wholeGroupNotice,
   wholeGroupSaveNotice,
+  type JuriluFlowInput,
+  type JuriluMatch,
   type JuriluPreviewEntry,
 } from './juriluScriptGroups.ts'
 import type { JuriluScriptGroup } from '../../../../../services/llmPipelineApi'
@@ -460,4 +470,179 @@ test('条目类型带脚本组与巨日禄序号（页面预览表两列的数�
   assert.equal(entries[0].juriluSeq, '7')
   assert.equal(entries[1].juriluSeq, '未提供序号')
   assert.equal(entries[1].shot_id, '')
+})
+
+/* ------------------------------------- 状态一致性（2026-09-20 页面复测的缺陷） */
+
+const ACC_CHAPTER = 'acc_jurilu_group_204035'
+const ACC_LABEL = '第100集 · 验收·巨日禄整组导入（临时）'
+
+/** 用户复测时的真实场景：目标章节 0 镜、选中 31 条的组。 */
+function flowInput(overrides: Partial<JuriluFlowInput> = {}): JuriluFlowInput {
+  return {
+    scriptGroups: GROUPS,
+    selectedScriptId: '',
+    match: null,
+    matching: false,
+    chapterId: ACC_CHAPTER,
+    chapterLabel: ACC_LABEL,
+    entryCount: 0,
+    matchedRowCount: 0,
+    ...overrides,
+  }
+}
+
+function matchedWith(overrides: Partial<JuriluMatch> = {}): JuriluMatch {
+  return {
+    scriptId: '2933350',
+    chapterId: ACC_CHAPTER,
+    entryCount: 31,
+    matchedCount: 31,
+    groupRecordCount: 31,
+    chapterShotCount: 31,
+    ...overrides,
+  }
+}
+
+test('未选组：缺口面板不可见、没有任何创建入口（复测缺陷 1 的核心）', () => {
+  const flow = resolveJuriluFlow(flowInput())
+  assert.equal(flow.stage, 'idle')
+  assert.equal(flow.canShowShortage, false)
+  assert.equal(flow.shortage, null, '未选组时不许算出任何缺口')
+  assert.equal(flow.matchedScriptId, '')
+  assert.equal(flow.targetCount, 0)
+  assert.match(flow.statusText, /尚未选择脚本组/)
+  // 状态文案里不许出现"缺少 N 个"
+  assert.ok(!flow.statusText.includes('缺少'), `未选组时不该提缺口：${flow.statusText}`)
+  // 底部通用按钮在 idle 时仍归"其他平台导入"链路使用
+  assert.equal(flow.showBottomCreateButton, true)
+})
+
+test('已选组但没点匹配：缺口面板仍不可见、无创建入口（不许用"选过组"冒充"已匹配"）', () => {
+  const flow = resolveJuriluFlow(flowInput({ selectedScriptId: '2933350' }))
+  assert.equal(flow.stage, 'selected')
+  assert.equal(flow.canShowShortage, false, '只选组不能显示缺口')
+  assert.equal(flow.shortage, null)
+  assert.equal(flow.matchedScriptId, '')
+  assert.equal(flow.targetCount, 0)
+  assert.match(flow.statusText, /已选脚本组 2933350/)
+  assert.match(flow.statusText, /还没点「用这一组匹配镜头」/)
+  assert.ok(!flow.statusText.includes('缺少'), `只是选组时不该提缺口：${flow.statusText}`)
+  // 状态文案与"尚未选择"必须互斥：同一时刻只能出现一个
+  assert.ok(!flow.statusText.includes('尚未选择脚本组'))
+  // 巨日禄链路已经开始了 → 底部那条通用创建按钮必须让位（只留缺口面板里的那个）
+  assert.equal(flow.showBottomCreateButton, false)
+})
+
+test('正在匹配（后端预览还没返回）：缺口面板与创建入口一律隐藏', () => {
+  const flow = resolveJuriluFlow(flowInput({ selectedScriptId: '2933350', matching: true, match: matchedWith() }))
+  assert.equal(flow.stage, 'matching')
+  assert.equal(flow.canShowShortage, false)
+  assert.equal(flow.shortage, null)
+  assert.equal(flow.showBottomCreateButton, false)
+  assert.match(flow.statusText, /正在用脚本组 2933350 匹配镜头/)
+  assert.match(flow.statusText, /后端返回之前不显示镜头数与缺口/)
+})
+
+test('已匹配：缺口可见，且**只给一个**创建按钮；镜头数用后端真实值', () => {
+  const flow = resolveJuriluFlow(
+    flowInput({ selectedScriptId: '2933350', match: matchedWith({ chapterShotCount: 3 }), entryCount: 31, matchedRowCount: 31 }),
+  )
+  assert.equal(flow.stage, 'matched')
+  assert.equal(flow.canShowShortage, true)
+  assert.equal(flow.matchedScriptId, '2933350')
+  assert.equal(flow.shotCount, 3, '镜头数取自后端 chapter_shot_count，不是前端推断')
+  assert.equal(flow.targetCount, 31)
+  assert.equal(flow.shortage?.show, true)
+  assert.equal(flow.shortage?.missingCount, 28)
+  // 只有一个创建入口：缺口面板里的 create_missing；底部那条隐藏
+  const createOptions = (flow.shortage?.options ?? []).filter((item) => item.key === 'create_missing')
+  assert.equal(createOptions.length, 1, '缺口面板里只能有一个创建按钮')
+  assert.match(createOptions[0].label, /创建缺失镜头（28 个）并重新匹配/)
+  assert.equal(flow.showBottomCreateButton, false, '巨日禄整组导入时底部按钮必须隐藏')
+  assert.match(flow.statusText, /现有 3 个镜头，缺少 28 个/)
+
+  // 数量一致 → 面板不出现（缺口 0）且没有创建按钮
+  const aligned = resolveJuriluFlow(
+    flowInput({ selectedScriptId: '2933350', match: matchedWith({ chapterShotCount: 31 }), entryCount: 31, matchedRowCount: 31 }),
+  )
+  assert.equal(aligned.shortage?.show, false)
+  assert.match(aligned.statusText, /数量一致/)
+})
+
+test('换章节 / 换组 → 旧匹配自动作废，缺口与已匹配标记一律清空', () => {
+  const match = matchedWith()
+  // 换章节（匹配记录里是旧章节）
+  const otherChapter = resolveJuriluFlow(
+    flowInput({ selectedScriptId: '2933350', match, chapterId: 'acc_jurilu_173939', chapterLabel: '第1集 · 老章节' }),
+  )
+  assert.equal(otherChapter.stage, 'stale')
+  assert.equal(otherChapter.canShowShortage, false)
+  assert.equal(otherChapter.shortage, null)
+  assert.equal(otherChapter.matchedScriptId, '')
+  assert.equal(otherChapter.targetCount, 0)
+  assert.match(otherChapter.statusText, /已经作废/)
+
+  // 换组（匹配记录里是另一组）
+  const otherGroup = resolveJuriluFlow(flowInput({ selectedScriptId: '2936083', match }))
+  assert.equal(otherGroup.stage, 'stale')
+  assert.equal(otherGroup.canShowShortage, false)
+  assert.equal(otherGroup.matchedScriptId, '')
+
+  // 页面动作侧同样要清干净：换组清 rows、换章节也清 rows（同一套口径）
+  const switchGroup = applyGroupSwitch<{ key: string }>({
+    previousSelectedId: '2933350',
+    selectedId: '2936083',
+    currentRowCount: 31,
+  })
+  assert.deepEqual(switchGroup.nextRows, [])
+  assert.equal(switchGroup.resetMatched, true)
+})
+
+test('目标章节文案包含：名称 + ID 末段 + 真实镜头数（匹配后才给真实值）', () => {
+  assert.equal(chapterIdTail(ACC_CHAPTER), '…204035')
+  assert.equal(chapterIdTail(''), '（未选择章节）')
+
+  const before = targetChapterText({ label: ACC_LABEL, chapterId: ACC_CHAPTER, shotCount: 0, matched: false })
+  assert.match(before.text, /当前目标章节：第100集 · 验收·巨日禄整组导入（临时）/)
+  assert.match(before.text, /ID …204035/)
+  assert.match(before.text, /点「用这一组匹配镜头」后按后端真实值显示/)
+  assert.ok(!before.text.includes('本集镜头 0 个'), '匹配前不许把镜头数当真实值展示')
+
+  const after = targetChapterText({ label: ACC_LABEL, chapterId: ACC_CHAPTER, shotCount: 3, matched: true })
+  assert.match(after.text, /第100集 · 验收·巨日禄整组导入（临时）/)
+  assert.match(after.text, /ID …204035/)
+  assert.match(after.text, /本集镜头 3 个（后端真实值）/)
+
+  // 页面用的 flow.chapterText 与它是同一份（不会出现"页面上写 0、面板里写 3"）
+  const flow = resolveJuriluFlow(
+    flowInput({ selectedScriptId: '2933350', match: matchedWith({ chapterShotCount: 3 }), entryCount: 31, matchedRowCount: 31 }),
+  )
+  assert.equal(flow.chapterText, after.text)
+  assert.equal(flow.chapterIdTail, '…204035')
+  const flowBefore = resolveJuriluFlow(flowInput())
+  assert.equal(flowBefore.chapterText, before.text)
+})
+
+test('建镜头：一次点击只算一轮，且用后端最新镜头数（不许因为"有 3 个"就补 28 个）', () => {
+  const ok = planCreateMissingShots({ latestShotCount: 3, targetCount: 31, inFlight: false })
+  assert.equal(ok.allowed, true)
+  assert.equal(ok.count, 28)
+  assert.match(ok.reason, /3 → 31/)
+
+  // 连点：还有一轮在飞 → 直接拒绝，不重复创建
+  const inflight = planCreateMissingShots({ latestShotCount: 3, targetCount: 31, inFlight: true })
+  assert.equal(inflight.allowed, false)
+  assert.equal(inflight.count, 0)
+  assert.match(inflight.reason, /不会重复创建/)
+
+  // 后端最新数据说已经够了 → 不创建
+  const enough = planCreateMissingShots({ latestShotCount: 31, targetCount: 31, inFlight: false })
+  assert.equal(enough.allowed, false)
+  assert.equal(enough.count, 0)
+  assert.match(enough.reason, /无需创建/)
+
+  // 0 镜的新章节 → 一次补满
+  const empty = planCreateMissingShots({ latestShotCount: 0, targetCount: 31, inFlight: false })
+  assert.equal(empty.count, 31)
 })

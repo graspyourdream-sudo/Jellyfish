@@ -446,6 +446,219 @@ export function planShotShortage(input: ShotShortageInput): ShotShortagePlan {
   }
 }
 
+/* --------------------------------------- 巨日禄流程状态（唯一真相，防状态矛盾） */
+
+/**
+ * 一次**已完成**的巨日禄匹配（后端 preview 已经返回并进表）。
+ *
+ * 这是「已匹配」的**唯一凭证**：它同时记住**哪一组**与**哪一集**，
+ * 所以"换了组/换了章节"时旧结果自动失效 —— 不能用"选过组"冒充"已匹配"。
+ */
+export interface JuriluMatch {
+  /** 这次匹配用的脚本组 */
+  scriptId: string
+  /** 这次匹配写向的目标章节（换章节后自动失效） */
+  chapterId: string
+  /** 后端这次返回的该组分镜条数（整组，未截断） */
+  entryCount: number
+  /** 其中匹配正常的条数 */
+  matchedCount: number
+  /** 该组记录数（后端脚本组里的 record_count） */
+  groupRecordCount: number
+  /** **后端**在预览响应里报告的本集镜头数（chapter_shot_count，不是前端推断） */
+  chapterShotCount: number
+}
+
+export type JuriluStage = 'idle' | 'selected' | 'matching' | 'matched' | 'stale'
+
+export interface JuriluFlowInput {
+  scriptGroups: JuriluScriptGroup[]
+  /** 用户勾选的脚本组（'' = 没选） */
+  selectedScriptId: string
+  /** 已完成匹配（后端预览已返回）；null = 还没匹配过 */
+  match: JuriluMatch | null
+  /** 匹配请求正在飞 */
+  matching: boolean
+  /** 当前目标章节 */
+  chapterId: string | null
+  /** 目标章节名称（例如「第100集 · 验收·巨日禄整组导入（临时）」） */
+  chapterLabel: string
+  /** 表里巨日禄条目数（未匹配时不该有） */
+  entryCount: number
+  /** 表里匹配正常的巨日禄条数 */
+  matchedRowCount: number
+}
+
+export interface JuriluFlowState {
+  stage: JuriluStage
+  /** **缺口面板与一切创建镜头入口**是否允许出现（只有 matched 才 true） */
+  canShowShortage: boolean
+  /** 预览表里的巨日禄内容属于哪一组（未匹配时恒为 ''） */
+  matchedScriptId: string
+  /** 给用户看的一句话状态（与缺口面板同源，不可能互相矛盾） */
+  statusText: string
+  /** 目标章节展示文案：名称 + ID 末段 + 镜头数（匹配前不展示真实镜头数） */
+  chapterText: string
+  /** 目标章节 ID 末段，例如 `…204035` */
+  chapterIdTail: string
+  /** 镜头数文案（匹配前是说明，不是数字） */
+  shotCountText: string
+  /** 缺口计算用的目标条数（只有 matched 才有值，**绝不来自"仅仅选中"的组**） */
+  targetCount: number
+  /** 缺口计算用的镜头数（后端真实值） */
+  shotCount: number
+  /** 缺口计划：只有 matched 才产出，其余为 null */
+  shortage: ShotShortagePlan | null
+  /** 底部通用「创建缺失镜头」按钮是否显示（巨日禄流程进行中一律隐藏，避免两个创建入口） */
+  showBottomCreateButton: boolean
+}
+
+/** 章节 ID 末段：`acc_jurilu_group_204035` → `…204035`。 */
+export function chapterIdTail(chapterId: string, length = 6): string {
+  const id = asText(chapterId)
+  if (id === '') return '（未选择章节）'
+  const tail = length > 0 ? id.slice(-length) : id
+  return `…${tail}`
+}
+
+/** 目标章节展示：名称 + ID 末段 + 镜头数（`matched=false` 时**不展示真实镜头数**）。 */
+export function targetChapterText(input: {
+  label: string
+  chapterId: string
+  shotCount: number
+  matched: boolean
+}): { text: string; idTail: string; shotCountText: string } {
+  const label = asText(input.label) || '（未选择章节）'
+  const idTail = chapterIdTail(input.chapterId)
+  const shotCount = Math.max(0, Math.trunc(input.shotCount ?? 0))
+  const shotCountText = input.matched
+    ? `本集镜头 ${shotCount} 个（后端真实值）`
+    : '镜头数：点「用这一组匹配镜头」后按后端真实值显示'
+  return { text: `当前目标章节：${label}｜ID ${idTail}｜${shotCountText}`, idTail, shotCountText }
+}
+
+/**
+ * 巨日禄流程的**单一来源**状态。
+ *
+ * 为什么要有它（2026-09-20 页面复测实测到的状态矛盾）：
+ *   之前"缺口面板"用的是 `selectedScriptId`（**选过组**）算出来的组条数，
+ *   而"表内容归属"用的是 `matchedScriptId`（**已匹配**）。于是出现
+ *   「尚未选择脚本组，当前表里不应有巨日禄分镜」+「现有 3 个镜头、缺少 28 个」同时显示，
+ *   还提前给出了创建镜头入口 —— 用户看到的就是自相矛盾的两块状态。
+ *
+ * 现在只认一个对象 `JuriluMatch`（同时带 scriptId 与 chapterId）：
+ * - 没选组 / 选了组但没点匹配 / 匹配请求在飞 → `canShowShortage=false`（缺口与创建入口一律隐藏）；
+ * - 只有 matched（且组与章节都对得上）→ 才给出后端真实镜头数与缺口；
+ * - 换了组或换了章节 → 旧匹配自动变 `stale`，缺口与创建入口同样隐藏。
+ */
+export function resolveJuriluFlow(input: JuriluFlowInput): JuriluFlowState {
+  const selectedId = asText(input.selectedScriptId)
+  const match = input.match
+  const chapterId = asText(input.chapterId)
+  const entryCount = Math.max(0, Math.trunc(input.entryCount ?? 0))
+  const matchedRowCount = Math.max(0, Math.trunc(input.matchedRowCount ?? 0))
+
+  const sameChapter = Boolean(match) && chapterId !== '' && match?.chapterId === chapterId
+  const sameGroup = Boolean(match) && match?.scriptId === selectedId
+  const matchValid = Boolean(match) && sameChapter && sameGroup
+
+  let stage: JuriluStage
+  if (input.matching) stage = 'matching'
+  else if (matchValid) stage = 'matched'
+  else if (match) stage = 'stale'
+  else if (selectedId !== '') stage = 'selected'
+  else stage = 'idle'
+
+  const canShowShortage = stage === 'matched'
+  const shotCount = canShowShortage ? Math.max(0, Math.trunc(match?.chapterShotCount ?? 0)) : 0
+  const targetCount = canShowShortage
+    ? Math.max(Math.trunc(match?.groupRecordCount ?? 0), Math.trunc(match?.entryCount ?? 0))
+    : 0
+
+  const chapterInfo = targetChapterText({
+    label: input.chapterLabel,
+    chapterId,
+    shotCount,
+    matched: canShowShortage,
+  })
+
+  let statusText: string
+  if (stage === 'matching') {
+    statusText = `正在用脚本组 ${selectedId} 匹配镜头：后端返回之前不显示镜头数与缺口，也不会提供任何建镜头入口。`
+  } else if (stage === 'matched') {
+    const missing = Math.max(0, targetCount - shotCount)
+    statusText =
+      missing > 0
+        ? `已用脚本组 ${selectedId} 匹配 ${entryCount} 条：${input.chapterLabel || '目标章节'} 现有 ${shotCount} 个镜头，缺少 ${missing} 个。`
+        : `已用脚本组 ${selectedId} 匹配 ${entryCount} 条：${input.chapterLabel || '目标章节'} 现有 ${shotCount} 个镜头，数量一致，可以直接确认保存。`
+  } else if (stage === 'stale') {
+    statusText = '上次匹配结果已经作废（脚本组或目标章节变了）：预览表已清空，请重新点「用这一组匹配镜头」。'
+  } else if (stage === 'selected') {
+    statusText = `已选脚本组 ${selectedId}，但还没点「用这一组匹配镜头」：预览表里不会有巨日禄分镜，也不会显示镜头缺口或建镜头入口。`
+  } else {
+    statusText = '尚未选择脚本组：默认不跨 scriptId 合并，预览表里不会有巨日禄分镜。请先选一组，再点「用这一组匹配镜头」。'
+  }
+
+  const shortage = canShowShortage
+    ? planShotShortage({
+        shotCount,
+        entryCount,
+        matchedCount: matchedRowCount,
+        groupRecordCount: targetCount,
+      })
+    : null
+
+  return {
+    stage,
+    canShowShortage,
+    matchedScriptId: canShowShortage ? asText(match?.scriptId) : '',
+    statusText,
+    chapterText: chapterInfo.text,
+    chapterIdTail: chapterInfo.idTail,
+    shotCountText: chapterInfo.shotCountText,
+    targetCount,
+    shotCount,
+    shortage,
+    // 巨日禄流程一旦开始（选了组 / 在匹配 / 已匹配 / 作废），底部那条通用按钮就让位给缺口面板里的 primary
+    showBottomCreateButton: stage === 'idle',
+  }
+}
+
+/* ------------------------------------------------ 建镜头（一次点击 = 一轮） */
+
+export interface CreateMissingInput {
+  /** 后端**当下**的镜头数（调用前刚 fetch 过，不是页面缓存） */
+  latestShotCount: number
+  /** 要补齐到的目标条数 */
+  targetCount: number
+  /** 是否已有一轮创建在飞（同一按钮连点/重复触发） */
+  inFlight: boolean
+}
+
+export interface CreateMissingPlan {
+  allowed: boolean
+  count: number
+  reason: string
+}
+
+/**
+ * 建镜头前的闸门：**一次点击只发一轮请求**，且用后端最新镜头数算缺口。
+ *
+ * 用户口径：不要因为存在 3 个镜头就去补 28 个；只有用户在「已匹配」状态下明确点击才允许创建。
+ */
+export function planCreateMissingShots(input: CreateMissingInput): CreateMissingPlan {
+  const latest = Math.max(0, Math.trunc(input.latestShotCount ?? 0))
+  const target = Math.max(0, Math.trunc(input.targetCount ?? 0))
+  if (input.inFlight) {
+    return { allowed: false, count: 0, reason: '已有一轮创建镜头正在进行：本次点击不会重复创建（等它结束再决定是否补齐）。' }
+  }
+  const count = Math.max(0, target - latest)
+  if (count <= 0) {
+    return { allowed: false, count: 0, reason: `当前镜头数（${latest} 个）已经不少于本组条数（${target} 条），无需创建。` }
+  }
+  return { allowed: true, count, reason: `将按后端最新镜头数补齐 ${count} 个（${latest} → ${target}）。` }
+}
+
 /* ---------------------------------------------------------------- 选择状态机 */
 
 export interface ScriptSelectionInput {
