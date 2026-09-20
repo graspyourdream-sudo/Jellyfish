@@ -289,3 +289,40 @@ def test_storyboard_attempts_record_http_error_status(monkeypatch) -> None:
     assert attempts[0]["status"] == 401
     assert attempts[0]["error"] == "HTTP 401"
     assert any("分镜接口失败" in w for w in result["warnings"])
+
+
+def test_gateway_error_logs_redacted_diagnostics(caplog) -> None:
+    """失败诊断要落服务端日志（排查第二步 0 条只能靠它），但绝不含凭证值。"""
+    import json
+    import logging as _logging
+
+    from app.api.v1.routes.studio import jurilu_import as route
+    from app.services.external import jurilu_import_service as service
+
+    exc = service.JuriluImportError(
+        "分镜导入失败（未解析到分镜，或接口拒绝）",
+        diagnostics={
+            "getScriptPage_url": "https://video.jurilu.com/api/video/v1/video-script/getScriptPage",
+            "script_status": 200,
+            "request_header_names": ["cookie", "referer"],
+            "sent_cookie_header": True,
+            "sent_authorization_header": False,
+            "cookie_has_authorization_item": True,
+            "storyboard_attempts": [{"script_id": "1", "status": 401, "error": "HTTP 401"}],
+        },
+        warnings=["scriptId=1 分镜接口失败: HTTP 401"],
+    )
+    with caplog.at_level(_logging.WARNING, logger="app.api.v1.routes.studio.jurilu_import"):
+        resp = route._gateway_error(exc)
+
+    assert resp.status_code == 502
+    payload = json.loads(resp.body.decode("utf-8"))
+    assert payload["meta"]["diagnostics"]["script_status"] == 200
+    assert payload["meta"]["warnings"] == ["scriptId=1 分镜接口失败: HTTP 401"]
+
+    logged = caplog.text
+    assert "jurilu 导入失败" in logged
+    assert "storyboard_attempts" in logged and "HTTP 401" in logged
+    # 日志里不许出现任何凭证片段
+    assert "abc.def.ghi" not in logged
+    assert "ph_phc" not in logged

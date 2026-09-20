@@ -5,13 +5,17 @@
 * 两个端点都**重新抓取一次**，不依赖服务端会话状态 —— 前端不需要把计划回传，
   也就无法被篡改导致写到计划外的镜头。
 * **不写库的预览**与**写库的提交**分开：预览可反复调，提交才落盘。
-* Cookie / Authorization 只作为请求体传入，**不回显、不落库、不落日志**。
+* Cookie / Authorization 只作为请求体传入，**不回显、不落库**；失败诊断落日志时也只写
+  状态码 / 请求头**名字** / 布尔值 / 已脱敏的响应片段，不含任何凭证内容。
 * 抓取失败（Cookie 过期 / URL 不对）返回 502，结构化诊断放在响应的 ``meta`` 里
   —— 本项目有全局异常处理器，会把 ``HTTPException.detail`` 拍平成一行字符串，
   诊断信息若走 ``detail`` 就丢了结构。这里直接构造 JSONResponse 绕开该拍平。
 """
 
 from __future__ import annotations
+
+import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -26,6 +30,7 @@ from app.services.external import jurilu_import_plan as planner
 from app.services.external import jurilu_import_service as svc
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class JuriluImportRequest(BaseModel):
@@ -104,6 +109,15 @@ async def _require_chapter_in_project(
 
 def _gateway_error(exc: svc.JuriluImportError) -> JSONResponse:
     """把抓取失败整理成统一信封，诊断信息放 ``meta``（保持结构，不被拍平）。"""
+    # 同时把**脱敏**诊断落一份服务端日志：页面上只有一行摘要，
+    # 「第一步 200 / 第二步 0 条」这类问题没有服务端留证就只能靠猜。
+    # 内容只含 状态码 / 头名 / 布尔值 / 已脱敏响应片段，绝无凭证值。
+    logger.warning(
+        "jurilu 导入失败：%s ｜ diagnostics=%s ｜ warnings=%s",
+        exc,
+        json.dumps(exc.diagnostics, ensure_ascii=False, default=str)[:2000],
+        json.dumps(exc.warnings, ensure_ascii=False, default=str)[:800],
+    )
     body = ApiResponse[None](
         code=status.HTTP_502_BAD_GATEWAY,
         message=str(exc),
