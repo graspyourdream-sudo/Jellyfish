@@ -46,12 +46,12 @@ from app.services.studio.bound_asset_files import (
     resolve_shot_bound_files,
     to_shot_linked_asset_items,
 )
-from app.services.studio.image_task_references import (
-    resolve_reference_refs_reporting,
-    resolve_reference_refs_with_warnings,
-)
+from app.services.studio.image_pipeline import reference_preflight
+from app.services.studio.image_pipeline.image_pipeline import ASSET_TYPE_ZH
+from app.services.studio.image_task_references import resolve_reference_refs_reporting
 from app.services.studio.image_tasks import resolve_image_model
 from app.services.studio.llm_orchestration import dry_run
+from app.utils.files import vendor_accepts_data_url
 
 DEFAULT_TARGET_RATIO = "16:9"
 DEFAULT_TIMEOUT_SECONDS = 900.0
@@ -79,6 +79,7 @@ class FrameSubmitPlan:
     prompt: str
     prompt_source: str
     reference_file_ids: list[str] = field(default_factory=list)
+    reference_labels: list[str] = field(default_factory=list)
     target_ratio: str = DEFAULT_TARGET_RATIO
     target_ratio_source: str = "default"
     resolution_profile: str = "standard"
@@ -97,6 +98,7 @@ class FrameSubmitPlan:
             prompt=self.prompt,
             prompt_source=self.prompt_source,
             reference_file_ids=list(self.reference_file_ids),
+            reference_labels=list(self.reference_labels),
             reference_count=len(self.reference_file_ids),
             target_ratio=self.target_ratio,
             target_ratio_source=self.target_ratio_source,
@@ -167,25 +169,36 @@ async def resolve_frame_slot(db: AsyncSession, *, shot_id: str, frame_type: str)
     return (await db.execute(stmt)).scalars().first()
 
 
-async def resolve_frame_reference_file_ids(
+async def resolve_frame_reference_targets(
     db: AsyncSession,
     *,
     shot_id: str,
     explicit: list[str],
     warnings: list[str],
-) -> list[str]:
-    """参考图 file_id 列表：显式优先，否则用该镜头绑定资产的定版图。"""
+) -> tuple[list[str], list[str]]:
+    """参考图解析：``(file_id 列表, 与之一一对应的可读名列表)``。
+
+    为什么要带可读名：页面文案不许出现 ``file_id``（前端有 ``maskInternalIds.ts`` 的同款
+    规范），而「提交前参考图不可达」这类报错必须说清**是哪个资产的哪张图**。绑定资产来的
+    参考图用资产名（如「角色「林晓」的定版图」），显式传入的用「显式指定的参考图 N」。
+    """
     explicit_ids = [str(x).strip() for x in (explicit or []) if str(x).strip()]
     if explicit_ids:
-        return explicit_ids
+        return explicit_ids, [f"显式指定的参考图 {index + 1}" for index in range(len(explicit_ids))]
 
     bound_files = await resolve_shot_bound_files(db, shot_id=shot_id)
     items = to_shot_linked_asset_items(bound_files)
     file_ids: list[str] = []
+    labels: list[str] = []
     for item in items:
         fid = str(getattr(item, "file_id", "") or "").strip()
-        if fid and fid not in file_ids:
-            file_ids.append(fid)
+        if not fid or fid in file_ids:
+            continue
+        name = str(getattr(item, "name", "") or "").strip()
+        asset_type = str(getattr(item, "type", "") or "").strip()
+        label = f"{ASSET_TYPE_ZH.get(asset_type, asset_type or '资产')}「{name}」的定版图" if name else "绑定资产的定版图"
+        file_ids.append(fid)
+        labels.append(label)
     for bound in bound_files:
         for warning in getattr(bound, "warnings", []) or []:
             warnings.append(f"绑定资产「{getattr(bound, 'asset_name', '')}」：{warning}")
@@ -194,6 +207,23 @@ async def resolve_frame_reference_file_ids(
             "该镜头没有可用的绑定资产图（角色/场景/道具/服装的定版图都缺失），"
             "本次为纯文本提示词出图，人物一致性无法保证。"
         )
+    return file_ids, labels
+
+
+async def resolve_frame_reference_file_ids(
+    db: AsyncSession,
+    *,
+    shot_id: str,
+    explicit: list[str],
+    warnings: list[str],
+) -> list[str]:
+    """兼容入口：只要 file_id 列表（可读名见 :func:`resolve_frame_reference_targets`）。"""
+    file_ids, _labels = await resolve_frame_reference_targets(
+        db,
+        shot_id=shot_id,
+        explicit=explicit,
+        warnings=warnings,
+    )
     return file_ids
 
 
@@ -231,7 +261,7 @@ async def build_frame_submit_plan(
                 "提交会在组装阶段被拒绝 —— 请先在工作室第 4 步保存提示词。"
             )
 
-    candidate_file_ids = await resolve_frame_reference_file_ids(
+    candidate_file_ids, candidate_labels = await resolve_frame_reference_targets(
         db,
         shot_id=body.shot_id,
         explicit=list(body.images or []),
@@ -244,6 +274,8 @@ async def build_frame_submit_plan(
         file_ids=candidate_file_ids,
     )
     warnings.extend(ref_warnings)
+    label_by_file_id = dict(zip(candidate_file_ids, candidate_labels))
+    reference_labels = [label_by_file_id.get(fid, "") for fid in reference_file_ids]
     if len(reference_file_ids) < len(candidate_file_ids):
         dropped = [x for x in candidate_file_ids if x not in reference_file_ids]
         warnings.append(
@@ -274,6 +306,7 @@ async def build_frame_submit_plan(
         prompt=prompt,
         prompt_source=prompt_source,
         reference_file_ids=reference_file_ids,
+        reference_labels=reference_labels,
         target_ratio=target_ratio,
         target_ratio_source=ratio_source,
         resolution_profile=str(body.resolution_profile or "standard"),
@@ -306,6 +339,39 @@ def _dry_run_read(plan: FrameSubmitPlan, warnings: list[str]) -> FrameSubmitRead
     )
 
 
+def frame_reference_candidates(
+    *,
+    plan: FrameSubmitPlan,
+    refs: list[dict[str, str]],
+    kept_file_ids: list[str] | None = None,
+) -> list[reference_preflight.ReferenceCandidate]:
+    """把**本次真的要发出去**的参考图转成预检候选（可读名 + 地址）。
+
+    只用 ``plan.reference_labels``（可读名）做标识：绝不能把 ``file_id`` 写进用户可见文案。
+
+    ``allow_data_url`` 取决于**当前图片供应商**能不能吃内嵌 base64：
+    openai / volcengine 自己解码（本地文件 → data URL 是它们的正常形态），
+    APIMart 只吃 ``http(s)://`` / ``asset://`` —— 后者的 data URL 必须在提交前拦下。
+    """
+    label_by_file_id = dict(zip(plan.reference_file_ids, plan.reference_labels))
+    allow_data_url = vendor_accepts_data_url(plan.provider)
+    candidates: list[reference_preflight.ReferenceCandidate] = []
+    frame_zh = FRAME_TYPE_ZH.get(plan.frame_type, plan.frame_type)
+    for index, item in enumerate(refs):
+        url = str((item or {}).get("image_url") or "").strip()
+        file_id = kept_file_ids[index] if kept_file_ids and index < len(kept_file_ids) else ""
+        label = label_by_file_id.get(file_id, "") or f"{frame_zh}参考图 {index + 1}"
+        candidates.append(
+            reference_preflight.ReferenceCandidate(
+                label=label,
+                url=url,
+                role=f"frame:{plan.frame_type}",
+                allow_data_url=allow_data_url,
+            )
+        )
+    return candidates
+
+
 async def submit_frame(
     db: AsyncSession,
     *,
@@ -314,11 +380,16 @@ async def submit_frame(
     build_run_args: Any = None,
     run_task: Any = None,
     read_result: Any = None,
+    preflight: Any = None,
 ) -> FrameSubmitRead:
     """同步执行一次关键帧出图（同进程内联）。
 
     ``create_task`` / ``build_run_args`` / ``run_task`` / ``read_result`` 仅供测试注入，
     生产留空即走真实实现。
+
+    ``preflight``：可注入的「提交前参考图可达性预检」（``reference_preflight.preflight_or_raise``），
+    由路由层传入。**在写任何库、建任何任务之前**跑：参考图上游取不到时直接拦住，
+    一次付费调用都不产生（真实故障 A：本机可读的参考图地址发给上游 → 404 任务失败）。
     """
     plan = await build_frame_submit_plan(db, body=body)
     warnings = list(plan.warnings)
@@ -345,11 +416,18 @@ async def submit_frame(
         outlet=dry_run.OUTLET_IMAGE,
     )
 
-    refs, ref_warnings = await resolve_reference_refs_with_warnings(
+    refs, kept_file_ids, ref_warnings = await resolve_reference_refs_reporting(
         db,
         file_ids=plan.reference_file_ids,
     )
     warnings.extend(ref_warnings)
+
+    # 提交前预检：每张参考图逐张匿名探活，不可达则**不提交**（不写库、不建任务、不花钱）。
+    if preflight is not None and refs:
+        await preflight(
+            frame_reference_candidates(plan=plan, refs=refs, kept_file_ids=kept_file_ids),
+            hint=f"关键帧出图 shot_id={plan.shot_id} frame_type={plan.frame_type}",
+        )
 
     # 落库目标：先确保 shot_frame_images 有这一行（后续由任务体写回 file_id）。
     slot = await resolve_frame_slot(db, shot_id=plan.shot_id, frame_type=plan.frame_type)
@@ -511,7 +589,9 @@ __all__ = [
     "FRAME_PROMPT_FIELDS",
     "FrameSubmitPlan",
     "build_frame_submit_plan",
+    "frame_reference_candidates",
     "resolve_frame_reference_file_ids",
+    "resolve_frame_reference_targets",
     "resolve_frame_slot",
     "resolve_target_ratio",
     "saved_frame_prompt",

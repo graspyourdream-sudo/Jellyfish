@@ -82,12 +82,18 @@ async def _resolve_url_for_file(db: AsyncSession, *, file_id: str) -> tuple[str,
     返回 ``(url, warning)``。**任何解析失败都降级成 warning，不往上抛**：
     参考图只是增强项，缺一张图不该让整个出图计划 500。
 
-    两种 storage_key 形态都要支持（实测库里两种都有）：
+    三种 storage_key 形态都要支持（实测库里都有）：
+
     1. **已经是完整 URL**（如 OSS 地址）——直接用。这本身就是长期资产地址，
        也正是垫图需要的形态（AGENTS.md V0 #10：长期资产优先用 OSS URL）。
-    2. **本地相对路径**——交给 storage 层解析成公共地址。
-       （``storage.get_file_info`` 走本地驱动时会把 key 当本地文件 stat，
-       所以形态 1 必须先拦下来，否则会 FileNotFoundError。）
+    2. **相对 key**——先按**唯一正确的公网口径**拼 OSS 地址（``storage.public_url_for_key``，
+       即 ``{s3_public_base_url}/{base_path}/{key}``），再照旧向对象存储确认这个对象真的在。
+       为什么不能只信 ``get_file_info().url``：没配 ``s3_public_base_url`` 时它会退回
+       path-style ``{endpoint}/{bucket}/{key}`` —— 在阿里云 OSS 上那是**错误地址**
+       （匿名 404），而 404 的地址发给上游就是「无法获取输入媒体 URL（404/410）」
+       这条真实故障的成因。
+    3. **本地驱动**——没有公网基址时退回 ``get_file_info().url``（``/files/{key}`` 形式）。
+       这种地址上游**取不到**，由提交前的可达性预检（``reference_preflight``）拦下并给出修法。
     """
     file_obj = await db.get(FileItem, file_id) if file_id else None
     if file_obj is None:
@@ -99,11 +105,17 @@ async def _resolve_url_for_file(db: AsyncSession, *, file_id: str) -> tuple[str,
     if _is_absolute_url(storage_key):
         return storage_key, ""
 
+    # 相对 key：先按**唯一正确的公网口径**拼 OSS 地址（``public_url_for_key``），
+    # 再照旧向对象存储确认这个对象真的在（拿不到就降级成 warning，不给假地址）。
+    # 为什么不能只信 get_file_info 的 url：没配 ``s3_public_base_url`` 时它会退回
+    # path-style ``{endpoint}/{bucket}/{key}`` —— 在阿里云 OSS 上那是**错地址**（匿名 404），
+    # 而 404 的地址发给上游就是「无法获取输入媒体 URL（404/410）」这条真实故障的成因。
+    public_url = str(storage.public_url_for_key(storage_key) or "").strip()
     try:
         info = await storage.get_file_info(key=storage_key)
     except Exception as exc:  # noqa: BLE001 - 对象缺失/权限/后端异常都降级
         return "", f"对象存储读取失败（key={storage_key}）：{exc}"
-    url = str(info.url or "")
+    url = public_url or str(info.url or "")
     if not url:
         return "", f"对象存储没有返回可访问地址（key={storage_key}）。"
     return url, ""

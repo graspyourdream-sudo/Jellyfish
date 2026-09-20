@@ -40,7 +40,9 @@ from app.schemas.studio.image_pipeline import (
     VideoSubmitRead,
     VideoSubmitRequest,
 )
+from app.services import paid_outlet_guard
 from app.services.studio.image_pipeline import external_image_client as image_client
+from app.services.studio.image_pipeline import reference_preflight
 from app.services.studio.image_pipeline.frame_submit import (
     build_frame_submit_plan,
     submit_frame,
@@ -49,6 +51,7 @@ from app.services.studio.image_pipeline.image_pipeline import (
     build_targets,
     submit_targets,
     summarize_results,
+    summary_outcome,
 )
 from app.services.studio.image_pipeline.adopt import adopt_generated_image
 from app.services.studio.image_pipeline.prompt_package import build_prompt_package
@@ -77,16 +80,29 @@ def _error_envelope(*, code: int, detail: Any) -> JSONResponse:
 
 
 def _guard_blocked_envelope(exc: Exception) -> JSONResponse:
-    """守卫拦截 → 409 + 明确的放开方式（不泄露任何密钥）。"""
-    return _error_envelope(
-        code=409,
-        detail={
-            "code": "paid_outlet_blocked",
-            "message": str(exc),
-            "hint": f"需要 {dry_run.DRY_RUN_ENV}=0 且 {dry_run.CONFIRM_ENV}=1 才允许真实调用。",
-            "guard": dry_run.state(),
-        },
-    )
+    """守卫拦截 → 409 + 明确的放开方式（不泄露任何密钥）。
+
+    明细统一由 ``paid_outlet_guard.blocked_payload`` 生产，避免这里另写一套：
+    ``code`` / ``reason``（区分演练模式 vs 未确认真实模式）/ 中文 ``message`` /
+    中文 ``how_to_enable`` / ``enable_steps`` / ``guard``。
+    """
+    return paid_outlet_guard.blocked_envelope(exc)
+
+
+async def preflight_guard(candidates: Any, *, hint: str = "") -> Any:
+    """提交前的参考图可达性预检（**每个真实提交端点都接这一个入口**）。
+
+    真实故障 A：传给上游的参考图地址只在本机可读（匿名访问 404），上游取不到图 →
+    任务 failed（原文「无法获取输入媒体 URL（404/410）」）。所以在**真正提交之前**
+    逐张做匿名 HTTP 探活；不通过的**不提交**，返回结构化中文错误（哪个资产/哪张图、
+    实际状态码、怎么修），并明确「没有产生任何付费调用」。
+
+    演练模式（DRY_RUN）下由服务层短路（`dry_run_enabled()` 时不会有真实提交），
+    这里再兜一层：**演练模式一次都不探活**，与守卫同口径。
+    """
+    if dry_run.dry_run_enabled():
+        return None
+    return await reference_preflight.preflight_or_raise(candidates, hint=hint)
 
 
 # ---------- 状态 ----------
@@ -205,7 +221,11 @@ async def submit_image_plan(
     body: ImageSubmitRequest,
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    """受守卫的出图提交。默认 DRY_RUN：返回占位 task_id 与不可达占位地址。"""
+    """受守卫的出图提交。默认 DRY_RUN：返回占位 task_id 与不可达占位地址。
+
+    提交前会逐张探活每一条垫图 URL（``preflight_guard``）：不可达就**一个请求都不提交**，
+    返回结构化中文错误（哪张图 / 哪个资产 / 实际状态码 / 怎么修），且不产生任何付费调用。
+    """
     try:
         targets, warnings = await build_targets(
             db,
@@ -219,9 +239,17 @@ async def submit_image_plan(
             image_model=body.image_model,
             negative_prompt=body.negative_prompt,
         )
-        results = await submit_targets(targets, wait_seconds=body.wait_seconds)
+        results = await submit_targets(
+            targets,
+            wait_seconds=body.wait_seconds,
+            preflight=preflight_guard,
+        )
     except ValueError as exc:
         return _error_envelope(code=400, detail=str(exc))
+    except paid_outlet_guard.PaidOutletBlocked as exc:
+        # 依赖式守卫（服务层 require_outlet）抛的是 HTTPException 子类，
+        # 必须排在下面那条 HTTPException 之前，否则结构化明细会被压成一行字符串。
+        return _guard_blocked_envelope(exc)
     except HTTPException as exc:
         return _error_envelope(code=exc.status_code, detail=exc.detail)
     except dry_run.DryRunBlocked as exc:
@@ -234,13 +262,15 @@ async def submit_image_plan(
 
     if not targets:
         warnings.append("没有可提交的目标，未发起任何请求。")
+    summary = summarize_results(results)
     return success_response(
         ImageSubmitRead(
             project_id=body.project_id,
             asset_type=body.asset_type,
             stage=body.stage,
             results=results,
-            summary=summarize_results(results),
+            summary=summary,
+            outcome=str(summary.get("outcome") or summary_outcome(results)),
             warnings=warnings,
             guard_status=dry_run.short_status(),
         )
@@ -313,9 +343,21 @@ async def submit_video_route(
     body: VideoSubmitRequest,
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    """同步提交一次视频生成；DRY_RUN 开启时返回 dry_run 占位结果，不发任何请求。"""
+    """同步提交一次视频生成；DRY_RUN 开启时返回 dry_run 占位结果，不发任何请求。
+
+    真实提交前会做**第二层可达性复核**（``preflight_guard``）：本次真正发往供应商的
+    首/尾/关键帧参考图与参考音频地址，逐张匿名探活；不可达就不发请求、不产生费用
+    （真实故障 A 就是这里把只在本机可读的地址交给了上游）。
+    """
     try:
-        data = await submit_video(db, body=body, timeout_seconds=body.timeout_seconds)
+        data = await submit_video(
+            db,
+            body=body,
+            timeout_seconds=body.timeout_seconds,
+            preflight=preflight_guard,
+        )
+    except paid_outlet_guard.PaidOutletBlocked as exc:
+        return _guard_blocked_envelope(exc)
     except HTTPException as exc:
         return _error_envelope(code=exc.status_code, detail=exc.detail)
     except dry_run.DryRunBlocked as exc:
@@ -358,9 +400,14 @@ async def submit_frame_route(
 
     为什么不用队列：本机没有 broker/worker，队列路径只会留下一条永远不执行的「排队中」，
     用户看到的就是「点了生成什么也没发生」。同进程内联执行是 P3 直提端点既有的做法。
+
+    提交前会逐张探活参考图（``preflight_guard``）：不可达就在**写库/建任务之前**拒绝，
+    返回结构化中文错误，一次付费调用都不产生。
     """
     try:
-        data = await submit_frame(db, body=body)
+        data = await submit_frame(db, body=body, preflight=preflight_guard)
+    except paid_outlet_guard.PaidOutletBlocked as exc:
+        return _guard_blocked_envelope(exc)
     except HTTPException as exc:
         return _error_envelope(code=exc.status_code, detail=exc.detail)
     except dry_run.DryRunBlocked as exc:

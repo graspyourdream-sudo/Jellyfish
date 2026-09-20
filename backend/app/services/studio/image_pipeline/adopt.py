@@ -21,7 +21,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import HTTPException
@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.types import FileType
 from app.services.studio.entity_specs import entity_spec, normalize_entity_type
+from app.services.studio.llm_orchestration import dry_run
 from app.utils.files import create_file_from_url_or_b64
 
 # DRY_RUN 占位地址使用的不可达域名（见 llm_orchestration/dry_run.py）
@@ -51,6 +52,10 @@ class AdoptedImage:
     # ``source_url`` = 采纳时传入的来源地址（只作溯源）。两者此前被混成一个字段，
     # 调用方拿 url 去比对垫图会永远对不上。
     source_url: str = ""
+    # 落库地址是否**匿名公网可达**：None=未验证（演练模式 / 没有可验证地址）
+    url_reachable: bool | None = None
+    url_probe: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
     def to_read(self) -> dict[str, Any]:
         return {
@@ -62,6 +67,9 @@ class AdoptedImage:
             "source_url": self.source_url,
             "is_primary": self.is_primary,
             "name": self.name,
+            "url_reachable": self.url_reachable,
+            "url_probe": dict(self.url_probe),
+            "warnings": list(self.warnings),
         }
 
 
@@ -81,6 +89,55 @@ def reject_placeholder_url(url: str) -> None:
             )
 
 
+async def verify_uploaded_url_reachable(
+    url: str,
+    *,
+    label: str,
+    probe: Any = None,
+) -> tuple[bool | None, dict[str, Any], list[str]]:
+    """**上传/落库之后**再匿名验证一次这个地址上游取不取得到（故障 A 的收尾动作）。
+
+    为什么必须有这一步：对象存储写入成功 ≠ 这个对象**匿名可读**。2026-09-19 真实验收里，
+    本机可读、匿名访问 404 的地址被当成公网地址交给了上游 → 上游任务失败
+    （原文「无法获取输入媒体 URL（404/410）」）。把验证放在**上传之后**，
+    用户当场就能看到「已入库，但这个地址匿名取不到」以及怎么修，而不是等下一次提交才炸。
+
+    返回 ``(reachable, probe_read, warnings)``：
+
+    - ``reachable=None`` 表示**未验证**（演练模式 / 没有可验证地址），不是失败；
+    - 演练模式（DRY_RUN）下**一个字节都不出站**，与守卫同口径；
+    - 验证永远不阻断采纳本身：图已经存下来了，这里只如实报告 + 给修法。
+    """
+    from app.services.studio.image_pipeline import reference_preflight
+
+    clean = str(url or "").strip()
+    if not clean:
+        return None, {}, []
+
+    if dry_run.dry_run_enabled():
+        return (
+            None,
+            {
+                "result": "skipped",
+                "reason": "[DRY_RUN] 演练模式未做匿名可达性验证。",
+            },
+            [],
+        )
+
+    runner = probe or reference_preflight.probe_reference_url
+    outcome = await runner(clean, label=label)
+    probe_read = outcome.to_read()
+    warnings: list[str] = []
+    if not outcome.reachable:
+        warnings.append(
+            f"已入库，但「{label}」的地址**匿名公网访问不可达**"
+            + (f"（HTTP {outcome.http_status}）" if outcome.http_status else "")
+            + f"：{outcome.reason} {outcome.how_to_fix}"
+            + "（这条地址当垫图/参考图交给上游时会被上游 404 拒绝。）"
+        )
+    return bool(outcome.reachable), probe_read, warnings
+
+
 async def adopt_generated_image(
     db: AsyncSession,
     *,
@@ -90,10 +147,12 @@ async def adopt_generated_image(
     image_id: int | None = None,
     set_primary: bool = True,
     name: str | None = None,
+    probe: Any = None,
 ) -> AdoptedImage:
     """把外部生成的图片采纳到资产的某个图片槽位。
 
     ``image_id`` 为空时：优先复用该资产**已有的正面视角槽位**；没有则新建一个槽位。
+    ``probe`` 仅供测试注入（默认走真实的匿名探活实现，见 ``verify_uploaded_url_reachable``）。
     """
     entity_type_norm = normalize_entity_type(entity_type)
     if entity_type_norm not in ADOPTABLE_ENTITY_TYPES:
@@ -157,17 +216,35 @@ async def adopt_generated_image(
         await db.flush()
         await db.refresh(target)
 
+    stored_url = str(getattr(file_item, "thumbnail", "") or "")
+    # 4) 上传之后**真的验证一次**：这个地址匿名（上游）取不取得到。
+    #    只报告、不阻断（图已经存好了），但必须让用户当场看到问题与修法。
+    reachable, probe_read, verify_warnings = await verify_uploaded_url_reachable(
+        stored_url,
+        label=f"{getattr(parent, 'name', entity_id)} 的采纳图片",
+        probe=probe,
+    )
+
     return AdoptedImage(
         entity_type=entity_type_norm,
         entity_id=entity_id,
         image_id=target.id,
         file_id=str(file_item.id),
         # 落库后的真实地址：create_file_from_url_or_b64 把它写在 thumbnail 上
-        url=str(getattr(file_item, "thumbnail", "") or ""),
+        url=stored_url,
         source_url=str(url),
         is_primary=bool(getattr(target, "is_primary", False)),
         name=str(name or ""),
+        url_reachable=reachable,
+        url_probe=probe_read,
+        warnings=verify_warnings,
     )
 
 
-__all__ = ["ADOPTABLE_ENTITY_TYPES", "AdoptedImage", "adopt_generated_image", "reject_placeholder_url"]
+__all__ = [
+    "ADOPTABLE_ENTITY_TYPES",
+    "AdoptedImage",
+    "adopt_generated_image",
+    "reject_placeholder_url",
+    "verify_uploaded_url_reachable",
+]

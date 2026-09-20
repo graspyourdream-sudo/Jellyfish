@@ -39,8 +39,10 @@ from app.services.film import (
     resolve_default_video_model,
 )
 from app.services.film.generated_video import preview_prompt_and_images
+from app.services.studio.image_pipeline import reference_preflight
 from app.services.studio.llm_orchestration import dry_run
 from app.services.studio.llm_orchestration.registry import ALLOWED_DURATION_SECONDS
+from app.utils.files import vendor_accepts_data_url
 
 # 既有 provider 适配器白名单（见 app/core/tasks/bootstrap.py）。
 SUPPORTED_VIDEO_PROVIDERS: tuple[str, ...] = ("openai", "volcengine", "apimart")
@@ -383,6 +385,53 @@ async def build_video_submit_plan(
     )
 
 
+VIDEO_FRAME_KEYS: tuple[tuple[str, str], ...] = (
+    ("first_frame_base64", "首帧参考图"),
+    ("last_frame_base64", "尾帧参考图"),
+    ("key_frame_base64", "关键帧参考图"),
+)
+
+
+def video_media_candidates(
+    input_payload: dict[str, Any],
+    *,
+    allow_data_url: bool = False,
+) -> list[reference_preflight.ReferenceCandidate]:
+    """把**真正会发给供应商**的媒体地址抽出来（帧参考图 + 参考音频）。
+
+    这些字段名里的 ``base64`` 是历史包袱：库里同时存在 **data URL** 与 **公网 http(s) 地址**，
+    而 ``build_run_args`` 优先给公网地址（APIMart 只吃 ``http(s)://`` / ``asset://``）。
+    所以这里逐条如实探活 —— 故障 A 就是这条路把「只在本机可读的地址」当公网地址发了出去，
+    上游抓不到 → 任务 failed（原文「无法获取输入媒体 URL（404/410）」）。
+    """
+    candidates: list[reference_preflight.ReferenceCandidate] = []
+    for key, label in VIDEO_FRAME_KEYS:
+        url = str(input_payload.get(key) or "").strip()
+        if not url:
+            continue
+        candidates.append(
+            reference_preflight.ReferenceCandidate(
+                label=label,
+                url=url,
+                role=key.replace("_base64", ""),
+                allow_data_url=allow_data_url,
+            )
+        )
+    for index, url in enumerate(list(input_payload.get("audio_urls") or [])):
+        text = str(url or "").strip()
+        if not text:
+            continue
+        candidates.append(
+            reference_preflight.ReferenceCandidate(
+                label=f"参考音频 {index + 1}",
+                url=text,
+                role="audio",
+                allow_data_url=allow_data_url,
+            )
+        )
+    return candidates
+
+
 async def submit_video(
     db: AsyncSession,
     *,
@@ -390,11 +439,16 @@ async def submit_video(
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     task_factory: Callable[[Any, Any], Any] | None = None,
     run_args_builder: Callable[..., Any] | None = None,
+    preflight: Callable[..., Any] | None = None,
 ) -> VideoSubmitRead:
     """同步提交一次视频生成。
 
     DRY_RUN 开启（默认）时**直接返回被拦截的结果**，不会创建任务、不会发请求。
     ``task_factory`` / ``run_args_builder`` 仅供测试注入，生产留空。
+
+    ``preflight``：可注入的「提交前参考图可达性预检」（``reference_preflight.preflight_or_raise``），
+    由路由层传入。**在这里**而不是在路由里做的原因：真正发给供应商的地址是
+    ``build_run_args`` 解出来的（file_id → 公网地址 / data URL），只有这里才知道原文。
     """
     warnings: list[str] = []
     plan = await build_video_submit_plan(db, body=body)
@@ -488,6 +542,17 @@ async def submit_video(
             warnings=warnings,
             guard_status=dry_run.short_status(),
         )
+
+    # 提交前预检（纵深防御的第二层，第一层是计划预览的供应商可用性判定）：
+    # 把**真正会发给供应商**的媒体地址逐张匿名探活。不可达就**不发请求**（不花钱）。
+    if preflight is not None:
+        vendor = str(run_args.get("provider") or plan.provider or "")
+        candidates = video_media_candidates(
+            input_payload,
+            allow_data_url=vendor_accepts_data_url(vendor),
+        )
+        if candidates:
+            await preflight(candidates, hint=f"直提出视频 shot_id={body.shot_id}")
 
     factory = task_factory
     if factory is None:

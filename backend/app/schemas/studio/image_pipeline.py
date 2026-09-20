@@ -60,19 +60,48 @@ class SubmissionTargetRead(BaseModel):
 
 
 class ImageTaskResultRead(BaseModel):
-    """一次出图提交的结果。"""
+    """一次出图提交的结果。
+
+    字段口径（故障 B 的归一化，2026-09-19 真实验收）：
+
+    - ``status`` 保留**上游原文**（``partial_failed`` 这类真话必须让用户看到），
+      旧的 ``ok`` / ``message`` 字段一个都没删，只增不减；
+    - ``outcome`` 是**归一化口径**（新字段，调用方只需认这一组取值）：
+      ``ok`` / ``partial_failed``（图片已生成但 OSS / 落库没完成）/ ``running`` /
+      ``failed`` / ``dry_run`` / ``unknown``；
+    - ``ok`` 不再对 ``partial_failed`` 恒为 true —— 部分失败必须能被调用方识别；
+    - ``error_message`` / ``detail.error_message`` 优先装**上游真正的原因**
+      （``detail.error_message``），不再被笼统的 ``message`` 盖掉。
+    """
 
     source_task_id: str
     source_asset_id: str
     asset_type: str = ""
     stage: str = ""
     service_task_id: str = ""
-    status: str = ""
+    status: str = Field("", description="上游原文状态（如 queued / completed / partial_failed）")
+    outcome: str = Field(
+        "",
+        description=(
+            "归一化口径（新）：ok / partial_failed / running / failed / dry_run / unknown；"
+            "partial_failed = 图片已生成但 OSS 上传或落库没完成，绝不能当成功"
+        ),
+    )
     ok: bool = True
     dry_run: bool = False
     image_url: str = Field("", description="出图服务的本地/临时地址（非长期资产）")
     oss_url: str = Field("", description="长期资产地址；DRY_RUN 下为空")
-    message: str = ""
+    oss_ready: bool = Field(False, description="是否拿到了可用作长期资产的地址（新，布尔）")
+    message: str = Field("", description="可展示的一句话说明（失败时优先装真实原因）")
+    error_message: str = Field("", description="失败/部分失败的真实原因（新，优先取上游 error_message）")
+    http_status: int | None = Field(None, description="上游报错时的 HTTP 状态码（新；取不到为空）")
+    detail: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "结构化明细（新）：error_message（上游原文）、http_status、oss_url、local_path、"
+            "images 等；页面优先读这里的 error_message"
+        ),
+    )
 
 
 class ImageServiceStatusRead(BaseModel):
@@ -144,11 +173,21 @@ class ImageSubmitRead(BaseModel):
     stage: str
     results: list[ImageTaskResultRead] = Field(default_factory=list)
     summary: dict[str, Any] = Field(default_factory=dict)
+    outcome: str = Field(
+        "",
+        description=(
+            "本次提交的整体归一化口径（新）：ok（全部成功）/ partial_failed（有成功也有失败，"
+            "或存在图片已生成但 OSS 未就绪）/ failed（全部失败）/ running（还有未完成）/ "
+            "dry_run / empty"
+        ),
+    )
     warnings: list[str] = Field(default_factory=list)
     guard_status: str = ""
     note: str = Field(
         "DRY_RUN 下为占位结果；真实模式下结果由出图服务上传 OSS，"
-        "oss_url 才是长期资产地址（image_url 仅为本地/临时地址）。",
+        "oss_url 才是长期资产地址（image_url 仅为本地/临时地址）。"
+        "summary 里的 ok_count / failed_count / oss_ready_count 是整数计数，"
+        "outcome=partial_failed 表示「图片已生成但 OSS 未就绪」，不是成功。",
         description="边界说明",
     )
 
@@ -175,6 +214,22 @@ class AdoptImageRead(BaseModel):
     source_url: str = Field("", description="采纳时传入的来源地址，仅供溯源")
     is_primary: bool = False
     name: str = ""
+    url_reachable: bool | None = Field(
+        None,
+        description=(
+            "落库地址是否**匿名公网可达**（新）：true=上游/浏览器都能匿名取到这张图；"
+            "false=不可达（本机地址或对象未公开读，后续当垫图会被上游 404 拒绝）；"
+            "null=未验证（演练模式，或驱动没有产出可验证的公网地址）"
+        ),
+    )
+    url_probe: dict[str, Any] = Field(
+        default_factory=dict,
+        description="可达性验证明细（新）：http_status / probe_method / reason / how_to_fix",
+    )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="采纳过程中的如实提醒（新）：例如「已入库但匿名访问不可达」及其修法",
+    )
     note: str = Field(
         "已写入 files 与对应图片槽位；刷新资产页即可看到，并可作为后续垫图使用。",
         description="边界说明",
@@ -400,6 +455,13 @@ class FrameSubmitPlanRead(BaseModel):
         "", description="saved（镜头已保存的帧提示词）/ request（调用方显式传入）/ empty（两者都没有）"
     )
     reference_file_ids: list[str] = Field(default_factory=list, description="实际会送出的参考图 file_id")
+    reference_labels: list[str] = Field(
+        default_factory=list,
+        description=(
+            "与 reference_file_ids 一一对应的**可读名**（新）：例如「角色「林晓」的定版图」/"
+            "「显式指定的参考图 1」。页面文案只用这个，不要把 file_id 显示给用户。"
+        ),
+    )
     reference_count: int = 0
     target_ratio: str = ""
     target_ratio_source: str = Field("", description="shot / project / default")

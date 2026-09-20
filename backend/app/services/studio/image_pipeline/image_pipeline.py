@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +30,7 @@ from app.schemas.studio.image_pipeline import (
     SubmissionTargetRead,
 )
 from app.services.studio.image_pipeline import external_image_client as client
+from app.services.studio.image_pipeline import reference_preflight
 from app.services.studio.image_pipeline.reference_resolver import (
     IMAGE_MODEL_BY_ASSET_TYPE,
     ReferenceImage,
@@ -359,12 +361,40 @@ def _dry_run_result(target: SubmissionTarget) -> ImageTaskResultRead:
         stage=target.stage,
         service_task_id=dry_run.fake_task_id("image", target.source_asset_id),
         status="dry_run",
+        outcome=OUTCOME_DRY_RUN,
         ok=True,
         dry_run=True,
         image_url=dry_run.fake_image_url(target.source_asset_id),
         oss_url="",
+        oss_ready=False,
         message="[DRY_RUN] 未提交给出图服务；这是占位结果，不是真实图片地址。",
+        detail={
+            "error_message": "",
+            "http_status": None,
+            "note": "[DRY_RUN] 占位结果，未提交任何出图请求。",
+        },
     )
+
+
+def reference_candidates(targets: list[SubmissionTarget]) -> list[reference_preflight.ReferenceCandidate]:
+    """把提交目标里的垫图抽成「提交前预检」的候选（只取真的要发出去的那些）。
+
+    ``allow_data_url=False``：出图服务（另一个进程/服务）是**自己抓这个地址**的，
+    内嵌 base64 在这里没有意义，必须是真的公网 http(s) 地址。
+    """
+    candidates: list[reference_preflight.ReferenceCandidate] = []
+    for target in targets:
+        url = str(target.reference_image or "").strip()
+        if not url:
+            continue
+        candidates.append(
+            reference_preflight.ReferenceCandidate(
+                label=f"{ASSET_TYPE_ZH.get(target.asset_type, target.asset_type)}「{target.name}」的定版垫图",
+                url=url,
+                role="reference_image",
+            )
+        )
+    return candidates
 
 
 async def submit_targets(
@@ -372,12 +402,19 @@ async def submit_targets(
     *,
     wait_seconds: float = 0.0,
     transport: Any = None,
+    preflight: Any = None,
 ) -> list[ImageTaskResultRead]:
     """逐个提交（出图服务 V0 单资产单图），可选有界等待产物。
 
     DRY_RUN 开启时**不触网**，每个目标返回占位结果。
+
+    ``preflight``：可注入的「提交前参考图可达性预检」（见
+    ``reference_preflight``）。路由层会传真实实现；不传＝不预检（既有单测走这条，
+    保证不触网）。预检不通过时**一个任务都不会提交**。
     """
     results: list[ImageTaskResultRead] = []
+    if preflight is not None and targets and not dry_run.dry_run_enabled():
+        await preflight(reference_candidates(targets))
     for target in targets:
         if dry_run.dry_run_enabled():
             results.append(_dry_run_result(target))
@@ -395,22 +432,71 @@ async def submit_targets(
         detail = None
         if wait_seconds and wait_seconds > 0 and task.service_task_id:
             detail = await poll_task(task.service_task_id, wait_seconds=wait_seconds, transport=transport)
-        results.append(
-            ImageTaskResultRead(
-                source_task_id=target.source_task_id,
-                source_asset_id=target.source_asset_id,
-                asset_type=target.asset_type,
-                stage=target.stage,
-                service_task_id=task.service_task_id,
-                status=detail.status if detail is not None else task.status,
-                ok=task.ok,
-                dry_run=False,
-                image_url=(detail.local_path if detail is not None else ""),
-                oss_url=(detail.oss_url if detail is not None else ""),
-                message=task.message or (detail.error_message if detail is not None else ""),
-            )
-        )
+        results.append(_result_from_submission(target, task=task, detail=detail))
     return results
+
+
+def _result_from_submission(
+    target: SubmissionTarget,
+    *,
+    task: client.ServiceTaskResult,
+    detail: client.ServiceTaskDetail | None,
+) -> ImageTaskResultRead:
+    """把「创建响应 + 可选轮询详情」归一化成一条结果。
+
+    故障 B 的坑在这里：出图服务在**上游图片已生成、但它自己 OSS 上传失败**时返回
+    ``partial_failed``。旧代码 ``ok=task.ok``（上游 ``data.get("ok", True)``）恒为 true，
+    ``message`` 又先取笼统的 ``task.message``，于是「部分失败」被当成功透传。
+
+    现在的口径：
+
+    - ``error_message`` 优先取 ``detail.error_message``（上游真正的失败原因）；
+    - ``status`` 保留上游原文，另给归一化的 ``outcome``；
+    - ``ok`` 只在 ``outcome == ok`` 时为 true（部分失败 = false）。
+    """
+    status = str(detail.status if detail is not None else task.status or "")
+    upstream_error = str(getattr(detail, "error_message", "") or "").strip() if detail is not None else ""
+    oss_url = str(getattr(detail, "oss_url", "") or "") if detail is not None else ""
+    local_path = str(getattr(detail, "local_path", "") or "") if detail is not None else ""
+    images = list(getattr(detail, "images", []) or []) if detail is not None else []
+
+    outcome = normalize_outcome(
+        status=status,
+        ok=bool(task.ok),
+        oss_url=oss_url,
+        dry_run=False,
+        error_message=upstream_error or str(task.message or ""),
+    )
+    # 失败时优先说真话：上游的 error_message 排在笼统的创建响应 message 之前
+    message = upstream_error or (
+        str(task.message or "") if outcome in {OUTCOME_OK, OUTCOME_RUNNING} else ""
+    ) or str(task.message or "")
+    return ImageTaskResultRead(
+        source_task_id=target.source_task_id,
+        source_asset_id=target.source_asset_id,
+        asset_type=target.asset_type,
+        stage=target.stage,
+        service_task_id=task.service_task_id,
+        status=status,
+        outcome=outcome,
+        ok=outcome == OUTCOME_OK,
+        dry_run=False,
+        image_url=local_path,
+        oss_url=oss_url,
+        oss_ready=bool(oss_url),
+        message=message,
+        error_message=upstream_error,
+        http_status=_http_status_from_text(upstream_error) if upstream_error else None,
+        detail={
+            "error_message": upstream_error,
+            "http_status": _http_status_from_text(upstream_error) if upstream_error else None,
+            "oss_url": oss_url,
+            "local_path": local_path,
+            "images": images,
+            "status": status,
+            "source_message": str(task.message or ""),
+        },
+    )
 
 
 async def poll_task(
@@ -433,16 +519,266 @@ async def poll_task(
 
 
 def summarize_results(results: list[ImageTaskResultRead]) -> dict[str, Any]:
-    """汇总提交结果（供前端一眼看清成功/排队/占位）。"""
-    counts: dict[str, int] = {}
+    """汇总提交结果：**整数**成功/失败计数 + 归一化 outcome（故障 B 的落地修复）。
+
+    旧形状只给 ``{"total":1,"by_status":{"partial_failed":1},"oss_ready":0}``：
+    ``ok`` 恒 true、没有成功/失败条数、``oss_ready`` 是个一眼看不出含义的 0，
+    页面因此把「部分失败」渲染成绿色成功。
+
+    新形状**只增不删**：``total`` / ``by_status`` / ``oss_ready`` / ``dry_run``
+    全部保留（旧调用方照旧可读），新增的整数计数与 ``outcome`` 让调用方一眼看懂。
+    """
+    by_status: dict[str, int] = {}
+    by_outcome: dict[str, int] = {}
+    outcomes: list[str] = []
     for item in results:
-        counts[item.status] = counts.get(item.status, 0) + 1
+        by_status[item.status] = by_status.get(item.status, 0) + 1
+        outcome = str(item.outcome or "") or normalize_outcome(
+            status=item.status,
+            ok=item.ok,
+            oss_url=item.oss_url,
+            dry_run=item.dry_run,
+            error_message=item.error_message or item.message,
+        )
+        outcomes.append(outcome)
+        by_outcome[outcome] = by_outcome.get(outcome, 0) + 1
+
+    ok_count = len([item for item in outcomes if item == OUTCOME_OK])
+    failed_count = len([item for item in outcomes if item == OUTCOME_FAILED])
+    partial_count = len([item for item in outcomes if item == OUTCOME_PARTIAL_FAILED])
+    running_count = len([item for item in outcomes if item == OUTCOME_RUNNING])
+    dry_run_count = len([item for item in outcomes if item == OUTCOME_DRY_RUN])
+    unknown_count = len([item for item in outcomes if item == OUTCOME_UNKNOWN])
+    oss_ready_count = len([item for item in results if item.oss_url])
+    real_failed = failed_count + partial_count
+    error_messages = list(
+        dict.fromkeys(
+            [
+                str(item.error_message or "").strip()
+                for item in results
+                if str(item.error_message or "").strip()
+            ]
+        )
+    )
+
     return {
+        # —— 旧字段（一个都没删）
         "total": len(results),
-        "by_status": counts,
-        "oss_ready": len([item for item in results if item.oss_url]),
+        "by_status": by_status,
+        "oss_ready": oss_ready_count,
         "dry_run": all(item.dry_run for item in results) if results else dry_run.dry_run_enabled(),
+        # —— 新字段：整数计数 + 归一化口径
+        "outcome": summary_outcome(results),
+        "by_outcome": by_outcome,
+        "ok_count": ok_count,
+        "failed_count": real_failed,
+        "partial_failed_count": partial_count,
+        "running_count": running_count,
+        "dry_run_count": dry_run_count,
+        "unknown_count": unknown_count,
+        "oss_ready_count": oss_ready_count,
+        "ok": bool(results) and ok_count == len(results),
+        "has_failure": real_failed > 0,
+        "has_partial_failure": partial_count > 0 or (ok_count > 0 and real_failed > 0),
+        "message": "；".join(error_messages[:3]),
     }
+
+
+# ---------------------------------------------------------------------------
+# outcome 归一化（故障 B：partial_failed 语义混乱）
+# ---------------------------------------------------------------------------
+#
+# 真实验收暴露的问题：出图服务在「上游图片已生成、但它自己 OSS 上传失败」时返回
+# ``partial_failed``。旧实现把它当成功透传（``ok`` 恒 true、页面用绿色成功 Alert 渲染、
+# 真正的错误消息被笼统的 ``task.message`` 盖掉），用户完全看不出「成功几条 / 失败几条」。
+#
+# 归一化口径只有一组取值，调用方（含页面）只需认这一组：
+#   ok             图片已生成且拿到长期地址（或明确成功）
+#   partial_failed 图片已生成，但 OSS 上传 / 落库等后续步骤没完成 → **绝不能当成功**
+#   running        还在排队/执行中
+#   failed         失败
+#   dry_run        演练占位（既不算成功也不算失败）
+#   unknown        认不出来的状态（不猜、不冒充成功）
+
+OUTCOME_OK = "ok"
+OUTCOME_PARTIAL_FAILED = "partial_failed"
+OUTCOME_RUNNING = "running"
+OUTCOME_FAILED = "failed"
+OUTCOME_DRY_RUN = "dry_run"
+OUTCOME_UNKNOWN = "unknown"
+
+# 上游状态 token → 归一化口径。token 规则：小写 + 空白/连字符 → 下划线。
+_STATUS_TOKENS: dict[str, str] = {}
+for _token in ("succeeded", "success", "ok", "done", "completed", "complete", "finished", "passed"):
+    _STATUS_TOKENS[_token] = OUTCOME_OK
+for _token in (
+    "partial",
+    "partial_failed",
+    "partial_fail",
+    "partialfailure",
+    "partially_failed",
+    "partial_error",
+    "partial_success",
+    "partial_succeeded",
+    "oss_failed",
+    "oss_fail",
+    "oss_upload_failed",
+    "oss_upload_error",
+    "oss_error",
+    "upload_failed",
+    "storage_failed",
+    "storage_error",
+    "persist_failed",
+):
+    _STATUS_TOKENS[_token] = OUTCOME_PARTIAL_FAILED
+for _token in (
+    "failed",
+    "fail",
+    "failure",
+    "error",
+    "errored",
+    "rejected",
+    "blocked",
+    "timeout",
+    "timed_out",
+    "cancelled",
+    "canceled",
+    "aborted",
+    "exception",
+):
+    _STATUS_TOKENS[_token] = OUTCOME_FAILED
+for _token in (
+    "pending",
+    "queued",
+    "queueing",
+    "queuing",
+    "running",
+    "processing",
+    "submitted",
+    "in_progress",
+    "created",
+    "waiting",
+    "accepted",
+    "started",
+):
+    _STATUS_TOKENS[_token] = OUTCOME_RUNNING
+for _token in ("dry_run", "dryrun", "dry", "simulated", "mock", "placeholder"):
+    _STATUS_TOKENS[_token] = OUTCOME_DRY_RUN
+
+
+def classify_status_token(raw: str) -> str | None:
+    """状态字符串 → 归一化口径；认不出来返回 ``None``（调用方再决定怎么兜底）。"""
+    token = str(raw or "").strip().lower().replace("-", "_")
+    token = "_".join(token.split())
+    if not token:
+        return None
+    exact = _STATUS_TOKENS.get(token)
+    if exact is not None:
+        return exact
+    # 包含式兜底：``partial_failed_by_oss`` / ``oss_upload_error_403`` 这类复合状态。
+    # 顺序刻意：「部分失败」必须排在通用 failed/error 之前，否则会丢掉
+    # 「图片已生成、只是 OSS 没传上去」这句关键信息。
+    looks_partial = "partial" in token or "oss" in token or "upload" in token
+    looks_bad = any(word in token for word in ("fail", "error", "denied"))
+    if looks_partial and looks_bad:
+        outcome: str | None = OUTCOME_PARTIAL_FAILED
+    elif looks_bad:
+        outcome = OUTCOME_FAILED
+    elif "success" in token or "succeed" in token:
+        outcome = OUTCOME_OK
+    elif any(word in token for word in ("pending", "queue", "running", "process")):
+        outcome = OUTCOME_RUNNING
+    elif "dry" in token:
+        outcome = OUTCOME_DRY_RUN
+    else:
+        outcome = None
+    return outcome
+
+
+def normalize_outcome(
+    *,
+    status: str,
+    ok: bool | None = True,
+    oss_url: str = "",
+    dry_run: bool = False,
+    error_message: str = "",
+) -> str:
+    """把「上游状态 + ok 布尔 + 是否拿到长期地址」归一成一个明确的 outcome。"""
+    if dry_run:
+        outcome = OUTCOME_DRY_RUN
+    else:
+        outcome = classify_status_token(status)
+        if outcome is None:
+            # 认不出来时只有 ok 布尔可依据；都没有就如实 unknown（不猜、不冒充成功）
+            outcome = OUTCOME_OK if ok is True else OUTCOME_FAILED if ok is False else OUTCOME_UNKNOWN
+        if outcome == OUTCOME_OK and ok is False:
+            # 显式 ok=False 是明确的失败证据（ok=true 不可信，false 可信），不允许渲染成成功
+            outcome = OUTCOME_FAILED
+        if outcome == OUTCOME_OK and not str(oss_url or "").strip() and _looks_like_oss_failure(error_message):
+            # 状态说成功、却没有任何长期地址，而且错误文本是 OSS 相关 → 属于部分失败
+            outcome = OUTCOME_PARTIAL_FAILED
+    return outcome
+
+
+_OSS_FAILURE_MARKERS: tuple[str, ...] = ("oss", "upload", "上传", "storage", "落库", "object")
+
+
+def _looks_like_oss_failure(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(marker in lowered for marker in _OSS_FAILURE_MARKERS)
+
+
+_HTTP_STATUS_RE = re.compile(r"(?:http|status|code|错误码|状态码)\s*[:=]?\s*(\d{3})\b", re.IGNORECASE)
+
+
+def _http_status_from_text(text: str) -> int | None:
+    """从错误原文里抠 HTTP 状态码（``HTTP 403`` / ``status=500``）；取不到返回 None。"""
+    match = _HTTP_STATUS_RE.search(str(text or ""))
+    if not match:
+        return None
+    code = int(match.group(1))
+    return code if 100 <= code <= 599 else None
+
+
+def summary_outcome(results: list[ImageTaskResultRead]) -> str:
+    """整批结果的整体口径。
+
+    规则（顺序即优先级）：
+
+    - 全是演练占位 → ``dry_run``；
+    - 有部分失败 → ``partial_failed``（图片可能已生成、只是 OSS 没就绪 —— 这条信息
+      比"失败"更有用，页面据此提示"可重试上传"）；
+    - 既有成功又有失败 → ``partial_failed``；
+    - 全失败 → ``failed``；
+    - 还有没跑完的 → ``running``（此时不能报成功）；
+    - 否则 → ``ok``。
+    """
+    if not results:
+        return "empty"
+    outcomes = [
+        str(item.outcome or "")
+        or normalize_outcome(
+            status=item.status,
+            ok=item.ok,
+            oss_url=item.oss_url,
+            dry_run=item.dry_run,
+            error_message=item.error_message or item.message,
+        )
+        for item in results
+    ]
+    if all(item == OUTCOME_DRY_RUN for item in outcomes):
+        return OUTCOME_DRY_RUN
+    ok_count = len([item for item in outcomes if item == OUTCOME_OK])
+    partial_count = len([item for item in outcomes if item == OUTCOME_PARTIAL_FAILED])
+    failed_count = len([item for item in outcomes if item == OUTCOME_FAILED])
+    running_count = len([item for item in outcomes if item in {OUTCOME_RUNNING, OUTCOME_UNKNOWN}])
+    if partial_count or (failed_count and ok_count):
+        return OUTCOME_PARTIAL_FAILED
+    if failed_count:
+        return OUTCOME_FAILED
+    if running_count:
+        return OUTCOME_RUNNING
+    return OUTCOME_OK
 
 
 __all__ = [
@@ -450,12 +786,22 @@ __all__ = [
     "DEFAULT_ASPECT_RATIO",
     "GENERATION_TYPE_BY_ASSET_TYPE",
     "IMAGE_MODEL_BY_ASSET_TYPE",
+    "OUTCOME_DRY_RUN",
+    "OUTCOME_FAILED",
+    "OUTCOME_OK",
+    "OUTCOME_PARTIAL_FAILED",
+    "OUTCOME_RUNNING",
+    "OUTCOME_UNKNOWN",
     "SubmissionTarget",
     "build_deterministic_prompt",
     "build_object_key_template",
     "build_source_task_id",
     "build_targets",
+    "classify_status_token",
+    "normalize_outcome",
     "poll_task",
+    "reference_candidates",
     "submit_targets",
     "summarize_results",
+    "summary_outcome",
 ]
