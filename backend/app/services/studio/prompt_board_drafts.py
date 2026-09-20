@@ -96,7 +96,8 @@ class ClaimResult:
             "claimed": self.claimed,
             "claim_token": self.claim_token,
             "lease_seconds": self.lease_seconds,
-            "claim_expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            # 统一带 Z：库里存的是 naive UTC，不带 Z 会被 JS 当成本地时间（差 8 小时）
+            "claim_expires_at": self.expires_at.isoformat() + "Z" if self.expires_at else None,
             "reason": self.reason,
             "blocking_status": self.blocking_status,
         }

@@ -669,6 +669,8 @@ async def save_entries(
             "applied_count": 0,
             "skipped_count": len(entries or []),
             "results": [],
+            # 被拒绝的请求不会写正式列，自然也不会清草稿（保持响应字段形状一致）
+            "cleared_draft_count": 0,
             "error": f"有镜头被重复指定：{duplicated_targets}，已拒绝保存。",
         }
     # 数量不一致且未显式允许部分保存 → 拒绝（默认不做"能写几条算几条"）
@@ -680,6 +682,8 @@ async def save_entries(
             "applied_count": 0,
             "skipped_count": len(entries or []),
             "results": [],
+            # 被拒绝的请求不会写正式列，自然也不会清草稿（保持响应字段形状一致）
+            "cleared_draft_count": 0,
             "error": (
                 f"数量不一致：提交 {len(entries or [])} 条，本集 {len(board)} 个镜头；"
                 "已按默认口径阻止保存。若确实只想保存已匹配项，请显式选择「仅保存已匹配项」。"
@@ -698,6 +702,8 @@ async def save_entries(
             "applied_count": 0,
             "skipped_count": len(entries or []),
             "results": [],
+            # 被拒绝的请求不会写正式列，自然也不会清草稿（保持响应字段形状一致）
+            "cleared_draft_count": 0,
             "error": (
                 "缺少合法的流程来源（origin）：只接受 llm_draft / jurilu_import / "
                 "external_import / manual。来源由流程决定，不能由调用方随意指定 source。"
