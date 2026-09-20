@@ -616,6 +616,7 @@ for _token in (
     "partial_failed",
     "partial_fail",
     "partialfailure",
+    "partial_ok",
     "partially_failed",
     "partial_error",
     "partial_success",
@@ -678,9 +679,12 @@ def classify_status_token(raw: str) -> str | None:
     # 包含式兜底：``partial_failed_by_oss`` / ``oss_upload_error_403`` 这类复合状态。
     # 顺序刻意：「部分失败」必须排在通用 failed/error 之前，否则会丢掉
     # 「图片已生成、只是 OSS 没传上去」这句关键信息。
+    # 另外：**只要 token 里含 partial 就一律按部分失败**（``partial`` / ``partially_failed`` /
+    # ``partial_ok``）—— 这些变体以前会落到 ``None`` → ``unknown``，而前端对同一个 token
+    # 会产生别的口径，上下游就对不上了。裸 ``partial`` 与 ``partial_ok`` 都不代表"成功"。
     looks_partial = "partial" in token or "oss" in token or "upload" in token
     looks_bad = any(word in token for word in ("fail", "error", "denied"))
-    if looks_partial and looks_bad:
+    if "partial" in token or (looks_partial and looks_bad):
         outcome: str | None = OUTCOME_PARTIAL_FAILED
     elif looks_bad:
         outcome = OUTCOME_FAILED

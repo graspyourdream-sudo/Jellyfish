@@ -21,6 +21,11 @@
  *      `ok_count/failed_count`（新）→ `by_status`（旧）→ `results` 逐行 → `total`（只报总数）。
  *      另外做一次「对账」：如果汇总字段说失败 0、但明细/`by_status` 里有失败，宁可多报失败，
  *      也不把失败说成成功（`countSource = 'evidence_override'`）。
+ *   D. **不丢数。** 已识别的计数之和必须能解释 `total`：
+ *      `okCount + failedCount + dryRunCount + pendingCount + unknownCount === total` 恒成立。
+ *      解释不了的那部分计入 `unknownCount` / `unaccountedCount` 并**在文案里写出来**。
+ *      绝不允许「有 N 条结果却显示成功 0 / 失败 0 且没有任何说明」——裸 `partial` 那次报障
+ *      就是这条约束没立住（它落到了「未识别」，一条都没被计入）。
  */
 
 /** 与 antd `AlertProps['type']` 完全一致，但本文件不依赖 antd。 */
@@ -96,6 +101,11 @@ export type AssetResultSummary = {
   pendingCount: number
   /** 归一化口径为 `unknown` 的条数：既不算成功也不算失败 */
   unknownCount: number
+  /**
+   * 汇总里**没被任何已识别状态解释掉**的条数（`total` 比已识别计数之和多出来的部分）。
+   * 这部分不会被丢弃：它同时计入 `unknownCount`，并在 `detailLines` 里显式说明。
+   */
+  unaccountedCount: number
   /** OSS 长期地址就绪条数（整数） */
   ossReadyCount: number
   /** 是否拿到了 results 明细数组 */
@@ -377,9 +387,11 @@ const OK_STATUSES = new Set([
 
 /** 部分失败：上游产物已生成，但后续（OSS 上传 / 落库）没完成。 */
 const PARTIAL_FAILED_STATUSES = new Set([
+  'partial',
   'partial_failed',
   'partial_fail',
   'partialfailure',
+  'partial_ok',
   'partially_failed',
   'partial_error',
   'partial_success',
@@ -461,7 +473,15 @@ export function classifyAssetResultStatus(raw: unknown): AssetResultOutcome | nu
   if (UNKNOWN_STATUSES.has(token)) return 'unknown'
 
   // 包含式兜底：`partial_failed_by_oss` / `oss_upload_error_403` 这类复合状态
-  const looksPartial = token.includes('partial') || token.includes('oss') || token.includes('upload')
+  //
+  // ① 「含 partial 就是部分失败」必须最先判：`partial`（裸 token，实测真实入库形状之一）
+  //    / `partially_failed` / `partial_ok` / `partial_failed_by_oss` 这类 token 以前会落到
+  //    「未识别」（返回 null）→ 汇总时既不进成功也不进失败，页面就出现
+  //    「1 条结果却显示成功 0 / 失败 0」。它们**都不是成功**，按部分失败计。
+  // ② 含 `fail` / `error` / `denied` 的 token 绝不允许落到「未识别」：那是明确的坏消息。
+  if (token.includes('partial')) return 'partial_failed'
+
+  const looksPartial = token.includes('oss') || token.includes('upload')
   const looksBad = token.includes('fail') || token.includes('error') || token.includes('denied')
   if (looksPartial && looksBad) return 'partial_failed'
   if (looksBad) return 'failed'
@@ -638,8 +658,12 @@ function countsFromStatusMap(statusMap: Record<string, unknown>): CountSet | nul
     if (outcome === 'succeeded') ok += n
     else if (outcome === 'failed' || outcome === 'partial_failed') failed += n
     else if (outcome === 'dry_run') dryRun += n
-    else if (outcome === 'unknown') unknown += n
-    else pending += n
+    else if (outcome === 'pending') pending += n
+    // 认不出来的 token（含历史/方言状态）→ **未知**：
+    // 以前它被塞进 `pending`（"处理中"），等于替后端编了一个"还在跑"的结论，
+    // 而且 okCount / failedCount 都是 0 时页面上只看得到「成功 0 / 失败 0」。
+    // 现在如实计入 unknown，并在文案里说出来（见 summarizeAssetResults 的不丢数对账）。
+    else unknown += n
   }
   return { total, ok, failed, dryRun, pending, unknown, ossReady: 0, known: total > 0 }
 }
@@ -775,6 +799,24 @@ export function summarizeAssetResults(
     countSource = 'evidence_override'
   }
 
+  // —— 不丢数（硬约束，比任何单个来源的口径都重要）：
+  // 已识别的计数之和**必须能解释 total**；解释不了的那部分绝不静默丢弃。
+  //   ① 计数比 total 少（后端 total 大于它给出的分布，或明细比汇总少）→ 差额计入
+  //      ``unknownCount`` 并单独记 ``unaccountedCount``，文案里明说「N 条状态未识别」；
+  //   ② 计数比 total 多（后端 total 偏小）→ 按计数显示（宁可多报条数，也不吞掉结果）。
+  // 这样恒有 ok + failed + dryRun + pending + unknown === total，杜绝
+  // 「有 N 条结果却显示成功 0 / 失败 0 且没有任何说明」。
+  let unaccountedCount = 0
+  if (countsKnown) {
+    const accounted = okCount + failedCount + dryRunCount + pendingCount + unknownCount
+    if (accounted > total) {
+      total = accounted
+    } else if (accounted < total) {
+      unaccountedCount = total - accounted
+      unknownCount += unaccountedCount
+    }
+  }
+
   const ossReadyCount =
     fieldOssReady ??
     ossReadyLegacyCount ??
@@ -839,7 +881,20 @@ export function summarizeAssetResults(
   const httpStatus =
     failedRows.find((row) => row.httpStatus !== null)?.httpStatus ?? extractHttpStatus(summary)
 
-  const countsText = countsKnown && total > 0 ? `成功 ${okCount} / 失败 ${failedCount}` : ''
+  // 计数文案：成功/失败两个数永远给全；「既不是成功也不是失败」的部分必须**在文案里说出来**，
+  // 否则用户看到「成功 0 / 失败 0」会以为没有结果（这正是裸 `partial` 那次报障的样子）。
+  const countNotes: string[] = []
+  if (unknownCount > 0) countNotes.push(`其中 ${unknownCount} 条状态未识别`)
+  if (okCount === 0 && failedCount === 0) {
+    if (pendingCount > 0) countNotes.push(`${pendingCount} 条处理中`)
+    if (dryRunCount > 0) countNotes.push(`${dryRunCount} 条演练占位`)
+  }
+  const countsText =
+    countsKnown && total > 0
+      ? countNotes.length > 0
+        ? `成功 ${okCount} / 失败 ${failedCount}，${countNotes.join('、')}（既不算成功也不算失败）`
+        : `成功 ${okCount} / 失败 ${failedCount}`
+      : ''
 
   // —— 标题 / 样式：部分失败必须是 warning，全失败是 error，绝不给绿色成功
   let alertType: AssetAlertType = 'info'
@@ -919,6 +974,11 @@ export function summarizeAssetResults(
   if (unknownCount > 0) {
     detailLines.push(`另有 ${unknownCount} 条状态未知（后端未给出可判断的信息，既不算成功也不算失败）。`)
   }
+  if (unaccountedCount > 0) {
+    detailLines.push(
+      `其中 ${unaccountedCount} 条后端没有给出状态、也没有出现在明细里（已按「状态未识别」计入，既不算成功也不算失败）。`,
+    )
+  }
   if (mismatchNote) detailLines.push(mismatchNote)
   if (nextStepText) detailLines.push(`下一步：${nextStepText}`)
 
@@ -929,6 +989,7 @@ export function summarizeAssetResults(
     dryRunCount,
     pendingCount,
     unknownCount,
+    unaccountedCount,
     ossReadyCount,
     hasRows,
     countsKnown,

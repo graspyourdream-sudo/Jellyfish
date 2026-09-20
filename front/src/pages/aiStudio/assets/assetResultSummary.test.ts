@@ -672,3 +672,243 @@ test('仅靠 by_outcome + partial_failed_count 也能识别部分失败（聚合
   assert.match(summary.nextStepText, /重试上传/)
   assert.equal(summary.failedCount, 1)
 })
+
+/* ==================================================================
+ * 任务二：`partial_failed` 汇总不能显示成 `0/0`
+ *
+ * 真实报障（已复现）：页面显示「成功 0 / 失败 0」，而实际有 1 条结果。
+ * 根因是**前端分类器**不认裸 `partial`（返回 null）→ 一条都没被计入成功/失败，
+ * 且因为计数被塞进了 pending 桶，连「无法判断」的提示都没有。
+ *
+ * 这里锁两层：
+ *   A. 识别口径补全（含 `partial` / `partial_ok` / `partially_failed` 这类 token）；
+ *   B. 「不丢数」硬约束：已识别计数之和必须能解释 total，解释不了的部分必须
+ *      落到 unknownCount / unaccountedCount **并在文案里说出来**。
+ * ================================================================== */
+
+const PARTIAL_LIKE_TOKENS = [
+  'partial',
+  'PARTIAL',
+  'partial_failed',
+  'PARTIAL-FAILED',
+  'PartialFailed',
+  'partially_failed',
+  'partiallyfailed',
+  'partial_fail',
+  'partial_ok',
+  'partial_success',
+  'partial_error',
+  'partial_failed_by_oss',
+  'weird_partial_token',
+] as const
+
+/** 已识别状态 token 的样本（覆盖成功 / 部分失败 / 失败 / 演练 / 处理中 / 明确未知 / 真·未识别）。 */
+const STATUS_TOKEN_SAMPLES = [
+  // 成功
+  'succeeded',
+  'success',
+  'ok',
+  'completed',
+  'done',
+  // 部分失败（含历史与方言写法）
+  ...PARTIAL_LIKE_TOKENS,
+  'oss_failed',
+  'oss_upload_error',
+  'oss_upload_error_403',
+  'failed_by_oss',
+  // 失败（含复合 token：含 fail/error 的绝不允许落到「未识别」）
+  'failed',
+  'failure',
+  'error',
+  'weird_failed_state',
+  'upstream_error_code_500',
+  // 演练 / 处理中
+  'dry_run',
+  'pending',
+  'queued',
+  'running',
+  // 明确未知
+  'unknown',
+  // 真·认不出来（不能凭空编造成功或失败，但必须被计入 unknown）
+  'mystery_state',
+  '完全看不懂的状态',
+] as const
+
+/** 汇总文案里是否**显式说明**了「还有一部分既不算成功也不算失败」。 */
+function explainsNonOkNonFailed(summary: {
+  countsKnown: boolean
+  title: string
+  countsText: string
+  detailLines: string[]
+}): boolean {
+  if (!summary.countsKnown) return true // 已明确告知「后端未提供成功 / 失败明细」
+  const text = `${summary.title}｜${summary.countsText}｜${summary.detailLines.join('｜')}`
+  return /未识别|未知|无法判断|处理中|待完成|演练|未提供|没有给出/.test(text)
+}
+
+test('裸 `partial` 必须按「部分失败」算：不再显示成成功 0 / 失败 0（报障的原始形状）', () => {
+  assert.equal(classifyAssetResultStatus('partial'), 'partial_failed')
+
+  // 报障时用的就是这条形状：by_status: {partial: 1}
+  const summary = summarizeAssetResults([], {
+    summary: { total: 1, by_status: { partial: 1 }, oss_ready: 0 },
+  })
+
+  assert.equal(summary.total, 1)
+  assert.equal(summary.okCount, 0)
+  assert.equal(summary.failedCount, 1)
+  assert.notEqual(summary.countsText, '成功 0 / 失败 0')
+  assert.equal(summary.countsText, '成功 0 / 失败 1')
+  assert.equal(summary.hasFailure, true)
+  assert.equal(summary.alertType, 'error')
+  assert.notEqual(summary.alertType, 'success')
+})
+
+test('「部分失败」的方言 token 全部识别成 partial_failed（不允许落到未识别）', () => {
+  for (const token of PARTIAL_LIKE_TOKENS) {
+    assert.equal(
+      classifyAssetResultStatus(token),
+      'partial_failed',
+      `token「${token}」应识别为部分失败，实际是 ${String(classifyAssetResultStatus(token))}`,
+    )
+  }
+})
+
+test('含 fail / error / denied 的 token 绝不允许落到「未识别」', () => {
+  for (const token of ['weird_failed_state', 'upstream_error_code_500', 'denied_by_gateway', 'fail', 'error']) {
+    const outcome = classifyAssetResultStatus(token)
+    assert.notEqual(outcome, null, `token「${token}」落到了未识别：明确的坏消息不能被当成"看不出来"`)
+    assert.ok(
+      outcome === 'failed' || outcome === 'partial_failed',
+      `token「${token}」应至少算失败，实际是 ${String(outcome)}`,
+    )
+  }
+})
+
+test('后端只给 total 大于已识别计数时，差额不被丢弃：计入 unknown 并写进文案', () => {
+  const summary = summarizeAssetResults([], { summary: { total: 5, by_status: { succeeded: 2 } } })
+
+  assert.equal(summary.total, 5)
+  assert.equal(summary.okCount, 2)
+  assert.equal(summary.failedCount, 0)
+  assert.equal(summary.unaccountedCount, 3)
+  assert.equal(summary.unknownCount, 3)
+  assert.equal(summary.okCount + summary.failedCount + summary.unknownCount, summary.total)
+  assert.match(summary.countsText, /未识别/)
+  assert.match(summary.detailLines.join('\n'), /3 条/)
+})
+
+test('后端给 0/0 但 total=1 时，也不允许静默成「成功 0 / 失败 0」', () => {
+  const summary = summarizeAssetResults([], { summary: { total: 1, ok_count: 0, failed_count: 0 } })
+
+  assert.equal(summary.total, 1)
+  assert.equal(summary.okCount, 0)
+  assert.equal(summary.failedCount, 0)
+  assert.equal(summary.unknownCount, 1)
+  assert.equal(summary.unaccountedCount, 1)
+  assert.ok(explainsNonOkNonFailed(summary), `文案必须说明那 1 条去哪了：${summary.countsText}`)
+})
+
+test('不丢数硬约束（穷举）：任何状态组合下 ok+failed+dryRun+pending+unknown 都必须等于 total', () => {
+  type Case = { label: string; summary: ReturnType<typeof summarizeAssetResults> }
+
+  const cases: Case[] = []
+  const pushMap = (label: string, map: Record<string, number>, withTotal: boolean) => {
+    const total = Object.values(map).reduce((sum, n) => sum + n, 0)
+    cases.push({
+      label,
+      summary: summarizeAssetResults([], { summary: withTotal ? { total, by_status: map } : { by_status: map } }),
+    })
+  }
+
+  // ① 单 token × 多种条数
+  for (const token of STATUS_TOKEN_SAMPLES) {
+    for (const count of [1, 2, 3]) {
+      pushMap(`${token}=${count}`, { [token]: count }, true)
+      pushMap(`${token}=${count}（无 total）`, { [token]: count }, false)
+    }
+  }
+
+  // ② 两两组合：把「一个认得、一个认不出来」的交叉情况也覆盖掉
+  for (let i = 0; i < STATUS_TOKEN_SAMPLES.length; i += 1) {
+    for (let j = i + 1; j < STATUS_TOKEN_SAMPLES.length; j += 1) {
+      for (const left of [1, 2]) {
+        for (const right of [1, 3]) {
+          pushMap(
+            `${STATUS_TOKEN_SAMPLES[i]}=${left} + ${STATUS_TOKEN_SAMPLES[j]}=${right}`,
+            { [STATUS_TOKEN_SAMPLES[i]]: left, [STATUS_TOKEN_SAMPLES[j]]: right },
+            true,
+          )
+        }
+      }
+    }
+  }
+
+  // ③ by_status 的合计与后端 total 不一致（后端少报 / 多报）
+  cases.push({
+    label: 'total 比 by_status 大',
+    summary: summarizeAssetResults([], { summary: { total: 7, by_status: { partial: 1, succeeded: 2 } } }),
+  })
+  cases.push({
+    label: 'total 比 by_status 小',
+    summary: summarizeAssetResults([], { summary: { total: 1, by_status: { succeeded: 3 } } }),
+  })
+
+  // ④ 明细行形状
+  for (const token of STATUS_TOKEN_SAMPLES) {
+    cases.push({
+      label: `rows:${token}`,
+      summary: summarizeAssetResults([{ status: token }], { summary: { total: 1 } }),
+    })
+    cases.push({
+      label: `rows:${token}×2（后端 total 偏小）`,
+      summary: summarizeAssetResults([{ status: token }, { status: token }], { summary: { total: 1 } }),
+    })
+  }
+
+  // ⑤ 新后端的整数字段形状（含后端只回 0/0、以及只回分布的情况）
+  const fieldShapes: Array<{ label: string; summary: Record<string, unknown> }> = [
+    { label: 'ok=0/failed=0', summary: { ok_count: 0, failed_count: 0 } },
+    { label: 'running=1', summary: { ok_count: 0, failed_count: 0, running_count: 1 } },
+    { label: 'dry_run=1', summary: { ok_count: 0, failed_count: 0, dry_run_count: 1 } },
+    { label: 'unknown=2', summary: { ok_count: 0, failed_count: 0, unknown_count: 2 } },
+    { label: 'ok=1+running=1', summary: { ok_count: 1, failed_count: 0, running_count: 1 } },
+    { label: 'failed=1', summary: { ok_count: 0, failed_count: 1 } },
+    {
+      label: '只有 partial_failed_count',
+      summary: { ok_count: 0, failed_count: 0, partial_failed_count: 1 },
+    },
+    { label: '只有 ok_count', summary: { ok_count: 2 } },
+    { label: '只有 failed_count', summary: { failed_count: 1 } },
+  ]
+  for (const shape of fieldShapes) {
+    const total = 1 + Number(shape.summary.ok_count ?? 0) + Number(shape.summary.failed_count ?? 0) + Number(shape.summary.running_count ?? 0)
+    cases.push({
+      label: `fields:${shape.label}`,
+      summary: summarizeAssetResults([], { summary: { total, ...shape.summary } }),
+    })
+  }
+
+  for (const item of cases) {
+    const s = item.summary
+    const accounted = s.okCount + s.failedCount + s.dryRunCount + s.pendingCount + s.unknownCount
+    assert.equal(accounted, s.total, `[${item.label}] 计数之和不等于 total：${JSON.stringify({
+      ok: s.okCount,
+      failed: s.failedCount,
+      dryRun: s.dryRunCount,
+      pending: s.pendingCount,
+      unknown: s.unknownCount,
+      total: s.total,
+    })}`)
+    // 「有 N 条结果，却显示成功 0 / 失败 0，且什么都不说」——绝对不允许
+    if (s.total > 0 && s.okCount === 0 && s.failedCount === 0) {
+      assert.ok(
+        explainsNonOkNonFailed(s),
+        `[${item.label}] total=${s.total} 但成功/失败都是 0，文案没说清剩下的去哪了：${s.title}｜${s.countsText}｜${s.detailLines.join('｜')}`,
+      )
+    }
+    // 计数自洽时，明细条数也不能超过 total
+    assert.ok(s.rows.length <= s.total, `[${item.label}] 明细条数多于 total`)
+  }
+})
+
