@@ -4,6 +4,8 @@ import {
   Badge,
   Button,
   Card,
+  Collapse,
+  Descriptions,
   Divider,
   Dropdown,
   Image,
@@ -119,19 +121,24 @@ import {
 import type { FramePlanResult, ImageModelOption, PromptDeliveryRow } from '../../../services/llmPipelineApi'
 import { buildFileDownloadUrl, resolveAssetUrl } from '../assets/utils'
 import type { Chapter } from '../../../mocks/data'
+import type { VideoPlanFrame } from '../../../services/llmPipelineApi'
 import { executeTaskCancel } from '../components/taskActionHelpers'
 import { useRelationTaskNotification } from '../components/taskNotificationHelpers'
 import { VideoPromptLlmPanel } from './components/VideoPromptLlmPanel'
 import { ShotBoundFilesPanel } from './components/ShotBoundFilesPanel'
-import { ShotProductionCard } from './components/ShotProductionCard'
+import { ShotProductionWorkspace } from './components/ShotProductionWorkspace'
+import { useShotRequestPlan, REFERENCE_MODE_OPTIONS, referenceModeLabel, videoModelBusinessName } from './components/useShotRequestPlan'
+import { frameTypeLabel, resolveShotStatus, type ShotStatusText } from './components/shotStatusText'
 import { ExportScopeModal } from './components/ExportScopeModal'
 import {
   evaluateShotReadiness,
   summarizeStepState,
   STEP_STATE_META,
+  type PromptDeliveryRowLike,
   type ShotReadiness,
 } from './components/shotReadiness'
 import { TASK_COPY } from '../components/taskCopy'
+import { maskInternalIds } from '../components/maskInternalIds'
 import { classifyGenerationFailure, failureText } from '../components/generationGate'
 import { ChapterStudioBatchToolbar } from './components/ChapterStudioBatchToolbar'
 import { ChapterStudioMaintenancePanel } from './components/ChapterStudioMaintenancePanel'
@@ -349,6 +356,7 @@ type LayoutPrefs = {
   leftWidth: number
   rightWidth: number
   inspectorOpen: boolean
+  /** 兼容旧偏好：布局固定为三栏并排（不再有覆盖模式） */
   inspectorMode: InspectorMode
   autoOpenInspector: boolean
   timelineCollapsed: boolean
@@ -377,18 +385,6 @@ type KeyframeCardState = {
 
 type KeyframeResolutionProfile = 'standard' | 'high'
 
-type InspectorTabKey =
-  | 'ops'
-  | 'video_prompt_text'
-  | 'camera'
-  | 'prompt_image'
-  | 'binding'
-  | 'dialogue'
-  | 'production'
-  | 'keyframe_gen'
-  | 'gen_ref'
-  | 'av'
-
 /**
  * 章节工作室里的三个步骤（对齐项目后三步）。
  *
@@ -405,35 +401,23 @@ type StudioStepMeta = {
   /** 第一步对应项目第 4 步，因此这里只写步骤名，序号由页面拼。 */
   label: string
   hint: string
-  tabs: InspectorTabKey[]
-  defaultTab: InspectorTabKey
 }
-
-/** 三个步骤都需要的「维护设置」页签，不随步骤隐藏。 */
-const STUDIO_SHARED_TABS: InspectorTabKey[] = ['ops']
 
 const STUDIO_STEPS: StudioStepMeta[] = [
   {
     key: 'video_prompt',
     label: '视频提示词',
     hint: '看/改这条分镜的视频提示词（交付导出读的就是它），再确认镜头语言与画面提示词。',
-    tabs: ['video_prompt_text', 'camera', 'prompt_image'],
-    defaultTab: 'video_prompt_text',
   },
   {
     key: 'binding',
     label: '关联绑定',
     hint: '把角色 / 场景 / 道具 / 服装 / 声音绑到这条分镜上；建议只做推荐，保存后才写入绑定。',
-    tabs: ['binding', 'dialogue'],
-    defaultTab: 'binding',
   },
   {
     key: 'deliver',
     label: '生成与交付',
     hint: '关键帧与参考图、视频生成参数与产出，以及导出交付所需的提示词与绑定清单。',
-    // 第二部分：主操作集中在「本镜生产卡」上，关键帧/生成参数作为它的下钻页签
-    tabs: ['production', 'keyframe_gen', 'gen_ref', 'av'],
-    defaultTab: 'production',
   },
 ]
 
@@ -464,14 +448,24 @@ function resolveStudioStepFromParam(raw: string | null): StudioStepKey {
   return PROJECT_STEP_TO_STUDIO_STEP[value] ?? STUDIO_STEPS[0].key
 }
 
-/** 某个步骤允许显示的页签集合（含共享页签）。 */
-function allowedTabsForStudioStep(step: StudioStepKey): InspectorTabKey[] {
-  return [...STUDIO_SHARED_TABS, ...getStudioStepMeta(step).tabs]
+const STUDIO_STEP_INDEX_OFFSET = 4
+
+/** 没选镜头时的中性状态文案（不伪造就绪度） */
+/** 状态色调 → antd Tag 颜色（唯一映射，列表与工作区头部共用口径） */
+function statusToneColor(tone: ShotStatusText['tone']): string {
+  return { default: 'default', gold: 'gold', blue: 'processing', green: 'success', red: 'error' }[tone]
 }
 
-const STUDIO_STEP_INDEX_OFFSET = 4 // 工作室三步 = 项目第 4/5/6 步
+const NOT_SELECTED_STATUS: ShotStatusText = {
+  key: 'not_ready',
+  label: '未选择分镜',
+  nextAction: '先在左侧选择一条分镜',
+  tone: 'default',
+  canGenerate: false,
+  canExport: false,
+} // 工作室三步 = 项目第 4/5/6 步
 
-const LAYOUT_STORAGE_KEY = 'jellyfish_chapter_studio_layout_v1'
+const LAYOUT_STORAGE_KEY = 'jellyfish_chapter_studio_layout_v2'
 type PromptFrameType = 'first' | 'key' | 'last'
 
 /**
@@ -653,10 +647,12 @@ function useLocalStoragePrefs() {
     try {
       const raw = window.localStorage.getItem(LAYOUT_STORAGE_KEY)
       if (!raw) {
+        // 第三部分：左列表 / 中间本镜生产区 / 右侧缩小预览**三栏并排**，
+        // 预览默认展开（更窄），不再需要用户先点一下才看得到完整布局。
         return {
-          leftWidth: 280,
-          rightWidth: 420,
-          inspectorOpen: false,
+          leftWidth: 320,
+          rightWidth: 380,
+          inspectorOpen: true,
           inspectorMode: 'push',
           autoOpenInspector: true,
           timelineCollapsed: false,
@@ -664,18 +660,18 @@ function useLocalStoragePrefs() {
       }
       const parsed = JSON.parse(raw) as Partial<LayoutPrefs>
       return {
-        leftWidth: typeof parsed.leftWidth === 'number' ? parsed.leftWidth : 280,
-        rightWidth: typeof parsed.rightWidth === 'number' ? parsed.rightWidth : 420,
-        inspectorOpen: typeof parsed.inspectorOpen === 'boolean' ? parsed.inspectorOpen : false,
+        leftWidth: typeof parsed.leftWidth === 'number' ? parsed.leftWidth : 320,
+        rightWidth: typeof parsed.rightWidth === 'number' ? parsed.rightWidth : 380,
+        inspectorOpen: typeof parsed.inspectorOpen === 'boolean' ? parsed.inspectorOpen : true,
         inspectorMode: parsed.inspectorMode === 'overlay' ? 'overlay' : 'push',
         autoOpenInspector: typeof parsed.autoOpenInspector === 'boolean' ? parsed.autoOpenInspector : true,
         timelineCollapsed: typeof parsed.timelineCollapsed === 'boolean' ? parsed.timelineCollapsed : false,
       }
     } catch {
       return {
-        leftWidth: 280,
-        rightWidth: 420,
-        inspectorOpen: false,
+        leftWidth: 320,
+        rightWidth: 380,
+        inspectorOpen: true,
         inspectorMode: 'push',
         autoOpenInspector: true,
         timelineCollapsed: false,
@@ -726,13 +722,16 @@ const ChapterStudio: React.FC = () => {
   const [loadingShots, setLoadingShots] = useState(true)
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [prefs, setPrefs] = useLocalStoragePrefs()
-  const [generating, setGenerating] = useState(false)
+  /**
+   * 就绪数据只拉一次（外层持有）：范围交付行 + 整集交付行 + 分镜板就绪。
+   * 左侧镜头列表的状态文案、中间工作区的状态、导出范围都读这一份。
+   */
+  const [scopeRows, setScopeRows] = useState<PromptDeliveryRow[]>([])
+  const [episodeRows, setEpisodeRows] = useState<PromptDeliveryRow[]>([])
+  const [readinessRows, setReadinessRows] = useState<Array<Record<string, any>>>([])
   const [batchSkipExtractionUpdating, setBatchSkipExtractionUpdating] = useState(false)
-  const [batchVideoReadinessOpen, setBatchVideoReadinessOpen] = useState(false)
-  const [batchVideoReadinessLoading, setBatchVideoReadinessLoading] = useState(false)
-  const [batchVideoReadinessItems, setBatchVideoReadinessItems] = useState<
-    Array<{ shot: StudioShot; readiness: ShotVideoReadinessRead | null; error?: string }>
-  >([])
+  /** 单镜关键帧生成的在途状态（工作室只做单镜补漏，批量入口已移除） */
+  const [generating, setGenerating] = useState(false)
   const [saving, setSaving] = useState(false)
   const saveTimerRef = useRef<number | null>(null)
   const cameraPatchSeqRef = useRef(0)
@@ -823,6 +822,44 @@ const ChapterStudio: React.FC = () => {
     saveHiddenIds(next)
     setShots((prev) => prev.map((s) => (ids.includes(s.id) ? { ...s, hidden: next.has(s.id) } : s)))
   }
+
+  useEffect(() => {
+    let active = true
+    void (async () => {
+      if (!projectId) return
+      try {
+        const data = await previewPromptDelivery(projectId, chapterId ?? null, 'episode', selectedShotIds ?? [])
+        if (active) setScopeRows(data?.rows ?? [])
+      } catch {
+        if (active) setScopeRows([])
+      }
+    })()
+    return () => {
+      active = false
+    }
+  }, [chapterId, projectId, selectedShotIds])
+
+  useEffect(() => {
+    let active = true
+    void (async () => {
+      if (!projectId || !chapterId) return
+      try {
+        const data = await previewPromptDelivery(projectId, chapterId, 'episode')
+        if (active) setEpisodeRows(data?.rows ?? [])
+      } catch {
+        if (active) setEpisodeRows([])
+      }
+      try {
+        const readiness = await fetchBoardReadiness(chapterId, 'first')
+        if (active) setReadinessRows(readiness.rows ?? [])
+      } catch {
+        if (active) setReadinessRows([])
+      }
+    })()
+    return () => {
+      active = false
+    }
+  }, [chapterId, projectId])
 
   const loadShots = async () => {
     if (!chapterId) return
@@ -1280,147 +1317,6 @@ const ChapterStudio: React.FC = () => {
     [loadShotCandidateItems, loadShotDialogueCandidateItems, patchShotInList, selectedShotId, selectedShots],
   )
 
-  const fetchBatchVideoReadiness = useCallback(async () => {
-    if (selectedShots.length === 0) {
-      message.info('请先选择要检查的视频分镜')
-      return [] as Array<{ shot: StudioShot; readiness: ShotVideoReadinessRead | null; error?: string }>
-    }
-    return Promise.all(
-      selectedShots
-        .slice()
-        .sort((a, b) => a.index - b.index)
-        .map(async (shot) => {
-          try {
-            const res = await StudioShotsService.getShotVideoReadinessApiApiV1StudioShotsShotIdVideoReadinessGet({
-              shotId: shot.id,
-              referenceMode: 'text_only',
-            })
-            return {
-              shot,
-              readiness: (res.data ?? null) as ShotVideoReadinessRead | null,
-            }
-          } catch {
-            return {
-              shot,
-              readiness: null,
-              error: '视频准备度检查失败，请稍后重试',
-            }
-          }
-        }),
-    )
-  }, [selectedShots])
-
-  const batchInspectVideoReadiness = useCallback(async () => {
-    setBatchVideoReadinessOpen(true)
-    setBatchVideoReadinessLoading(true)
-    try {
-      const results = await fetchBatchVideoReadiness()
-      setBatchVideoReadinessItems(results)
-    } finally {
-      setBatchVideoReadinessLoading(false)
-    }
-  }, [fetchBatchVideoReadiness])
-
-  // 批量关键帧生成的进度计数（内联执行是分钟级的，必须让用户看到走到哪了）
-  const batchDoneRef = useRef(0)
-  const batchSucceededRef = useRef(0)
-  const batchFailedRef = useRef(0)
-
-  const runBatchGenerate = useCallback(
-    async (targetShotIds: string[]) => {
-      batchDoneRef.current = 0
-      batchSucceededRef.current = 0
-      batchFailedRef.current = 0
-      for (const id of targetShotIds) {
-        const framesRes = await StudioShotFrameImagesService.listShotFrameImagesApiV1StudioShotFrameImagesGet({
-          shotDetailId: id,
-          order: null,
-          isDesc: false,
-          page: 1,
-          pageSize: 100,
-        })
-        const frames = framesRes.data?.items ?? []
-        const target = frames.find((x) => x.frame_type === 'key') ?? frames[0]
-        if (!target) continue
-
-        const detailRes: any = await StudioShotDetailsService.getShotDetailApiV1StudioShotDetailsShotIdGet({ shotId: id })
-        const d = detailRes?.data as any
-        const prompt =
-          (target.frame_type === 'first'
-            ? d?.first_frame_prompt
-            : target.frame_type === 'last'
-              ? d?.last_frame_prompt
-              : d?.key_frame_prompt) ?? ''
-        if (!String(prompt || '').trim()) continue
-
-        const linked = await StudioShotsService.listShotLinkedAssetsApiV1StudioShotsShotIdLinkedAssetsGet({
-          shotId: id,
-          page: 1,
-          pageSize: 100,
-        })
-        const items = (linked.data?.items ?? []) as any[]
-        const extractFileId = (thumbnail?: string | null): string | null => {
-          const v = (thumbnail || '').trim()
-          if (!v) return null
-          if (!v.includes('/') && !v.includes(':')) return v
-          try {
-            const url = new URL(v, typeof window !== 'undefined' ? window.location.origin : 'http://localhost')
-            const m = url.pathname.match(/\/api\/v1\/studio\/files\/([^/]+)\/download\/?$/)
-            if (m?.[1]) return decodeURIComponent(m[1])
-          } catch {
-            // ignore
-          }
-          return null
-        }
-        const imagesPayload = items
-          .map((x) => {
-            const fileId = typeof x?.file_id === 'string' && x.file_id.trim() ? x.file_id.trim() : extractFileId(x?.thumbnail)
-            return fileId
-              ? {
-                  type: x?.type as any,
-                  id: String(x?.id ?? ''),
-                  name: String(x?.name ?? x?.id ?? ''),
-                  file_id: fileId,
-                }
-              : null
-          })
-          .filter(Boolean)
-        const targetRatio = resolveShotVideoRatio(d)
-        if (!targetRatio) continue
-        // 同进程内联执行（队列那条路本机没有 broker/worker，只会留一条永不执行的 pending）。
-        // 单张关键帧通常要 1–2 分钟，所以逐镜串行 + 进度提示，并在每次成功后刷新该镜的帧图。
-        try {
-          const result = await submitFrameImage({
-            shot_id: id,
-            frame_type: target.frame_type as 'first' | 'key' | 'last',
-            prompt: String(prompt),
-            images: (imagesPayload as Array<{ file_id?: string }>).map((x) => String(x?.file_id ?? '')).filter(Boolean),
-            target_ratio: targetRatio,
-            resolution_profile: keyframeResolutionProfile,
-            model_id: keyframeImageModelId || null,
-          })
-          if (result.status === 'succeeded' && result.file_id) {
-            batchSucceededRef.current += 1
-          } else if (!result.dry_run) {
-            batchFailedRef.current += 1
-          }
-          batchDoneRef.current += 1
-          message.info(`关键帧批量生成进度：${batchDoneRef.current}/${targetShotIds.length}（成功 ${batchSucceededRef.current}，失败 ${batchFailedRef.current}）`)
-        } catch (error) {
-          batchFailedRef.current += 1
-          batchDoneRef.current += 1
-          message.warning(`镜头 ${id} 关键帧生成失败：${error instanceof Error ? error.message : String(error)}`)
-        }
-      }
-      if (selectedShot?.id && targetShotIds.includes(selectedShot.id)) {
-        // 立刻把该镜头的帧图列表刷新到最新（结果已经写进 shot_frame_images.file_id）
-        await refreshShotFrameImages()
-      }
-      message.info(`批量关键帧生成结束：成功 ${batchSucceededRef.current}，失败 ${batchFailedRef.current}`)
-    },
-    [keyframeImageModelId, keyframeResolutionProfile, refreshShotFrameImages, resolveShotVideoRatio, selectedShot?.id],
-  )
-
   const updatePromptProps = async (propIds: string[]) => {
     if (!selectedShotId || !projectId) return
     const next = Array.from(new Set(propIds.map((x) => x.trim()).filter(Boolean)))
@@ -1527,6 +1423,8 @@ const ChapterStudio: React.FC = () => {
 
   const generateFrameImageTask = async () => {
     if (!selectedShotId) return
+    // 在途闸门：Ctrl/Cmd+Enter 连按不该发两次请求（单镜补漏，一次一张）
+    if (generating) return
     const target =
       (frameTab === 'head' && frameImages.find((x) => x.frame_type === 'first')) ||
       (frameTab === 'tail' && frameImages.find((x) => x.frame_type === 'last')) ||
@@ -1676,7 +1574,7 @@ const ChapterStudio: React.FC = () => {
     [currentFrameFileId],
   )
 
-  // 选中分镜后若开启自动展开属性面板：默认展开（尤其是未就绪分镜）
+  // 选中分镜后若开启「自动展开画面预览」：默认展开（尤其是未就绪分镜）
   useEffect(() => {
     if (!selectedShot) return
     if (!prefs.autoOpenInspector) return
@@ -1902,13 +1800,6 @@ const ChapterStudio: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [selectedShotId, selectedShotIds.length, shots, setPrefs])
 
-  const statusTag = (status: ShotStatus | undefined) => {
-    const s = status ?? 'pending'
-    const map = { pending: 'default', generating: 'processing', ready: 'success' } as const
-    const text = { pending: '待确认', generating: '生成中', ready: '已就绪' } as const
-    return <Tag color={map[s]}>{text[s]}</Tag>
-  }
-
   const statusDotClass = (status: ShotStatus | undefined) => {
     if (status === 'generating') return 'cs-generating'
     if (status === 'ready') return 'cs-ready'
@@ -1940,28 +1831,81 @@ const ChapterStudio: React.FC = () => {
     [getShotReadinessFlags],
   )
 
-  const getShotPrimaryHint = useCallback(
-    (shot: StudioShot) => {
-      const flags = getShotReadinessFlags(shot)
-      if (flags.hasProblem) return '存在待处理问题'
-      if (flags.isGenerating) {
-        const runtime = shotRuntimeMap[shot.id]
-        return `镜头相关任务进行中（${runtime?.active_task_count ?? 1}）`
-      }
-      if (flags.isPendingConfirm) {
-        return shot.skip_extraction
-          ? '已标记无需提取，等待系统完成流程状态同步'
-          : '请先完成信息提取确认'
-      }
-      return '镜头已具备视频生成前置条件'
-    },
-    [getShotReadinessFlags, shotRuntimeMap],
-  )
-
   const chapterTitle = useMemo(() => {
     if (!chapter) return '章节生成工作台'
     return `第${chapter.index}章 · ${chapter.title.replace(/^第\d+[集章：:\s]*/g, '').trim() || chapter.title}`
   }, [chapter])
+
+  /**
+   * 每镜就绪（同一份判定：`evaluateShotReadiness`），供状态文案使用。
+   * 这里只做「取数 + 调用同一函数」，不重写任何生成/导出口径。
+   */
+  const shotReadinessById = useMemo(() => {
+    const boardById = new Map(readinessRows.map((item) => [String(item.shot_id), item]))
+    const deliveryById = new Map(episodeRows.map((row) => [String(row.shot_id), row]))
+    const map = new Map<string, ShotReadiness>()
+    for (const shot of shots) {
+      const boardRow = boardById.get(shot.id) as
+        | { required_frame_types?: string[]; usable_frame_types?: string[]; unusable_frame_types?: string[] }
+        | undefined
+      const required = boardRow?.required_frame_types ?? []
+      const usable = new Set(boardRow?.usable_frame_types ?? [])
+      const row =
+        deliveryById.get(shot.id) ??
+        ({
+          shot_id: shot.id,
+          shot_code: String(shot.index),
+          shot_title: shot.title,
+          video_prompt: '',
+          video_prompt_source: '',
+          exportable: false,
+          bound_files: [],
+        } as PromptDeliveryRowLike)
+      map.set(
+        shot.id,
+        evaluateShotReadiness({
+          row,
+          requiredFrameTypes: required,
+          usableFrameTypes: Array.from(usable),
+          unusableFrameTypes: boardRow?.unusable_frame_types ?? [],
+          planReady: true,
+        }),
+      )
+    }
+    return map
+  }, [episodeRows, readinessRows, shots])
+
+  /** 每镜的业务状态文案（左侧列表用）：待确认资产候选 / 待保存视频提示词 / 待绑定素材 / 缺少首帧… */
+  const shotStatusById = useMemo(() => {
+    const boardById = new Map(readinessRows.map((item) => [String(item.shot_id), item]))
+    const map = new Map<string, ShotStatusText>()
+    for (const shot of shots) {
+      const boardRow = boardById.get(shot.id) as
+        | { required_frame_types?: string[]; usable_frame_types?: string[]; unusable_frame_types?: string[] }
+        | undefined
+      const required = boardRow?.required_frame_types ?? []
+      const usable = new Set(boardRow?.usable_frame_types ?? [])
+      const readiness = shotReadinessById.get(shot.id)
+      if (!readiness) continue
+      map.set(
+        shot.id,
+        resolveShotStatus({
+          readiness,
+          missingFrames: required.filter((frame: string) => !usable.has(frame)),
+          blockedFrames: boardRow?.unusable_frame_types ?? [],
+          extractionPending: shot.status === 'pending' && !shot.skip_extraction,
+          generating: Boolean(shotRuntimeMap[shot.id]?.has_active_tasks),
+          generated: Boolean(shot.generated_video_file_id),
+        }),
+      )
+    }
+    return map
+  }, [readinessRows, shotReadinessById, shotRuntimeMap, shots])
+
+  /** 还没选镜头时的中性状态（工作区头部用；不谎称任何就绪度） */
+  const statusForSelectedShot: ShotStatusText = selectedShotId
+    ? shotStatusById.get(selectedShotId) ?? NOT_SELECTED_STATUS
+    : NOT_SELECTED_STATUS
 
   const filteredShots = useMemo(() => {
     const list = shots.slice().sort((a, b) => a.index - b.index)
@@ -2242,73 +2186,11 @@ const ChapterStudio: React.FC = () => {
       disabled: batchSkipExtractionUpdating,
       onClick: () => batchUpdateSkipExtraction(false),
     },
-    { type: 'divider' as const },
-    {
-      key: 'generate',
-      icon: <ThunderboltOutlined />,
-      label: '批量生成',
-      onClick: () => {
-        if (selectedShotIds.length === 0) return
-        Modal.confirm({
-          title: `批量生成 ${selectedShotIds.length} 个分镜？`,
-          okText: '开始',
-          cancelText: '取消',
-          onOk: async () => {
-            setGenerating(true)
-            try {
-              const readinessResults = await fetchBatchVideoReadiness()
-              const readyShots = readinessResults.filter((item) => item.readiness?.ready)
-              const blockedShots = readinessResults.filter((item) => !item.readiness?.ready)
-
-              if (blockedShots.length > 0) {
-                setBatchVideoReadinessItems(readinessResults)
-                setBatchVideoReadinessOpen(true)
-              }
-
-              if (readyShots.length === 0) {
-                message.warning('当前选中的分镜都未通过视频准备度检查，已为你展开检查结果')
-                return
-              }
-
-              if (blockedShots.length > 0) {
-                message.warning(`其中 ${blockedShots.length} 条未通过检查，已自动跳过，仅继续生成 ${readyShots.length} 条`)
-              }
-
-              await runBatchGenerate(readyShots.map((item) => item.shot.id))
-              message.success('已创建批量生成任务')
-            } catch {
-              message.error('批量生成失败')
-            } finally {
-              setGenerating(false)
-            }
-          },
-        })
-      },
-    },
   ]
-
-  const batchMaintenanceMenuItems = batchMenuItems.filter((item) => item.key !== 'generate')
+  /** 多选时只留维护动作（合并/隐藏/删除/提取维护）：工作室不做批量生成与批量导入。 */
+  const batchMaintenanceMenuItems = batchMenuItems
 
   const toolbarSettingsItems = [
-    {
-      key: 'mode',
-      icon: <AppstoreOutlined />,
-      label: (
-        <div className="flex items-center justify-between gap-3">
-          <span>属性面板模式</span>
-          <Select
-            size="small"
-            value={prefs.inspectorMode}
-            style={{ width: 120 }}
-            onChange={(v) => setPrefs((p) => ({ ...p, inspectorMode: v }))}
-            options={[
-              { value: 'push', label: '推挤模式' },
-              { value: 'overlay', label: '覆盖模式' },
-            ]}
-          />
-        </div>
-      ),
-    },
     {
       key: 'autoOpen',
       icon: <SettingOutlined />,
@@ -2387,7 +2269,7 @@ const ChapterStudio: React.FC = () => {
               <Button size="small" icon={<SettingOutlined />} />
             </Tooltip>
           </Dropdown>
-          <Tooltip title={prefs.inspectorOpen ? '收起属性面板（P / Ctrl/Cmd+I）' : '展开属性面板（P / Ctrl/Cmd+I）'}>
+          <Tooltip title={prefs.inspectorOpen ? '收起画面预览（P / Ctrl/Cmd+I）' : '展开画面预览（P / Ctrl/Cmd+I）'}>
             <Button
               size="small"
               icon={prefs.inspectorOpen ? <DoubleRightOutlined /> : <DoubleLeftOutlined />}
@@ -2429,7 +2311,7 @@ const ChapterStudio: React.FC = () => {
                 onChange={(v) => setFilter(v as ShotFilter)}
                 options={[
                   { label: `全部 ${shotFilterCounts.all}`, value: 'all' },
-                  { label: `待确认 ${shotFilterCounts.pendingConfirm}`, value: 'pendingConfirm' },
+                  { label: `待处理 ${shotFilterCounts.pendingConfirm}`, value: 'pendingConfirm' },
                   { label: `生成中 ${shotFilterCounts.generating}`, value: 'generating' },
                   { label: `已就绪 ${shotFilterCounts.ready}`, value: 'ready' },
                   { label: `隐藏 ${shotFilterCounts.hidden}`, value: 'hidden' },
@@ -2442,11 +2324,7 @@ const ChapterStudio: React.FC = () => {
           {multiToolbarVisible && (
             <ChapterStudioBatchToolbar
               selectedCount={selectedShotIds.length}
-              batchVideoReadinessLoading={batchVideoReadinessLoading}
-              generating={generating}
               maintenanceMenuItems={batchMaintenanceMenuItems}
-              onBatchInspectVideoReadiness={() => void batchInspectVideoReadiness()}
-              onBatchGenerate={() => batchMenuItems.find((item) => item.key === 'generate')?.onClick?.()}
             />
           )}
 
@@ -2468,9 +2346,10 @@ const ChapterStudio: React.FC = () => {
                   const isSelected = selectedShotIds.includes(s.id)
                   const isDragging = draggingShotId === s.id
                   const isDragOver = dragOverShotId === s.id && draggingShotId && draggingShotId !== s.id
-                  const readiness = getShotReadinessFlags(s)
                   const progressCount = getShotProgressCount(s)
-                  const primaryHint = getShotPrimaryHint(s)
+                  // 业务状态文案（唯一来源：shotStatusText）：直接说明下一步要做什么
+                  const businessStatus = shotStatusById.get(s.id) ?? NOT_SELECTED_STATUS
+                  const primaryHint = `${businessStatus.nextAction}${businessStatus.canExport ? ' · 可导出' : ''}`
                   return (
                     <div
                       key={s.id}
@@ -2598,20 +2477,21 @@ const ChapterStudio: React.FC = () => {
                                 {primaryHint}
                               </div>
                               <div className="mt-1 flex flex-wrap gap-1 items-center">
-                                {readiness.isReady ? (
-                                  <Tag className="m-0" color="success">已就绪</Tag>
-                                ) : readiness.isGenerating ? (
-                                  <Tag className="m-0" color="processing">生成中</Tag>
-                                ) : (
-                                  <Tag className="m-0" color="gold">待确认</Tag>
-                                )}
+                                <Tag className="m-0" color={statusToneColor(businessStatus.tone)}>
+                                  {businessStatus.label}
+                                </Tag>
+                                <Tag className="m-0" color={businessStatus.canGenerate ? 'green' : 'default'}>
+                                  {businessStatus.canGenerate ? '可生成' : '不可生成'}
+                                </Tag>
+                                <Tag className="m-0" color={businessStatus.canExport ? 'green' : 'default'}>
+                                  {businessStatus.canExport ? '可导出' : '不可导出'}
+                                </Tag>
                                 {s.skip_extraction && (
                                   <Tag className="m-0" color="cyan">
                                     无需提取
                                   </Tag>
                                 )}
                                 {s.hasMusic && <Tag icon={<SoundOutlined />} className="m-0" color="default">音乐</Tag>}
-                                {statusTag(s.status)}
                                 {s.hidden && <Tag icon={<EyeInvisibleOutlined />} className="m-0">隐藏</Tag>}
                                 {s.hasProblem && <Tag color="error" className="m-0">有问题</Tag>}
                               </div>
@@ -2642,8 +2522,79 @@ const ChapterStudio: React.FC = () => {
           title="拖拽调整左侧宽度"
         />
 
-        {/* 中央：主预览区 */}
-        <Content className="cs-main min-w-0 min-h-0 flex flex-col" style={{ padding: 16, position: 'relative', overflow: 'hidden' }}>
+        {/* 中间：本镜生产的连续工作区（主操作区，占主要空间；左侧分镜列表紧邻它） */}
+        <Content className="cs-main min-w-0 min-h-0 flex flex-col" style={{ padding: 12, position: 'relative', overflow: 'hidden' }}>
+              <Inspector
+                projectId={projectId}
+                chapterId={chapterId}
+                projectVisualStyle={projectVisualStyle}
+                projectStyle={projectStyle}
+                projectDefaultVideoRatio={projectDefaultVideoRatio}
+                capabilityDefaultVideoRatio={capabilityDefaultVideoRatio}
+                videoRatioOptions={videoRatioOptions}
+                imageGenerationOptions={imageGenerationOptions}
+                keyframeResolutionProfile={keyframeResolutionProfile}
+                onChangeKeyframeResolutionProfile={setKeyframeResolutionProfile}
+                loadingDetail={loadingDetail}
+                shotDetail={shotDetail}
+                dialogLines={dialogLines}
+                frameImages={frameImages}
+                sceneLinks={sceneLinks}
+                propLinks={propLinks}
+                costumeLinks={costumeLinks}
+                shotCharacterLinks={shotCharacterLinks}
+                shotCandidateItems={shotCandidateItems}
+                shotDialogueCandidateItems={shotDialogueCandidateItems}
+                cameraUpdating={cameraUpdating}
+                promptAssetsUpdating={promptAssetsUpdating}
+                onDeleteDialogLine={deleteDialogLine}
+                onUpdatePromptScene={updatePromptScene}
+                onUpdatePromptActors={updatePromptActors}
+                onUpdatePromptProps={updatePromptProps}
+                onUpdatePromptCostumes={updatePromptCostumes}
+                selectedShot={selectedShot}
+                onUpdateShotTitle={updateShotTitleInOps}
+                onUpdateShotScriptExcerpt={updateShotScriptExcerptInOps}
+                onDeleteShotOps={deleteShotFromOps}
+                onPatchShotDetail={patchShotDetailLocal}
+                onPatchShotDetailImmediate={patchShotDetailImmediate}
+                onSelectPreviewVideo={setPreviewVideoFileId}
+                onRefreshShotFrameImages={refreshShotFrameImages}
+                keyframeImageModelId={keyframeImageModelId}
+                onChangeKeyframeImageModelId={setKeyframeImageModelId}
+                selectedShotIds={selectedShotIds}
+                onAutoLocateShot={(shotId) => {
+                  setSelectedShotId(shotId)
+                  setSelectedShotIds([shotId])
+                }}
+                status={statusForSelectedShot}
+                onShotDataChanged={() => void loadShots()}
+                scopeRows={scopeRows}
+                episodeRows={episodeRows}
+                readinessRows={readinessRows}
+                onClose={() => setPrefs((p) => ({ ...p, inspectorOpen: false }))}
+              />
+        </Content>
+
+        {/* 右侧：画面预览（缩小到能看清即可，不再占据页面主体） */}
+        {prefs.inspectorOpen && (
+          <div
+            role="separator"
+            className="cs-sep cs-sep-strong h-full"
+            style={{ width: 10, cursor: 'col-resize', background: 'transparent', flexShrink: 0 }}
+            onPointerDown={(e) => beginResize('right', e)}
+            title="拖拽调整预览宽度"
+          />
+        )}
+        <div
+          className="cs-right"
+          style={{
+            width: prefs.inspectorOpen ? prefs.rightWidth : 0,
+            flex: `0 0 ${prefs.inspectorOpen ? prefs.rightWidth : 0}px`,
+            overflow: 'hidden',
+          }}
+        >
+          <div className="h-full min-h-0 overflow-auto p-3">
           <Card
             title={
               <div className="flex items-center gap-3 min-w-0">
@@ -2907,260 +2858,17 @@ const ChapterStudio: React.FC = () => {
               </div>
             )}
           </Card>
-        </Content>
-
-        {/* 右侧：属性面板（推挤 / 覆盖） */}
-        {prefs.inspectorMode === 'push' ? (
-          <>
-            {/* 右侧拖拽条（推挤模式） */}
-            {prefs.inspectorOpen && (
-              <div
-                role="separator"
-                className="cs-sep cs-sep-strong h-full"
-                style={{
-                  width: 10,
-                  cursor: 'col-resize',
-                  background: 'transparent',
-                  flexShrink: 0,
-                }}
-                onPointerDown={(e) => beginResize('right', e)}
-                title="拖拽调整属性面板宽度"
-              />
-            )}
-            <Sider
-              width={prefs.inspectorOpen ? prefs.rightWidth : 0}
-              collapsedWidth={0}
-              collapsed={!prefs.inspectorOpen}
-              className="cs-right"
-              style={{
-                overflow: 'hidden',
-              }}
-            >
-              <Inspector
-                projectId={projectId}
-                chapterId={chapterId}
-                projectVisualStyle={projectVisualStyle}
-                projectStyle={projectStyle}
-                projectDefaultVideoRatio={projectDefaultVideoRatio}
-                capabilityDefaultVideoRatio={capabilityDefaultVideoRatio}
-                videoRatioOptions={videoRatioOptions}
-                imageGenerationOptions={imageGenerationOptions}
-                keyframeResolutionProfile={keyframeResolutionProfile}
-                onChangeKeyframeResolutionProfile={setKeyframeResolutionProfile}
-                loadingDetail={loadingDetail}
-                shotDetail={shotDetail}
-                dialogLines={dialogLines}
-                frameImages={frameImages}
-                sceneLinks={sceneLinks}
-                propLinks={propLinks}
-                costumeLinks={costumeLinks}
-                shotCharacterLinks={shotCharacterLinks}
-                shotCandidateItems={shotCandidateItems}
-                shotDialogueCandidateItems={shotDialogueCandidateItems}
-                cameraUpdating={cameraUpdating}
-                promptAssetsUpdating={promptAssetsUpdating}
-                onDeleteDialogLine={deleteDialogLine}
-                onUpdatePromptScene={updatePromptScene}
-                onUpdatePromptActors={updatePromptActors}
-                onUpdatePromptProps={updatePromptProps}
-                onUpdatePromptCostumes={updatePromptCostumes}
-                selectedShot={selectedShot}
-                onUpdateShotTitle={updateShotTitleInOps}
-                onUpdateShotScriptExcerpt={updateShotScriptExcerptInOps}
-                onDeleteShotOps={deleteShotFromOps}
-                onPatchShotDetail={patchShotDetailLocal}
-                onPatchShotDetailImmediate={patchShotDetailImmediate}
-                onSelectPreviewVideo={setPreviewVideoFileId}
-                onRefreshShotFrameImages={refreshShotFrameImages}
-                keyframeImageModelId={keyframeImageModelId}
-                onChangeKeyframeImageModelId={setKeyframeImageModelId}
-                selectedShotIds={selectedShotIds}
-                onAutoLocateShot={(shotId) => {
-                  setSelectedShotId(shotId)
-                  setSelectedShotIds([shotId])
-                }}
-                onClose={() => setPrefs((p) => ({ ...p, inspectorOpen: false }))}
-              />
-            </Sider>
-
-            {!prefs.inspectorOpen && (
-              <div
-                className="cs-right-strip"
-                onClick={() => setPrefs((p) => ({ ...p, inspectorOpen: true }))}
-                title="展开属性面板（P / Ctrl/Cmd+I）"
-              >
-                <span>属性</span>
-              </div>
-            )}
-          </>
-        ) : (
-          <>
-            {/* 覆盖模式：右侧抽屉覆盖中央 */}
-            {prefs.inspectorOpen && (
-              <div
-                className="absolute top-0 right-0 h-full"
-                style={{
-                  width: prefs.rightWidth,
-                  background: '#f9fafc',
-                  borderLeft: '2px solid #cbd5e1',
-                  zIndex: 20,
-                  boxShadow: '-4px 0 12px rgba(0,0,0,0.06)',
-                  display: 'flex',
-                  flexDirection: 'row',
-                }}
-              >
-                <div
-                  role="separator"
-                  className="cs-sep cs-sep-strong"
-                  style={{ width: 10, flexShrink: 0 }}
-                  onPointerDown={(e) => beginResize('right', e)}
-                  title="拖拽调整覆盖宽度"
-                />
-                <div className="flex-1 min-w-0 overflow-hidden">
-                  <Inspector
-                    projectId={projectId}
-                    chapterId={chapterId}
-                    projectVisualStyle={projectVisualStyle}
-                    projectStyle={projectStyle}
-                    projectDefaultVideoRatio={projectDefaultVideoRatio}
-                    capabilityDefaultVideoRatio={capabilityDefaultVideoRatio}
-                    videoRatioOptions={videoRatioOptions}
-                    imageGenerationOptions={imageGenerationOptions}
-                    keyframeResolutionProfile={keyframeResolutionProfile}
-                    onChangeKeyframeResolutionProfile={setKeyframeResolutionProfile}
-                    loadingDetail={loadingDetail}
-                    shotDetail={shotDetail}
-                    dialogLines={dialogLines}
-                    frameImages={frameImages}
-                    sceneLinks={sceneLinks}
-                    propLinks={propLinks}
-                    costumeLinks={costumeLinks}
-                    shotCharacterLinks={shotCharacterLinks}
-                    shotCandidateItems={shotCandidateItems}
-                    shotDialogueCandidateItems={shotDialogueCandidateItems}
-                    cameraUpdating={cameraUpdating}
-                    promptAssetsUpdating={promptAssetsUpdating}
-                    onDeleteDialogLine={deleteDialogLine}
-                    onUpdatePromptScene={updatePromptScene}
-                    onUpdatePromptActors={updatePromptActors}
-                    onUpdatePromptProps={updatePromptProps}
-                    onUpdatePromptCostumes={updatePromptCostumes}
-                    selectedShot={selectedShot}
-                    onUpdateShotTitle={updateShotTitleInOps}
-                    onUpdateShotScriptExcerpt={updateShotScriptExcerptInOps}
-                    onDeleteShotOps={deleteShotFromOps}
-                    onPatchShotDetail={patchShotDetailLocal}
-                    onPatchShotDetailImmediate={patchShotDetailImmediate}
-                    onSelectPreviewVideo={setPreviewVideoFileId}
-                    onRefreshShotFrameImages={refreshShotFrameImages}
-                    keyframeImageModelId={keyframeImageModelId}
-                    onChangeKeyframeImageModelId={setKeyframeImageModelId}
-                    selectedShotIds={selectedShotIds}
-                onAutoLocateShot={(shotId) => {
-                  setSelectedShotId(shotId)
-                  setSelectedShotIds([shotId])
-                }}
-                    onClose={() => setPrefs((p) => ({ ...p, inspectorOpen: false }))}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* 覆盖模式下，右侧边缘常驻开关 */}
-            <Tooltip title={prefs.inspectorOpen ? '收起属性面板' : '展开属性面板'}>
-              <Button
-                size="small"
-                className="absolute top-1/2 -translate-y-1/2"
-                style={{ right: 4, zIndex: 30 }}
-                icon={prefs.inspectorOpen ? <DoubleRightOutlined /> : <DoubleLeftOutlined />}
-                onClick={() => setPrefs((p) => ({ ...p, inspectorOpen: !p.inspectorOpen }))}
-              />
-            </Tooltip>
-          </>
+          </div>
+        </div>
+        {!prefs.inspectorOpen && (
+          <div
+            className="cs-right-strip"
+            onClick={() => setPrefs((p) => ({ ...p, inspectorOpen: true }))}
+            title="展开画面预览（P / Ctrl/Cmd+I）"
+          >
+            <span>预览</span>
+          </div>
         )}
-
-        <Modal
-          title={`批量视频准备度（${selectedShots.length} 条）`}
-          open={batchVideoReadinessOpen}
-          onCancel={() => {
-            if (batchVideoReadinessLoading) return
-            setBatchVideoReadinessOpen(false)
-          }}
-          footer={[
-            <Button key="close" onClick={() => setBatchVideoReadinessOpen(false)} disabled={batchVideoReadinessLoading}>
-              关闭
-            </Button>,
-            <Button
-              key="refresh"
-              type="primary"
-              icon={<VideoCameraOutlined />}
-              loading={batchVideoReadinessLoading}
-              onClick={() => void batchInspectVideoReadiness()}
-            >
-              重新检查
-            </Button>,
-          ]}
-          width={880}
-          destroyOnClose={false}
-        >
-          {batchVideoReadinessLoading ? (
-            <div className="py-10 text-center">
-              <Spin />
-            </div>
-          ) : batchVideoReadinessItems.length === 0 ? (
-            <div className="text-sm text-gray-500">暂无批量视频准备度结果</div>
-          ) : (
-            <div className="space-y-3 max-h-[65vh] overflow-y-auto pr-1">
-              <div className="text-xs text-gray-500">
-                当前按 <Tag className="!mx-1">text_only</Tag> 参考模式检查这批分镜是否具备视频生成条件。
-              </div>
-              {batchVideoReadinessItems.map(({ shot, readiness, error }) => {
-                const failedChecks = (readiness?.checks ?? []).filter((item) => !item.ok)
-                return (
-                  <div key={shot.id} className="rounded-lg border border-solid border-gray-200 bg-white px-4 py-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium truncate">
-                          {String(shot.index).padStart(2, '0')} · {shot.title}
-                        </div>
-                        <div className="text-xs text-gray-500 mt-1">
-                          {error
-                            ? error
-                            : readiness?.ready
-                              ? '当前镜头已满足视频生成条件。'
-                              : `当前镜头还有 ${failedChecks.length} 项待补齐。`}
-                        </div>
-                      </div>
-                      <Tag color={error ? 'red' : readiness?.ready ? 'green' : 'gold'}>
-                        {error ? '检查失败' : readiness?.ready ? '可生成' : '待补齐'}
-                      </Tag>
-                    </div>
-                    {!error ? (
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {(readiness?.checks ?? []).map((check) => (
-                          <Tooltip key={check.key} title={check.message}>
-                            <Tag color={check.ok ? 'green' : 'default'}>
-                              {check.ok ? '通过' : '未通过'} · {check.key}
-                            </Tag>
-                          </Tooltip>
-                        ))}
-                      </div>
-                    ) : null}
-                    {!error && failedChecks.length > 0 ? (
-                      <div className="mt-3 space-y-1">
-                        {failedChecks.map((check) => (
-                          <div key={check.key} className="text-xs text-gray-600">
-                            • {check.message}
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                )
-              })}
-            </div>
-          )}
-        </Modal>
       </Layout>
     </div>
   )
@@ -3213,6 +2921,16 @@ function Inspector(props: {
   selectedShotIds?: string[]
   /** 进入工作台时自动定位到"当前步骤下第一个未完成镜头"（由外层执行选择） */
   onAutoLocateShot?: (shotId: string) => void
+  /** 当前镜头的业务状态文案（由外层用同一份就绪判定算好，工作区与左侧列表共用） */
+  status: ShotStatusText
+  /** 生成成功后回读列表（镜头上的 generated_video_file_id 要重新拉才显示） */
+  onShotDataChanged?: () => Promise<void> | void
+  /** 范围（勾选优先，否则整集）交付行：只拉一次，左侧列表与工作区共用 */
+  scopeRows: PromptDeliveryRow[]
+  /** 整集交付行：用于「第一个未完成镜头」定位与导出范围 */
+  episodeRows: PromptDeliveryRow[]
+  /** 集级真实就绪数据（每镜提示词/绑定/参考帧/声音） */
+  readinessRows: Array<Record<string, any>>
 }) {
   const {
     projectId,
@@ -3255,6 +2973,11 @@ function Inspector(props: {
     onRefreshShotFrameImages,
     selectedShotIds,
     onAutoLocateShot,
+    status,
+    onShotDataChanged,
+    scopeRows,
+    episodeRows,
+    readinessRows,
   } = props
   const navigate = useNavigate()
   const currentChapterId = chapterId ?? null
@@ -3264,37 +2987,23 @@ function Inspector(props: {
   const [useBoneDepth, setUseBoneDepth] = useState(false)
   const [audioMode, setAudioMode] = useState<'none' | 'prompt' | 'upload'>('none')
   const [hideShot, setHideShot] = useState(false)
+  /** 「维护设置」移出日常页签后，从这里进入（高级设置） */
+  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false)
   // 工作室三步（视频提示词 / 关联绑定 / 生成与交付）。初始步骤来自 URL 的
   // `?studio=`（项目工作台第 4-6 步会带上），因此从项目列表进来直接落在对应步骤，
   // 刷新后也停在同一步；没有参数时落在第一步。
   const [studioStepKey, setStudioStepKey] = useState<StudioStepKey>(() =>
     resolveStudioStepFromParam(new URLSearchParams(window.location.search).get(STUDIO_STEP_PARAM)),
   )
-  const [inspectorTabKey, setInspectorTabKey] = useState<InspectorTabKey>(() =>
-    getStudioStepMeta(
-      resolveStudioStepFromParam(new URLSearchParams(window.location.search).get(STUDIO_STEP_PARAM)),
-    ).defaultTab,
-  )
   /** 切步骤只改「工作室步骤」与 URL：当前分镜不动，已选镜头集合也不动。 */
   const handleStudioStepChange = (next: StudioStepKey) => {
     if (next === studioStepKey) return
     setStudioStepKey(next)
-    setInspectorTabKey((current) =>
-      allowedTabsForStudioStep(next).includes(current) ? current : getStudioStepMeta(next).defaultTab,
-    )
     // 写回 URL（replace）：刷新后仍停在这一步，也不污染浏览器返回栈。
     const params = new URLSearchParams(window.location.search)
     params.set(STUDIO_STEP_PARAM, next)
     navigate({ pathname: window.location.pathname, search: params.toString() }, { replace: true })
   }
-
-  // 当前页签不属于本步骤时自动归位（覆盖页签被条件隐藏等情况）。
-  useEffect(() => {
-    // 只在"当前页签不属于本步骤"时归位；切换镜头不会改变 studioStepKey，
-    // 因此用户停在哪一页签就停在哪一页签（本轮修复：以前切镜头会被重置）。
-    if (allowedTabsForStudioStep(studioStepKey).includes(inspectorTabKey)) return
-    setInspectorTabKey(getStudioStepMeta(studioStepKey).defaultTab)
-  }, [inspectorTabKey, studioStepKey])
 
   const [sceneNameMap, setSceneNameMap] = useState<Record<string, string>>({})
   const [characterNameMap, setCharacterNameMap] = useState<Record<string, string>>({})
@@ -3340,13 +3049,10 @@ function Inspector(props: {
   const opsNoteSaveTimerRef = useRef<number | null>(null)
   const [keyframePromptPreviewOpen, setKeyframePromptPreviewOpen] = useState(false)
   const [keyframePlanPreview, setKeyframePlanPreview] = useState<FramePlanResult | null>(null)
-  // 第二部分：进入工作台只自动定位**一次**（当前步骤下第一个未完成镜头），之后尊重用户主动选择
-  const autoLocatedShotRef = useRef(false)
+  /** 已经自动定位过的步骤（每个步骤一次；切换镜头不受影响） */
+  const autoLocatedStepRef = useRef<StudioStepKey | null>(null)
   // 第二部分：导出前的范围检查（列出可导出/缺提示词/缺绑定文件），确认后再调既有 TXT 接口
   const [exportScopeOpen, setExportScopeOpen] = useState(false)
-  const [scopeRows, setScopeRows] = useState<PromptDeliveryRow[]>([])
-  /** 集级**真实**就绪数据（后端一次批量读取：每镜提示词/绑定/参考帧/声音） */
-  const [readinessRows, setReadinessRows] = useState<Array<Record<string, any>>>([])
   // 关键帧走哪条出图通道的**可选列表**（选中值由外层持有，和分辨率档位同一口径）
   const [imageModelOptions, setImageModelOptions] = useState<ImageModelOption[]>([])
 
@@ -3642,9 +3348,8 @@ function Inspector(props: {
   const showGenRefParams = false
   const showGenRefVersions = false
 
-  // 注意：这里**故意不再**"按镜头自动挑页签"。
-  // 以前每次切镜头都会 setInspectorTabKey(camera/gen_ref/ops…)，把用户停在的
-  // 「本镜生产卡」顶掉；页签只应在**步骤切换**且当前页签不属于新步骤时才归位。
+  // 注意：这里**故意不**"按镜头自动切换工作区".
+  // 连续工作区的展开项只随**步骤**变化；切换镜头时用户停在哪一块就留在哪一块。
 
   useEffect(() => {
     setHideShot(Boolean(selectedShot?.hidden))
@@ -4502,26 +4207,26 @@ function Inspector(props: {
     async (kind: 'characters' | 'scene' | 'props' | 'costumes') => {
       if (!selectedShot?.id) return
       if (kind === 'characters') {
-        setInspectorTabKey('keyframe_gen')
+        setStudioStepKey('binding')
         setLinkRoleSelectedIds([])
         setLinkRoleOpen(true)
         await loadProjectRoleOptions()
         return
       }
       if (kind === 'scene') {
-        setInspectorTabKey('keyframe_gen')
+        setStudioStepKey('binding')
         setLinkSceneOpen(true)
         await loadProjectAssetOptions('scene')
         return
       }
       if (kind === 'props') {
-        setInspectorTabKey('keyframe_gen')
+        setStudioStepKey('binding')
         setLinkPropSelectedIds([])
         setLinkPropOpen(true)
         await loadProjectAssetOptions('prop')
         return
       }
-      setInspectorTabKey('keyframe_gen')
+      setStudioStepKey('binding')
       setLinkCostumeSelectedIds([])
       setLinkCostumeOpen(true)
       await loadProjectAssetOptions('costume')
@@ -5238,47 +4943,7 @@ function Inspector(props: {
     })
   }, [readinessRows, scopeRows])
 
-  useEffect(() => {
-    let active = true
-    void (async () => {
-      if (!projectId) return
-      try {
-        const data = await previewPromptDelivery(projectId, chapterId ?? null, 'episode', selectedShotIds ?? [])
-        if (active) setScopeRows(data?.rows ?? [])
-      } catch {
-        if (active) setScopeRows([])
-      }
-    })()
-    return () => {
-      active = false
-    }
-  }, [chapterId, projectId, selectedShotIds])
-
   const scopeState = summarizeStepState(scopeReadiness.map((item) => item.stepState))
-
-  // 本集每镜的就绪输入（整集，不受勾选范围影响）——用于"第一个未完成镜头"定位
-  const [episodeRows, setEpisodeRows] = useState<PromptDeliveryRow[]>([])
-  useEffect(() => {
-    let active = true
-    void (async () => {
-      if (!projectId || !chapterId) return
-      try {
-        const data = await previewPromptDelivery(projectId, chapterId, 'episode')
-        if (active) setEpisodeRows(data?.rows ?? [])
-      } catch {
-        if (active) setEpisodeRows([])
-      }
-      try {
-        const readiness = await fetchBoardReadiness(chapterId, 'first')
-        if (active) setReadinessRows(readiness.rows ?? [])
-      } catch {
-        if (active) setReadinessRows([])
-      }
-    })()
-    return () => {
-      active = false
-    }
-  }, [chapterId, projectId])
 
   /** 各步骤对该镜的要求（判定口径只有这一份，见 shotReadiness.ts） */
   /** 同一份就绪数据 → 按当前步骤取状态（口径只此一处） */
@@ -5291,9 +4956,17 @@ function Inspector(props: {
     [studioStepKey],
   )
 
-  /** 进入工作台/切换步骤时，自动落到**该步骤下第一个未完成镜头**（只做一次，之后尊重用户选择） */
+  /**
+   * 进入工作室 / 切换步骤时，自动落到**该步骤下第一个未完成镜头**。
+   *
+   * 每一步只自动定位一次：用户在同一步里主动点选其它镜头后不再抢焦点；
+   * 切到另一步会重新定位到那一步的第一个未完成镜头（第三部分要求）。
+   */
   useEffect(() => {
-    if (autoLocatedShotRef.current || !episodeRows.length) return
+    // 必须**两份数据都到位**才判定：只有交付行、还没有集级就绪（含参考帧）时，
+    // 缺帧的镜头会被误算成"满足"，自动定位就停在第一镜上（真实缺陷：生成步骤选错镜头）。
+    if (autoLocatedStepRef.current === studioStepKey) return
+    if (!episodeRows.length || !readinessRows.length) return
     const byId = new Map(readinessRows.map((item) => [String(item.shot_id), item]))
     const states = episodeRows.map((row) => {
       const real = byId.get(row.shot_id)
@@ -5309,11 +4982,11 @@ function Inspector(props: {
       })
     })
     const firstIncomplete = states.find((state) => !shotSatisfiesStep(state))
-    autoLocatedShotRef.current = true
+    autoLocatedStepRef.current = studioStepKey
     if (firstIncomplete && firstIncomplete.shotId !== selectedShot?.id) {
       onAutoLocateShot?.(firstIncomplete.shotId)
     }
-  }, [episodeRows, onAutoLocateShot, readinessRows, selectedShot?.id, shotSatisfiesStep])
+  }, [episodeRows, onAutoLocateShot, readinessRows, selectedShot?.id, shotSatisfiesStep, studioStepKey])
 
   /** 导出范围：多选时按选中，否则按**当前集**（一镜的选择不该被当成"导出范围只有一镜"） */
   const exportReadiness: ShotReadiness[] = useMemo(() => {
@@ -5334,6 +5007,25 @@ function Inspector(props: {
     })
   }, [episodeRows, readinessRows, scopeReadiness, (selectedShotIds ?? []).length])
 
+
+  /**
+   * 本镜生成计划与提交（**唯一一份**）：④本次实际使用的帧 / ⑤还缺什么 / ⑥生成视频 / ⑦导出 共用。
+   * 预检、供应商帧可用性、DRY_RUN 守卫都在 `useShotRequestPlan` 里，页面不再各判一次。
+   */
+  const requestPlan = useShotRequestPlan({
+    projectId,
+    chapterId,
+    shotId: selectedShot?.id ?? '',
+    savedPrompt: String((shotDetail as unknown as { video_prompt?: string } | null)?.video_prompt ?? ''),
+    onGenerated: async () => {
+      if (!selectedShot?.id) return
+      const refreshed = await StudioShotDetailsService.getShotDetailApiV1StudioShotDetailsShotIdGet({
+        shotId: selectedShot.id,
+      })
+      if (refreshed.data) onPatchShotDetail(refreshed.data)
+      await onShotDataChanged?.()
+    },
+  })
 
   const confirmGenerateKeyframeWithPrompt = async () => {
     if (!selectedShot?.id) {
@@ -5569,12 +5261,8 @@ function Inspector(props: {
       />
 
       <div className="cs-inspector flex-1 min-h-0 overflow-auto">
-        <Tabs
-          tabPosition="left"
-          activeKey={inspectorTabKey}
-          onChange={(activeKey) => setInspectorTabKey(activeKey as InspectorTabKey)}
-          items={(() => {
-            const items = [
+        {(() => {
+          const items = [
               {
               key: 'ops',
               label: '维护设置',
@@ -5702,7 +5390,7 @@ function Inspector(props: {
                         />
                       ) : null}
 
-                      {/* 大模型批量生成（单项 / 选中项 / 只补缺失 / 可停止与重试） */}
+                      {/* 大模型补漏：**只针对当前镜头**（整集入口在项目第 3 步） */}
                       <div className="rounded-lg border border-slate-200 bg-white p-3">
                         <VideoPromptLlmPanel
                           projectId={projectId}
@@ -5845,7 +5533,7 @@ function Inspector(props: {
               ),
             },
               {
-              key: 'prompt_image',
+              key: 'readiness_diag',
               label: '确认诊断',
               children: (
                 <div>
@@ -5863,6 +5551,14 @@ function Inspector(props: {
                     getReadinessExistenceLabel={getReadinessExistenceLabel}
                   />
 
+                </div>
+              ),
+            },
+              {
+              key: 'atmosphere',
+              label: '氛围描述',
+              children: (
+                <div>
                   <div className="cs-group">
                     <div className="cs-group-title">
                       <PictureOutlined /> 氛围描述
@@ -6028,31 +5724,8 @@ function Inspector(props: {
               ),
             },
               {
-              key: 'production',
-              label: '本镜生产卡',
-              children: selectedShot?.id ? (
-                <ShotProductionCard
-                  projectId={projectId}
-                  chapterId={chapterId}
-                  shotId={selectedShot.id}
-                  savedPrompt={String((shotDetail as unknown as { video_prompt?: string } | null)?.video_prompt ?? '')}
-                  savedPromptSource={String((shotDetail as unknown as { video_prompt_source?: string } | null)?.video_prompt_source ?? '')}
-                  onSavedPrompt={async () => {
-                    const refreshed = await StudioShotDetailsService.getShotDetailApiV1StudioShotDetailsShotIdGet({
-                      shotId: selectedShot.id,
-                    })
-                    if (refreshed.data) onPatchShotDetail(refreshed.data)
-                  }}
-                  onGenerateDraft={() => setInspectorTabKey('video_prompt_text')}
-                  onOpenExport={() => setExportScopeOpen(true)}
-                />
-              ) : (
-                <div className="text-xs text-gray-500">请先在左侧选择一条分镜。</div>
-              ),
-            },
-              {
-              key: 'keyframe_gen',
-              label: '关键帧与参考图',
+              key: 'kf_specs',
+              label: '关键帧规格',
               children: (
                 <div className="space-y-3">
                   <div className="cs-group">
@@ -6110,6 +5783,14 @@ function Inspector(props: {
                       image_urls（公网地址）真的把参考图送出去 —— 生成的响应里会写明送了几张。
                     </div>
                   </div>
+                </div>
+              ),
+            },
+              {
+              key: 'kf_cards',
+              label: '关键帧与参考图',
+              children: (
+                <div className="space-y-3">
                   {(['first', 'key', 'last'] as PromptFrameType[]).map((ft) => {
                     const st = keyframeCards[ft]
                     const slot = frameImages.find((x) => x.frame_type === ft)
@@ -6548,8 +6229,8 @@ function Inspector(props: {
                 ),
               }] : []),
               {
-              key: 'gen_ref',
-              label: '视频生成',
+              key: 'gen_ref_readiness',
+              label: '视频准备度',
               children: (
                 <div>
                   <ChapterStudioVideoReadinessPanel
@@ -6598,16 +6279,22 @@ function Inspector(props: {
                     </div>
                   )}
 
+                </div>
+              ),
+            },
+              {
+              key: 'gen_ref_videos',
+              label: '已生成视频',
+              children: (
+                <div>
                   <div className="cs-group">
                     <div className="cs-group-title">
                       <ThunderboltOutlined /> 生成
                     </div>
-                    <Space wrap>
-                      <Button type="primary" icon={<VideoCameraOutlined />} loading={videoPromptPreviewSubmitting || videoTaskPolling} onClick={() => void openVideoPromptPreview()}>
-                        生成视频
-                      </Button>
-                      {videoTaskStatus ? <span className="text-xs text-gray-500">任务状态：{videoTaskStatus}</span> : null}
-                    </Space>
+                    <div className="text-xs text-gray-500">
+                      生成入口在工作区「⑥ 生成视频」；这里只列已产出的视频（同一份预检与守卫）。
+                      {videoTaskStatus ? ` 任务状态：${videoTaskStatus}` : ''}
+                    </div>
                   </div>
 
                   <div className="cs-group">
@@ -6670,26 +6357,347 @@ function Inspector(props: {
               },
             ]
 
-            const order: Record<string, number> = {
-              gen_ref: 0,
-              production: 0,
-              keyframe_gen: 1,
-              video_prompt_text: 2,
-              camera: 3,
-              prompt_image: 4,
-              binding: 5,
-              dialogue: 6,
-              ops: 7,
-              av: 8,
-            }
+            const part = (key: string): React.ReactNode =>
+              (items.find((item) => String(item.key) === key)?.children ?? null) as React.ReactNode
 
-            // 只显示当前步骤的页签（外加共享的「维护设置」），把平铺页签收成三步。
-            const allowed = allowedTabsForStudioStep(studioStepKey)
-            return items
-              .filter((item) => allowed.includes(String(item.key) as InspectorTabKey))
-              .sort((a, b) => (order[String(a.key)] ?? 999) - (order[String(b.key)] ?? 999))
+            const savedPromptText = String((shotDetail as unknown as { video_prompt?: string } | null)?.video_prompt ?? '')
+            const savedPromptSrc = String((shotDetail as unknown as { video_prompt_source?: string } | null)?.video_prompt_source ?? '')
+
+            return (
+              <>
+              <ShotProductionWorkspace
+                shot={selectedShot ? { index: selectedShot.index, title: selectedShot.title } : null}
+                status={status}
+                scopeSummary={
+                  <Space size={6} wrap>
+                    <Tag color={STEP_STATE_META[scopeState].color}>
+                      {`${(selectedShotIds ?? []).length ? '选中范围' : '本集'}：${STEP_STATE_META[scopeState].label}`}
+                    </Tag>
+                    <Typography.Text type="secondary" className="text-[11px]">
+                      {`范围 ${scopeReadiness.length} 镜 · 可生成 ${scopeReadiness.filter((item) => item.canGenerate).length} · 可导出 ${scopeReadiness.filter((item) => item.canExport).length}`}
+                    </Typography.Text>
+                  </Space>
+                }
+                step={studioStepKey}
+                steps={STUDIO_STEPS.map((item, index) => ({
+                  key: item.key,
+                  label: `${STUDIO_STEP_INDEX_OFFSET + index}. ${item.label}`,
+                }))}
+                onStepChange={handleStudioStepChange}
+                blocks={{
+                  // ① 已保存的视频提示词与来源（只读回显：生成与导出读的就是它）
+                  promptSaved: (
+                    <div className="space-y-2">
+                      <Space size={6} wrap>
+                        <Tag color={savedPromptText.trim() ? 'green' : 'gold'}>
+                          {savedPromptText.trim() ? `来源：${savedPromptSrc || '未标记'}` : '尚未保存'}
+                        </Tag>
+                        <span className="text-[11px] text-gray-500">{`${savedPromptText.trim().length} 字`}</span>
+                      </Space>
+                      <div className="whitespace-pre-wrap rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                        {savedPromptText.trim() || '还没有保存过视频提示词：到②里写好后保存，生成与导出读的就是这一份。'}
+                      </div>
+                    </div>
+                  ),
+                  // ② 单镜编辑 / 重新生成 / 保存（原「手动分镜」的提示词、镜头语言、氛围描述三处合并）
+                  promptEditor: (
+                    <div className="space-y-3">
+                      {part('video_prompt_text')}
+                      <Collapse
+                        size="small"
+                        items={[
+                          { key: 'camera', label: '镜头语言（景别 / 角度 / 运动 / 时长）', children: part('camera') },
+                          { key: 'atmosphere', label: '氛围描述', children: part('atmosphere') },
+                        ]}
+                      />
+                    </div>
+                  ),
+                  // ③ 当前绑定（编辑与补齐入口＝「资产与参考帧」：绑定 + 声音 + 关键帧）
+                  binding: (
+                    <div className="space-y-3">
+                      {part('binding')}
+                      <Collapse
+                        size="small"
+                        items={[
+                          {
+                            key: 'kf_cards',
+                            label: '关键帧与参考图（首帧 / 关键帧 / 尾帧的生成、上传、应用）',
+                            children: part('kf_cards'),
+                          },
+                        ]}
+                      />
+                    </div>
+                  ),
+                  // ④ 本次请求实际使用的帧（只读：这次真的会发出去的文件）
+                  requestFrames: (
+                    <div className="space-y-3">
+                      <Space size={6} wrap>
+                        <span className="text-[11px] text-gray-500">参考方式</span>
+                        <Select
+                          size="small"
+                          style={{ width: 210 }}
+                          value={requestPlan.referenceMode}
+                          onChange={(value) => requestPlan.setReferenceMode(value)}
+                          options={REFERENCE_MODE_OPTIONS.map((item) => ({ value: item.value, label: item.label }))}
+                        />
+                        <Button size="small" loading={requestPlan.planLoading} onClick={() => void requestPlan.loadPlan()}>
+                          刷新预检
+                        </Button>
+                      </Space>
+                      {requestPlan.plan ? (
+                        <div className="space-y-2">
+                          <div className="text-[11px] text-gray-600">
+                            {`要求帧：${(requestPlan.plan.required_frame_types ?? []).map((item: string) => frameTypeLabel(item)).join('、') || '无（纯文本）'}`}
+                          </div>
+                          {(requestPlan.plan.frames ?? []).length ? (
+                            (requestPlan.plan.frames ?? []).map((frame: VideoPlanFrame) => (
+                              <div key={`${frame.frame_type}-${frame.file_id}`} className="flex items-start gap-2">
+                                {frame.url ? (
+                                  <img
+                                    src={resolveAssetUrl(frame.url)}
+                                    alt=""
+                                    style={{ width: 40, height: 40, objectFit: 'cover', borderRadius: 6, border: '1px solid #e2e8f0' }}
+                                  />
+                                ) : (
+                                  <div className="flex h-10 w-10 items-center justify-center rounded border border-dashed border-slate-300 text-[10px] text-gray-400">
+                                    缺
+                                  </div>
+                                )}
+                                <div className="min-w-0">
+                                  <Tag color={frame.usable ? 'green' : 'red'} style={{ marginInlineEnd: 4 }}>
+                                    {frameTypeLabel(frame.frame_type)}
+                                  </Tag>
+                                  {frame.file_id && !frame.usable ? (
+                                    <Tag color="orange" style={{ marginInlineEnd: 4 }}>
+                                      已存在但供应商取不到
+                                    </Tag>
+                                  ) : null}
+                                  <span className="text-[11px] text-gray-500">{frame.usable ? '本次请求会使用' : '本次请求用不了'}</span>
+                                  {frame.reason ? (
+                                    <div className="mt-0.5 max-w-[520px] text-[10px] leading-4 text-orange-600">{frame.reason}</div>
+                                  ) : null}
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="text-[11px] text-gray-500">该参考方式不需要帧文件（纯文本生成）。</div>
+                          )}
+                          <div className="text-xs">
+                            <Tag
+                              color={
+                                requestPlan.plan.audio_opt_out
+                                  ? 'default'
+                                  : requestPlan.plan.audio_state === 'bound'
+                                    ? 'cyan'
+                                    : 'gold'
+                              }
+                              style={{ marginInlineEnd: 4 }}
+                            >
+                              {requestPlan.plan.audio_opt_out
+                                ? '本镜明确无需声音'
+                                : requestPlan.plan.audio_state === 'bound'
+                                  ? '声音已绑定（公网可用）'
+                                  : requestPlan.plan.audio_state === 'bound_not_public'
+                                    ? '声音已绑定但地址非公网'
+                                    : '声音未绑定'}
+                            </Tag>
+                            <span className="text-[11px] text-gray-500">声音文件与内部 ID 见「技术详情」。</span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-gray-500">正在读取本次请求实际使用的帧（只读预检，不触网、不花钱）。</div>
+                      )}
+                    </div>
+                  ),
+                  // ⑤ 本镜还缺什么（与生成按钮同一份判定）
+                  gaps: (
+                    <div className="space-y-3">
+                      {requestPlan.gaps.length ? (
+                        <Alert
+                          type="warning"
+                          showIcon
+                          message={`本镜还缺 ${requestPlan.gaps.length} 项`}
+                          description={
+                            <ul className="list-disc pl-4 text-[11px]">
+                              {requestPlan.gaps.map((gap) => (
+                                <li key={gap.key}>{gap.text}</li>
+                              ))}
+                            </ul>
+                          }
+                        />
+                      ) : (
+                        <Alert type="success" showIcon message="本镜已具备生成与导出的条件" />
+                      )}
+                      {part('readiness_diag')}
+                      {part('gen_ref_readiness')}
+                    </div>
+                  ),
+                  // ⑥ 生成视频（唯一生成入口：复用同一份预检 / 供应商帧可用性 / 付费守卫）
+                  generate: (
+                    <div className="space-y-3">
+                      <Space size={8} wrap>
+                        <Tooltip title="先看最终请求摘要（提示词 / 参考帧 / 声音 / 模型方案 / 时长 / 画幅）">
+                          <Button size="small" loading={requestPlan.planLoading} onClick={() => void requestPlan.loadPlan()}>
+                            刷新预检
+                          </Button>
+                        </Tooltip>
+                        <Button
+                          size="small"
+                          type="primary"
+                          icon={<PlayCircleOutlined />}
+                          loading={requestPlan.generating}
+                          disabled={requestPlan.generateDisabled}
+                          onClick={() => void requestPlan.doGenerate()}
+                        >
+                          生成视频
+                        </Button>
+                        <Button size="small" onClick={() => void openVideoPromptPreview()}>
+                          查看完整请求（可保存提示词）
+                        </Button>
+                        {requestPlan.plan?.guard_status ? (
+                          <Tag color="gold">{`付费守卫：${requestPlan.plan.guard_status}`}</Tag>
+                        ) : null}
+                      </Space>
+                      {requestPlan.generateBlockedReason ? (
+                        <Alert
+                          type="warning"
+                          showIcon
+                          message="当前还不能生成（按钮已禁用）"
+                          description={requestPlan.generateBlockedReason}
+                        />
+                      ) : null}
+                      {requestPlan.plan ? (
+                        <Descriptions size="small" column={2} bordered>
+                          <Descriptions.Item label="模型方案">
+                            {videoModelBusinessName(requestPlan.plan.model_name)}
+                          </Descriptions.Item>
+                          <Descriptions.Item label="参考方式">
+                            {referenceModeLabel(requestPlan.plan.reference_mode)}
+                          </Descriptions.Item>
+                          <Descriptions.Item label="画幅">{requestPlan.plan.ratio || '继承项目设置'}</Descriptions.Item>
+                          <Descriptions.Item label="时长">
+                            {requestPlan.plan.seconds == null ? '最短有效时长' : `${requestPlan.plan.seconds} 秒`}
+                          </Descriptions.Item>
+                          <Descriptions.Item label="提示词来源">
+                            {requestPlan.plan.prompt_source || '—'}
+                          </Descriptions.Item>
+                          <Descriptions.Item label="参考图数量">
+                            {requestPlan.plan.reference_image_count ?? 0}
+                          </Descriptions.Item>
+                        </Descriptions>
+                      ) : null}
+                      {requestPlan.plan?.warnings?.length ? (
+                        <Alert
+                          type="info"
+                          showIcon
+                          message="后端提示"
+                          description={
+                            <ul className="list-disc pl-4 text-[11px]">
+                              {requestPlan.plan.warnings.slice(0, 4).map((warning: string, index: number) => (
+                                <li key={`plan-warning-${index}`}>{maskInternalIds(warning)}</li>
+                              ))}
+                            </ul>
+                          }
+                        />
+                      ) : null}
+                      {part('gen_ref_videos')}
+                    </div>
+                  ),
+                  // ⑦ 导出绑定提示词
+                  exportBlock: (
+                    <div className="space-y-2">
+                      <Space size={8} wrap>
+                        <Button size="small" icon={<DownloadOutlined />} onClick={() => setExportScopeOpen(true)}>
+                          导出绑定提示词（TXT）
+                        </Button>
+                        <Typography.Text type="secondary" className="text-[11px]">
+                          导出弹窗只列出**可导出**的镜头（与「可生成」分开判断）。
+                        </Typography.Text>
+                      </Space>
+                    </div>
+                  ),
+                  dialogue: dialogLines.length ? part('dialogue') : null,
+                  // 技术详情：供应商、内部 ID、file_id / storage_key、接口参数（默认收起）
+                  technical: (
+                    <div className="space-y-3">
+                      <Descriptions size="small" column={1} bordered>
+                        <Descriptions.Item label="供应商 / 适配层">
+                          {requestPlan.plan?.provider || imageGenerationOptions?.provider || '—'}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="模型（原始 ID）">
+                          {requestPlan.plan?.model_name || '—'}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="分辨率档位">
+                          {requestPlan.plan?.resolution || '—'}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="参考帧 file_id">
+                          {(requestPlan.plan?.frames ?? []).map((frame: VideoPlanFrame) => `${frame.frame_type}:${frame.file_id || '（缺）'}`).join('　') || '—'}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="绑定素材 file_id">
+                          {requestPlan.row?.bound_files?.length
+                            ? (
+                                <ul className="list-disc pl-4 text-[11px]">
+                                  {requestPlan.row.bound_files.map((item) => (
+                                    <li key={`${item.slot}-${item.asset_id}`}>
+                                      {`${item.slot_label || item.slot} · ${item.asset_name || item.asset_id} · ${item.file_id || '（无文件）'}`}
+                                    </li>
+                                  ))}
+                                </ul>
+                              )
+                            : '—'}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="声音 file_id">
+                          {requestPlan.plan?.audio_file_id || '—'}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="声音地址 storage">
+                          <span className="break-all">{requestPlan.plan?.audio_url || '—'}</span>
+                        </Descriptions.Item>
+                        <Descriptions.Item label="已生成视频 file_id">
+                          {generatedVideos.map((item) => item.fileId).join('　') || '—'}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="守卫状态">
+                          {requestPlan.plan?.guard_status || '（未取到计划）'}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="后端原始提示">
+                          {requestPlan.plan?.warnings?.length ? (
+                            <ul className="list-disc pl-4 text-[11px]">
+                              {requestPlan.plan.warnings.map((warning: string, index: number) => (
+                                <li key={`raw-warning-${index}`}>{warning}</li>
+                              ))}
+                            </ul>
+                          ) : (
+                            '—'
+                          )}
+                        </Descriptions.Item>
+                      </Descriptions>
+                      {part('kf_specs')}
+                    </div>
+                  ),
+                }}
+              />
+
+              {/* 「维护设置」从日常页签移到高级设置：日常生产面不再出现删除/隐藏/改标题这些结构性操作 */}
+              <div className="mt-3 flex items-center justify-between">
+                <Typography.Text type="secondary" className="text-[11px]">
+                  维护设置已移到高级设置（不再占据日常页签）。
+                </Typography.Text>
+                <Button size="small" type="link" onClick={() => setAdvancedSettingsOpen(true)}>
+                  高级设置
+                </Button>
+              </div>
+              <Modal
+                title="高级设置（维护）"
+                open={advancedSettingsOpen}
+                onCancel={() => setAdvancedSettingsOpen(false)}
+                footer={null}
+                width={620}
+              >
+                {part('ops')}
+              </Modal>
+              </>
+            )
           })()}
-        />
+
 
         <Modal
           title={`${frameLabel[keyframePromptPreviewFrameType]}图片生成提示词预览`}

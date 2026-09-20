@@ -293,7 +293,7 @@ export function ShotAudioBindingSection({
           description={
             <div className="space-y-2">
               <div className="text-xs text-slate-500">
-                file_id：<span className="font-mono">{boundId}</span>
+                <span className="text-gray-500">已绑定（内部 ID 见工作区「技术详情」）</span>
               </div>
               <Space size={8}>
                 <Button size="small" danger icon={<DeleteOutlined />} loading={saving} onClick={() => void bindFile(null)}>

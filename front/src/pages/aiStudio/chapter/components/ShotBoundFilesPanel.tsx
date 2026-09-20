@@ -15,6 +15,7 @@ import { Alert, Button, Space, Tag, Tooltip, Typography } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { previewPromptDelivery } from '../../../../services/llmPipelineApi'
 import { buildFileDownloadUrl, resolveAssetUrl } from '../../assets/utils'
+import { maskInternalIds } from '../../components/maskInternalIds'
 
 type BoundFileRow = {
   slot: string
@@ -91,7 +92,8 @@ export function ShotBoundFilesPanel({ projectId, chapterId, shotId }: ShotBoundF
 
       {error ? <Alert type="warning" showIcon message={error} /> : null}
 
-      {/* 用列表而不是表格：工作室检查器只有 ~360px 宽，表格列会被挤成一团看不清 file_id */}
+      {/* 用列表而不是表格：绑定项不多，逐条给出「谁 + 什么槽位 + 有没有可用文件」即可；
+          原始 file_id 属于技术信息，统一放在工作区「技术详情」里，主界面不再刷屏。 */}
       <div className="space-y-2">
         {assetRows.length === 0 ? (
           <div className="text-[11px] text-gray-500">
@@ -122,10 +124,11 @@ export function ShotBoundFilesPanel({ projectId, chapterId, shotId }: ShotBoundF
                     <span className="truncate text-xs">{row.asset_name || row.asset_id}</span>
                     <Tag color={meta.color} style={{ marginInlineEnd: 0 }}>{meta.label}</Tag>
                   </div>
-                  <div className="text-[10px] text-gray-500">{row.slot_label || row.slot}</div>
-                  <div className="break-all font-mono text-[10px] text-gray-600">{row.file_id || '（无文件）'}</div>
+                  <div className="text-[10px] text-gray-500">
+                    {`${row.slot_label || row.slot} · ${row.file_id ? '文件已就绪' : '（无文件）'}（内部 ID 见「技术详情」）`}
+                  </div>
                   {row.warnings?.length ? (
-                    <div className="text-[10px] text-amber-600">{row.warnings[0]}</div>
+                    <div className="text-[10px] text-amber-600">{maskInternalIds(row.warnings[0])}</div>
                   ) : null}
                 </div>
               </div>
@@ -143,7 +146,9 @@ export function ShotBoundFilesPanel({ projectId, chapterId, shotId }: ShotBoundF
             )}
           </div>
           {audioRow ? (
-            <div className="break-all font-mono text-[10px] text-gray-600">{audioRow.file_id || '（无）'}</div>
+            <div className="text-[10px] text-gray-500">
+              {`${audioRow.file_id ? '音频文件已就绪' : '（无）'}（内部 ID 见「技术详情」）`}
+            </div>
           ) : (
             <div className="text-[10px] text-gray-500">
               若本镜确实不需要声音，请在下面的「声音绑定」里明确选择，避免被当成漏绑。
@@ -151,7 +156,7 @@ export function ShotBoundFilesPanel({ projectId, chapterId, shotId }: ShotBoundF
           )}
           {audioRow ? (
             <div className="text-[10px] text-gray-500">
-              生成视频时公网地址的声音会作为参考音频进入请求；导出时这个 file_id 也会带出。
+              生成视频时公网地址的声音会作为参考音频进入请求；导出时这份绑定也会带出（含内部 ID）。
             </div>
           ) : null}
         </div>

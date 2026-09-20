@@ -17,6 +17,12 @@ import { StudioShotCharacterLinksService, StudioShotLinksService } from '../../.
 import { previewAssetBinding } from '../../../../services/llmPipelineApi'
 import type { AssetBindingPreviewResult, AssetBindingShot, BindingSuggestion } from '../../../../services/llmPipelineApi'
 import { defaultTaskActionErrorMessage } from '../../components/taskActionHelpers'
+import {
+  autoConfirmableRows,
+  describeRecommendationReason,
+  isDefaultChecked as isDefaultCheckedRule,
+  requiresUserChoice,
+} from './bindingRecommendationRules'
 
 type ChapterShotAssetBindingSectionProps = {
   projectId: string
@@ -60,20 +66,24 @@ function assetTypeLabel(assetType: string): string {
   return ASSET_TYPE_LABELS[assetType] ?? assetType
 }
 
-/** 资产名缺失时回退显示 asset_id（启发式-only 行后端不带 asset_name）。 */
-function assetLabel(row: BindingSuggestion): string {
+/**
+ * 资产名：优先用建议自带的 `asset_name`，其次用候选清单里的名字
+ * （启发式-only 的行后端不带 asset_name，直接显示 asset_id 会把内部 ID 暴露在主界面）。
+ */
+function assetLabel(row: BindingSuggestion, catalogNames?: Map<string, string>): string {
   const name = (row.asset_name ?? '').trim()
-  return name || row.asset_id
+  if (name) return name
+  const fromCatalog = catalogNames?.get(String(row.asset_id))?.trim()
+  if (fromCatalog) return fromCatalog
+  return '未命名资产'
 }
 
 function suggestionKey(row: BindingSuggestion): string {
   return `${row.slot}:${row.asset_id}`
 }
 
-/** 默认勾选规则（与页面帮助文案必须保持一致）：仅「预选」且尚未绑定。 */
-function isDefaultChecked(row: BindingSuggestion): boolean {
-  return row.tier === 'auto' && !row.already_bound
-}
+// 默认勾选规则已收敛到 `bindingRecommendationRules`（同一份口径，可单测）
+const isDefaultChecked = (row: BindingSuggestion): boolean => isDefaultCheckedRule(row)
 
 function renderTierTag(tier: BindingSuggestion['tier']) {
   if (tier === 'auto') return <Tag color="green">预选</Tag>
@@ -130,10 +140,24 @@ export function ChapterShotAssetBindingSection({
 
   const unmatchedRows = (preview?.unmatched_names ?? []) as UnmatchedNameRow[]
 
+  /** 候选清单 id → 名字（只读展示用，不含任何内部 ID） */
+  const catalogNames = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const item of preview?.catalog ?? []) {
+      const id = String((item as { asset_id?: string }).asset_id ?? '')
+      const name = String((item as { name?: string }).name ?? '').trim()
+      if (id && name) map.set(id, name)
+    }
+    return map
+  }, [preview])
+
   const checkedRows = useMemo(
     () => suggestions.filter((row) => selectedKeys.includes(suggestionKey(row))),
     [selectedKeys, suggestions],
   )
+
+  /** 可直接一键确认的推荐（与默认勾选规则同一口径：预选 + 未绑定） */
+  const autoRecommendCount = useMemo(() => suggestions.filter(isDefaultChecked).length, [suggestions])
 
   const runPreview = useCallback(async () => {
     if (!projectId || !shotId) return
@@ -199,19 +223,25 @@ export function ChapterShotAssetBindingSection({
     [chapterId, projectId, shotId],
   )
 
-  const saveChecked = useCallback(async () => {
+  /**
+   * 写入一批关联（唯一实现）。
+   *
+   * 「确认全部推荐」与「确认并保存勾选项」都走这里：口径相同，只是一次性把
+   * 「预选 + 未绑定」的建议整批写入，用户不用逐条点。
+   */
+  const saveRows = useCallback(async (rows: BindingSuggestion[]) => {
     if (saving) return
-    if (checkedRows.length === 0) {
+    if (rows.length === 0) {
       message.warning('请先勾选需要保存的关联项')
       return
     }
     setSaving(true)
     setSaveFailures([])
-    setSaveProgress({ done: 0, total: checkedRows.length })
+    setSaveProgress({ done: 0, total: rows.length })
 
     // 角色关联按 index 排序，这里从现有条数之后追加，避免挤掉已有顺序。
     let characterBaseIndex = 0
-    if (checkedRows.some((row) => row.asset_type === 'character')) {
+    if (rows.some((row) => row.asset_type === 'character')) {
       try {
         const res = await StudioShotCharacterLinksService.listShotCharacterLinksApiV1StudioShotCharacterLinksGet({
           shotId,
@@ -225,7 +255,7 @@ export function ChapterShotAssetBindingSection({
     let okCount = 0
     let characterAdded = 0
     const failures: SaveFailure[] = []
-    for (const [index, row] of checkedRows.entries()) {
+    for (const [index, row] of rows.entries()) {
       try {
         await linkSuggestion(row, characterBaseIndex + characterAdded)
         if (row.asset_type === 'character') characterAdded += 1
@@ -233,11 +263,11 @@ export function ChapterShotAssetBindingSection({
       } catch (error) {
         // 逐条容错：单条失败不中断整批，最后统一给出明细。
         failures.push({
-          label: `${slotLabel(row.slot)} · ${assetLabel(row)}`,
+          label: `${slotLabel(row.slot)} · ${assetLabel(row, catalogNames)}`,
           reason: defaultTaskActionErrorMessage(error, '保存失败'),
         })
       }
-      setSaveProgress({ done: index + 1, total: checkedRows.length })
+      setSaveProgress({ done: index + 1, total: rows.length })
     }
 
     setSaveFailures(failures)
@@ -258,7 +288,28 @@ export function ChapterShotAssetBindingSection({
     // 2) 重新推荐，让 already_bound 反映真实绑定情况
     await runPreview()
     setSaving(false)
-  }, [checkedRows, linkSuggestion, onReloadPreparationState, runPreview, saving, shotId])
+  }, [catalogNames, linkSuggestion, onReloadPreparationState, runPreview, saving, shotId])
+
+  /** 勾选项保存（既有入口） */
+  const saveChecked = useCallback(async () => {
+    await saveRows(checkedRows)
+  }, [checkedRows, saveRows])
+
+  /**
+   * 「确认全部推荐」：把「层级＝预选 且 尚未绑定」的建议**一次性**写入。
+   *
+   * 明确匹配的才自动勾选（与 `isDefaultChecked` 同一口径）；多候选 / 冲突 / 已丢弃
+   * 仍然留给你逐条判断，不在这里替你决定。保存后立即回读本镜状态。
+   */
+  const confirmAllRecommendations = useCallback(async () => {
+    const autoRows = autoConfirmableRows(suggestions)
+    if (autoRows.length === 0) {
+      message.info('没有可直接确认的推荐项（「需复核」「与现有绑定冲突」的仍要你逐条勾选）')
+      return
+    }
+    setSelectedKeys(autoRows.map(suggestionKey))
+    await saveRows(autoRows)
+  }, [saveRows, suggestions])
 
   const columns: TableColumnsType<BindingSuggestion> = [
     {
@@ -272,11 +323,8 @@ export function ChapterShotAssetBindingSection({
       key: 'asset',
       ellipsis: true,
       render: (_: unknown, row: BindingSuggestion) => (
-        <div className="min-w-0">
-          <div className="truncate">{assetLabel(row)}</div>
-          {row.asset_name?.trim() ? (
-            <div className="truncate text-[11px] text-slate-400">{row.asset_id}</div>
-          ) : null}
+        <div className="min-w-0 truncate" title={assetLabel(row, catalogNames)}>
+          {assetLabel(row, catalogNames)}
         </div>
       ),
     },
@@ -308,7 +356,12 @@ export function ChapterShotAssetBindingSection({
     {
       title: '理由',
       dataIndex: 'reason',
-      render: (reason: string) => <span className="text-xs text-slate-600">{reason?.trim() ? reason : '—'}</span>,
+      render: (reason: string, row: BindingSuggestion) => (
+        <div className="min-w-0">
+          <div className="text-xs text-slate-600">{requiresUserChoice(row) ? describeRecommendationReason(row) : '明确匹配'}</div>
+          {reason?.trim() ? <div className="text-[11px] text-slate-400">{reason}</div> : null}
+        </div>
+      ),
     },
   ]
 
@@ -329,8 +382,9 @@ export function ChapterShotAssetBindingSection({
         <div className="min-w-0">
           <div className="text-sm font-medium text-slate-900">AI 推荐资产关联</div>
           <Typography.Text type="secondary" className="text-[11px]">
-            先让系统给出「角色 / 场景 / 道具 / 服装」四类槽位的关联建议，人工勾选后再写入关联关系。
-            推荐接口只读不写库，保存时才会调用既有写入接口。
+            系统按当前项目已有资产给出「角色 / 场景 / 道具 / 服装」四类槽位的建议：
+            明确匹配的默认勾选，多候选或与现有绑定冲突的留给你逐条判断；
+            点「确认全部推荐」即可一次写入，保存后本镜状态立即刷新。推荐接口只读不写库。
           </Typography.Text>
         </div>
         <Space size={8}>
@@ -346,12 +400,20 @@ export function ChapterShotAssetBindingSection({
           <Button
             size="small"
             type="primary"
+            loading={saving}
+            disabled={previewLoading || saving}
+            onClick={() => void confirmAllRecommendations()}
+          >
+            {`确认全部推荐${autoRecommendCount > 0 ? `（${autoRecommendCount}）` : ''}`}
+          </Button>
+          <Button
+            size="small"
             ghost
             loading={saving}
             disabled={previewLoading || checkedRows.length === 0}
             onClick={() => void saveChecked()}
           >
-            {`确认并保存勾选项${checkedRows.length > 0 ? `（${checkedRows.length}）` : ''}`}
+            {`只保存勾选项${checkedRows.length > 0 ? `（${checkedRows.length}）` : ''}`}
           </Button>
           <Button
             size="small"
@@ -462,7 +524,7 @@ export function ChapterShotAssetBindingSection({
               <div className="text-xs">
                 {'只自动勾选「层级 = 预选（auto）」且「已绑定 = 否」的候选；'}
                 「需复核」「已丢弃」以及已经绑定过的候选一律默认不勾选，需要你人工判断后再勾。
-                勾选后点击「确认并保存勾选项」才会真正写入关联。
+                点「确认全部推荐」会把这些预选项一次性写入；「需复核」「与现有绑定冲突」的请逐条勾选后点「只保存勾选项」。
               </div>
             }
           />
