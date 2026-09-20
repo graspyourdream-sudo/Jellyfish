@@ -1,14 +1,19 @@
 """巨日禄 分镜提示词导入 — 独立模块。
 
 两步流程:
-  1. GET getScriptPage → 获取 scriptId 列表
+  1. GET getScriptPage → 获取 scriptId 列表（普通 JSON：``data.records``）
   2. POST getStoryboardPage/{page}/{size} → 获取每条分镜的 prompt
+     **注意（2026-09-20 真实验收踩到）**：第二步的记录是 **msgpack** 序列化后
+     base64 塞在 ``data.payload``（``data.enc == "msgpack"``），不是 ``data.records``。
+     只认 JSON 的解析器会「解析出 0 条」，看着像接口拒绝，其实是有数据没识别。
+     解码用同目录的 ``msgpack_lite``（纯标准库，零第三方依赖）。
 
 不 import Streamlit，不 import db，不写文件，不保存 Cookie / Authorization。
 """
 
 from __future__ import annotations
 
+import base64
 import html as _html
 import json
 import os
@@ -19,6 +24,8 @@ import urllib.request
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
+
+from app.services.external import msgpack_lite
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -34,6 +41,9 @@ _SCRIPT_PAGE_PATH = "/api/video/v1/video-script/getScriptPage"
 _STORYBOARD_PAGE_PATH = "/api/video/v1/video-storyboard/getStoryboardPage"
 _DEFAULT_PAGE_SIZE = 10
 _DEFAULT_STORYBOARD_SIZE = 100
+
+# 上游 ``data.enc`` 里认识的编码（不认识的只如实报出来，绝不猜）
+SUPPORTED_PAYLOAD_ENCODINGS = frozenset({"msgpack", "msgpack5"})
 
 _COOKIE_ENV_KEY = "JURILU_COOKIE"
 _URL_ENV_KEY = "JURILU_AGENT_LIST_URL"
@@ -528,6 +538,10 @@ def fetch_all_storyboards(
             script_title=script_title, script_index=script_index,
         )
         attempt["parsed_count"] = len(sbs)
+        if not sbs:
+            # 解析出 0 条时把「响应到底长什么样」留下来：
+            # 是接口真 0 条，还是有数据但解析器没识别（例如 msgpack 载荷）。
+            attempt["payload_shape"] = describe_payload_shape(sb_result.get("text", ""))
         sb_counts[sid] = len(sbs)
         all_storyboards.extend(sbs)
 
@@ -548,20 +562,132 @@ def fetch_all_storyboards(
             "warnings": warnings, "diagnostics": diag}
 
 
-def _extract_records_from_response(text: str) -> List[dict]:
-    """从 JSON 响应提取 records[]。"""
-    candidates = _json_candidates_from_html(text)
-    for c in candidates:
-        if isinstance(c, dict):
-            data = c.get("data")
-            if isinstance(data, dict):
-                recs = data.get("records")
-                if isinstance(recs, list):
-                    return [r for r in recs if isinstance(r, dict)]
-            recs = c.get("records")
-            if isinstance(recs, list):
-                return [r for r in recs if isinstance(r, dict)]
+def _records_from_object(obj: Any) -> List[dict]:
+    """从一个 JSON 对象里取 records[]（``data.records`` 优先，其次顶层 ``records``）。"""
+    if not isinstance(obj, dict):
+        return []
+    data = obj.get("data")
+    if isinstance(data, dict):
+        recs = data.get("records")
+        if isinstance(recs, list):
+            return [r for r in recs if isinstance(r, dict)]
+    recs = obj.get("records")
+    if isinstance(recs, list):
+        return [r for r in recs if isinstance(r, dict)]
     return []
+
+
+def decode_encoded_payload(obj: Any) -> Tuple[Optional[str], Optional[Any]]:
+    """识别 ``data.enc``/``data.payload`` 这类**编码载荷**并解码。
+
+    返回 ``(编码名, 解码后的对象)``；不是编码载荷就返回 ``(None, None)``。
+
+    真实形状（第二步 getStoryboardPage）::
+
+        {"code":0,"message":"success",
+         "data":{"enc":"msgpack","payload":"i6dyZWNvcmRz3AAp..."}}
+
+    解码后是 ``{"records": [...]}``，与第一步的 JSON 形状一致。
+    目前支持 ``msgpack``；未知编码**不解码也不猜**（由调用方如实报出来）。
+    """
+    if not isinstance(obj, dict):
+        return (None, None)
+    data = obj.get("data")
+    if not isinstance(data, dict):
+        return (None, None)
+    enc = str(data.get("enc") or "").strip().lower()
+    payload = data.get("payload")
+    if not enc or not isinstance(payload, str) or not payload:
+        return (None, None)
+    if enc not in SUPPORTED_PAYLOAD_ENCODINGS:
+        return (enc, None)
+    try:
+        # 上游的 base64 可能省略补位，补齐后再解
+        raw = base64.b64decode(payload + "=" * (-len(payload) % 4))
+        return (enc, msgpack_lite.loads(raw))
+    except Exception:  # noqa: BLE001 —— 解不开就当没解，由 describe_payload_shape 报出来
+        return (enc, None)
+
+
+def _decoded_candidates(text: str) -> List[Tuple[str, Any]]:
+    """把响应文本里所有「能看懂的对象」列出来：原样 JSON + 编码载荷解码后的对象。"""
+    out: List[Tuple[str, Any]] = []
+    for candidate in _json_candidates_from_html(text):
+        if not isinstance(candidate, dict):
+            continue
+        out.append(("json", candidate))
+        enc, decoded = decode_encoded_payload(candidate)
+        if enc and decoded is not None:
+            out.append((enc, decoded))
+            # 有些上游会再包一层：data.payload 解出来还是 {"data": {...}}
+            enc2, decoded2 = decode_encoded_payload(decoded)
+            if enc2 and decoded2 is not None:
+                out.append((enc2, decoded2))
+    return out
+
+
+def _extract_records_from_response(text: str) -> List[dict]:
+    """从响应里提取 records[]：先按普通 JSON 找，再按编码载荷（msgpack）找。"""
+    for _encoding, obj in _decoded_candidates(text):
+        recs = _records_from_object(obj)
+        if recs:
+            return recs
+    return []
+
+
+def _record_shape(info: Dict[str, Any], encoding: str, obj: Any) -> None:
+    if encoding not in info["encodings"]:
+        info["encodings"].append(encoding)
+    recs = _records_from_object(obj)
+    if recs:
+        info["record_counts"][encoding] = len(recs)
+        info["record_keys"][encoding] = sorted(
+            str(key) for key in recs[0].keys()
+        )[:24]
+
+
+def describe_payload_shape(text: str) -> dict:
+    """诊断用：这次响应到底长什么样（编码 / 记录条数 / 字段名）。
+
+    只输出**字段名与计数**，不含任何正文与凭证 —— 用于回答
+    「是接口返回 0 条，还是接口有数据但解析器没识别」。
+    """
+    info: Dict[str, Any] = {
+        "encodings": [],
+        "declared_encodings": [],
+        # 「不认识这种编码」与「认识但解不开」要分开：后者才是我们的 bug
+        "unsupported_encodings": [],
+        "decode_errors": [],
+        "record_counts": {},
+        "record_keys": {},
+    }
+    for candidate in _json_candidates_from_html(text):
+        if not isinstance(candidate, dict):
+            continue
+        _record_shape(info, "json", candidate)
+        encoding, decoded = decode_encoded_payload(candidate)
+        if not encoding:
+            continue
+        if encoding not in info["declared_encodings"]:
+            info["declared_encodings"].append(encoding)
+        if decoded is None:
+            # 上游说它是这种编码，但我们没解开 —— 必须如实报出来，不能装作 0 条
+            bucket = (
+                "decode_errors"
+                if encoding in SUPPORTED_PAYLOAD_ENCODINGS
+                else "unsupported_encodings"
+            )
+            if encoding not in info[bucket]:
+                info[bucket].append(encoding)
+            continue
+        _record_shape(info, encoding, decoded)
+        encoding2, decoded2 = decode_encoded_payload(decoded)
+        if encoding2 and decoded2 is not None:
+            _record_shape(info, encoding2, decoded2)
+    raw = str(text or "").strip()
+    info["raw_length"] = len(raw)
+    info["raw_head"] = raw[:80]
+    return info
 
 
 def _extract_storyboard_records(
