@@ -1,0 +1,106 @@
+/**
+ * 「资产准备」业务状态的回归测试。
+ *
+ * 关键口径：
+ * 1. 五个状态按顺序推进，每一步都有唯一的下一步动作；
+ * 2. 「一项定版 ≠ 整步就绪」——只有**全部**资产都到达「已定版」才 `allDone`；
+ * 3. 定版状态无法判定时不宣称「已定版」（停在「待设为定版」）。
+ */
+
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+
+import {
+  ASSET_PREP_STATUSES,
+  describeAssetPrepSummary,
+  resolveAssetPrepStatus,
+  summarizeAssetPrep,
+} from './assetPrepStatus.ts'
+
+test('有待确认候选 → 待确认，下一步是确认写入', () => {
+  const status = resolveAssetPrepStatus({ hasPendingCandidate: true, linked: true, hasImagePrompt: true, hasImage: true })
+  assert.equal(status.key, 'pending_candidate')
+  assert.equal(status.nextActionLabel, '确认写入')
+})
+
+test('已进项目但没有图片提示词 → 已关联，待完善图片提示词', () => {
+  const status = resolveAssetPrepStatus({ linked: true, hasImagePrompt: false })
+  assert.equal(status.key, 'linked_prompt_todo')
+  assert.equal(status.nextActionLabel, '填提示词')
+})
+
+test('提示词无法判定时也按「待完善提示词」处理，不跳步', () => {
+  const status = resolveAssetPrepStatus({ linked: true, hasImagePrompt: null })
+  assert.equal(status.key, 'linked_prompt_todo')
+})
+
+test('提示词已保存但还没有图片 → 待出图或上传', () => {
+  const status = resolveAssetPrepStatus({ linked: true, hasImagePrompt: true, hasImage: false })
+  assert.equal(status.key, 'prompt_ready_image_todo')
+  assert.equal(status.nextActionLabel, '生成图片')
+})
+
+test('已有图片但未定版 → 待设为定版', () => {
+  const status = resolveAssetPrepStatus({ linked: true, hasImagePrompt: true, hasImage: true, hasPrimary: false })
+  assert.equal(status.key, 'image_ready_primary_todo')
+  assert.equal(status.nextActionLabel, '去设为定版')
+})
+
+test('定版状态无法判定时不宣称已定版', () => {
+  const status = resolveAssetPrepStatus({ linked: true, hasImagePrompt: true, hasImage: true, hasPrimary: null })
+  assert.equal(status.key, 'image_ready_primary_todo')
+  assert.notEqual(status.key, 'done')
+})
+
+test('全条件具备才是已定版', () => {
+  const status = resolveAssetPrepStatus({ linked: true, hasImagePrompt: true, hasImage: true, hasPrimary: true })
+  assert.equal(status.key, 'done')
+  assert.equal(status.nextActionLabel, '查看定版图')
+})
+
+test('一项定版不等于整步就绪（allDone 要求全部完成）', () => {
+  const summary = summarizeAssetPrep([
+    { linked: true, hasImagePrompt: true, hasImage: true, hasPrimary: true },
+    { linked: true, hasImagePrompt: true, hasImage: true, hasPrimary: false },
+    { linked: true, hasImagePrompt: false },
+  ])
+  assert.equal(summary.total, 3)
+  assert.equal(summary.done, 1)
+  assert.equal(summary.allDone, false, '只有一项定版不能算整步就绪')
+  assert.equal(summary.counts.image_ready_primary_todo, 1)
+  assert.equal(summary.counts.linked_prompt_todo, 1)
+})
+
+test('全部定版才算就绪', () => {
+  const summary = summarizeAssetPrep([
+    { linked: true, hasImagePrompt: true, hasImage: true, hasPrimary: true },
+    { linked: true, hasImagePrompt: true, hasImage: true, hasPrimary: true },
+  ])
+  assert.equal(summary.allDone, true)
+})
+
+test('空集合不算就绪（没有资产时不应显示完成）', () => {
+  assert.equal(summarizeAssetPrep([]).allDone, false)
+})
+
+test('概览文案包含各状态数量', () => {
+  const summary = summarizeAssetPrep([
+    { linked: true, hasImagePrompt: true, hasImage: true, hasPrimary: true },
+    { linked: true, hasImagePrompt: false },
+  ])
+  const text = describeAssetPrepSummary(summary)
+  assert.match(text, /1\/2 已定版/)
+  assert.match(text, /待完善图片提示词 1/)
+  assert.equal(describeAssetPrepSummary(summarizeAssetPrep([])), '还没有需要准备的资产')
+})
+
+test('五个状态的标签与动作齐全（页面直接用它们渲染）', () => {
+  assert.deepEqual(
+    Object.values(ASSET_PREP_STATUSES).map((item) => item.key),
+    ['pending_candidate', 'linked_prompt_todo', 'prompt_ready_image_todo', 'image_ready_primary_todo', 'done'],
+  )
+  for (const item of Object.values(ASSET_PREP_STATUSES)) {
+    assert.ok(item.label.length > 0)
+    assert.ok(item.nextActionLabel.length > 0)
+  }
+})

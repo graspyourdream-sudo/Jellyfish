@@ -206,6 +206,13 @@ export type ProjectStepInput = {
   assetImageCount?: number | null
   /** 已保存图片提示词的资产数量；null/undefined = 无法判定 */
   assetsWithImagePromptCount?: number | null
+  /**
+   * 已设为定版（`is_primary`）的资产数量；null/undefined = 无法判定。
+   *
+   * 判定口径（收口要求）：资产准备要**全部资产都到达已定版**才算就绪，
+   * 不能因为存在一项定版图就把整步判为完成。无法判定时不阻塞（沿用 image_prompts 的宽容策略）。
+   */
+  assetsWithPrimaryCount?: number | null
   /** 已填写 video_prompt 的镜头数（分镜可能比镜头多，这里按分镜行统计） */
   shotsWithVideoPromptCount?: number | null
   /** 已关联资产（角色/场景/道具/服装）的镜头数 */
@@ -280,6 +287,7 @@ export function resolveProjectStep(input?: ProjectStepInput | null): ProjectStep
   const totalAssets = characters + scenes + props
   const assetImageCount = toCount(source.assetImageCount)
   const assetsWithImagePromptCount = toOptionalCount(source.assetsWithImagePromptCount)
+  const assetsWithPrimaryCount = toOptionalCount(source.assetsWithPrimaryCount)
   const shotsWithVideoPromptCount = toCount(source.shotsWithVideoPromptCount)
   const shotsWithAssetLinkCount = toCount(source.shotsWithAssetLinkCount)
 
@@ -338,11 +346,14 @@ export function resolveProjectStep(input?: ProjectStepInput | null): ProjectStep
     ])
   }
 
-  // 4. 有资产但没有资产图片（或已知没有保存图片提示词）→ 图片准备
+  // 4. 资产准备：提示词 → 图片 → 定版，三步都齐（且**全部资产**齐）才算过
   const hasAssetImages = assetImageCount > 0
   const hasAssetImagePrompts =
     assetsWithImagePromptCount === null ? hasAssetImages : assetsWithImagePromptCount > 0
-  if (!hasAssetImages || !hasAssetImagePrompts) {
+  // 定版口径：可判定时必须「全部资产已定版」；无法判定时退回「至少有一张图」
+  const allAssetsHavePrimary =
+    assetsWithPrimaryCount === null ? hasAssetImages : assetsWithPrimaryCount >= totalAssets
+  if (!hasAssetImages || !hasAssetImagePrompts || !allAssetsHavePrimary) {
     const missing: string[] = []
     if (!hasAssetImages) {
       missing.push(`${totalAssets} 个资产还没有参考图片`)
@@ -350,7 +361,10 @@ export function resolveProjectStep(input?: ProjectStepInput | null): ProjectStep
     if (!hasAssetImagePrompts) {
       missing.push('资产还没有保存图片提示词')
     }
-    return buildResolution('image_prep', '资产已建立，但参考图片/图片提示词还没准备好', missing)
+    if (!allAssetsHavePrimary && assetsWithPrimaryCount !== null) {
+      missing.push(`还有 ${Math.max(0, totalAssets - assetsWithPrimaryCount)} 个资产没有设定版图`)
+    }
+    return buildResolution('image_prep', '资产准备未完成：提示词 / 图片 / 定版还有缺口', missing)
   }
 
   // 5. 有图片但镜头没有视频提示词 → 视频提示词

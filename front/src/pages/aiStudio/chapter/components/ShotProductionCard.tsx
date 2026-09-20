@@ -151,7 +151,7 @@ export function ShotProductionCard({
   const gaps = useMemo(() => {
     const list: string[] = []
     if (!savedPrompt.trim()) list.push('还没有已保存的视频提示词（可在本卡编辑后保存，或用单镜生成草稿）')
-    if (!imageFiles.length) list.push('还没有绑定任何图片资产（第 5 步绑定后这里会列出实际文件）')
+    if (!imageFiles.length) list.push('还没有绑定任何图片资产（第 4 步「资产与声音绑定」后这里会列出实际文件）')
     if (missingImages.length) list.push(`上游素材里 ${missingImages.length} 个绑定资产没有可用图片文件（未定版或缺图）`)
     if (plan?.generation_blocked) list.push(`视频请求缺少参考模式「${plan.reference_mode}」要求的帧：${(plan.missing_frame_types ?? []).join('、')}（可在②处补齐或换模式）`)
     if (!audioFile) list.push('还没有声音：需要配音就绑定音频，不需要就点「本镜无需声音」明确说明')
@@ -310,7 +310,7 @@ export function ShotProductionCard({
               })}
             </div>
           ) : (
-            <div className="text-[11px] text-gray-500">这一镜还没有绑定图片资产（请回第 5 步「关联绑定」）</div>
+            <div className="text-[11px] text-gray-500">这一镜还没有绑定图片资产（请回第 4 步「资产与声音绑定」）</div>
           )}
         </div>
 

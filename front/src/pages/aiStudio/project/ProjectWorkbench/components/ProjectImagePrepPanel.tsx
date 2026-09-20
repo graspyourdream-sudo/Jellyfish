@@ -43,6 +43,12 @@ import {
 import { AssetImagePromptLlmPanel } from './AssetImagePromptLlmPanel'
 import { GenerationGateBanner } from '../../../components/GenerationGateBanner'
 import { useGenerationGate } from '../../../components/generationGate'
+import {
+  ASSET_PREP_STATUSES,
+  describeAssetPrepSummary,
+  resolveAssetPrepStatus,
+  summarizeAssetPrep,
+} from '../assetPrepStatus'
 
 /** 待准备资产最多补抓多少个名称（场景/道具/服装的关联行只有 id，没有 name）。 */
 const NAME_LOOKUP_LIMIT = 20
@@ -52,7 +58,7 @@ const PROMPT_SOURCE_META: Record<string, { label: string; color: string; hint: s
   saved: {
     label: '已保存提示词',
     color: 'green',
-    hint: '第 3 步在资产上保存的 image_prompts —— 这一环确认保存的产物正在被生图实际使用',
+    hint: '第 2 步「资产准备」在资产上保存的 image_prompts —— 这一环确认保存的产物正在被生图实际使用',
   },
   template: {
     label: '模板拼装',
@@ -127,6 +133,36 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
     const separator = '?'
     navigate(`/assets/${segment}/${asset.id}/edit${separator}returnTo=${returnTo}${options?.generate ? '&generate=1' : ''}`)
   }
+
+  /** 每行资产的业务状态（纯计算，不落库） */
+  const statusByAsset = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof resolveAssetPrepStatus>>()
+    for (const asset of assets) {
+      map.set(
+        assetKey(asset),
+        resolveAssetPrepStatus({
+          linked: true, // 能出现在项目资产清单里就说明已进项目
+          hasImagePrompt: asset.hasImagePrompt,
+          hasImage: asset.hasImage,
+          hasPrimary: asset.hasPrimary,
+        }),
+      )
+    }
+    return map
+  }, [assets])
+
+  const prepSummary = useMemo(
+    () =>
+      summarizeAssetPrep(
+        assets.map((asset) => ({
+          linked: true,
+          hasImagePrompt: asset.hasImagePrompt,
+          hasImage: asset.hasImage,
+          hasPrimary: asset.hasPrimary,
+        })),
+      ),
+    [assets],
+  )
 
   const pending = useMemo(
     () => assets.filter((asset) => !asset.hasImage || asset.hasImagePrompt === false),
@@ -347,6 +383,23 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
 
   const columns: TableColumnsType<ProjectSignalAsset> = [
     {
+      title: '业务状态',
+      key: 'prepStatus',
+      width: 190,
+      render: (_: unknown, record) => {
+        const status = statusByAsset.get(assetKey(record)) ?? ASSET_PREP_STATUSES.pending_candidate
+        const color = status.tone === 'green' ? 'green' : status.tone === 'blue' ? 'blue' : status.tone === 'gold' ? 'gold' : 'default'
+        return (
+          <Space size={4} wrap>
+            <Tag color={color} bordered={false}>
+              {status.label}
+            </Tag>
+            <span className="text-[11px] text-gray-400">{`下一步：${status.nextActionLabel}`}</span>
+          </Space>
+        )
+      },
+    },
+    {
       title: '资产',
       dataIndex: 'name',
       key: 'name',
@@ -425,7 +478,15 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
       width: 250,
       render: (_, record) => (
         <Space size={6} wrap>
-          <Tooltip title="进入资产编辑页并直接打开出图确认（复用既有 image-pipeline，不新建出图链路）">
+          <Tooltip
+            title={
+              statusByAsset.get(assetKey(record))?.key === 'prompt_ready_image_todo' ||
+              statusByAsset.get(assetKey(record))?.key === 'image_ready_primary_todo' ||
+              statusByAsset.get(assetKey(record))?.key === 'done'
+                ? '进入资产编辑页并直接打开出图确认（复用既有 image-pipeline，不新建出图链路）'
+                : '该资产还缺图片提示词：先用「填提示词」补齐，再出图'
+            }
+          >
             <Button
               size="small"
               type="primary"
@@ -479,6 +540,19 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
 
       {/* 点击前先讲清楚：模型有没有配置、是否被 DRY_RUN 演练门禁挡住 */}
       <GenerationGateBanner gate={gate} outlet="image" />
+
+      {/* 各状态数量：只有范围内资产全部「已定版」才显示就绪 */}
+      <Alert
+        type={prepSummary.allDone ? 'success' : 'info'}
+        showIcon
+        style={{ marginBottom: 8 }}
+        message={
+          prepSummary.allDone
+            ? `资产准备已就绪（${prepSummary.total}/${prepSummary.total} 已定版）`
+            : `资产准备未就绪（${prepSummary.done}/${prepSummary.total} 已定版）`
+        }
+        description={<span className="text-xs">{describeAssetPrepSummary(prepSummary)}</span>}
+      />
 
       <Spin spinning={loading}>
         {assets.length === 0 ? (
@@ -608,7 +682,7 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
             type="info"
             showIcon
             message="这是一条不花钱的填写入口"
-            description="保存后写进该资产的 image_prompts，生图计划会立刻把提示词来源标成「已保存提示词」——用它能当场验证第 3 步的保存结果真的被生图读取。留空的槽位不会覆盖原有内容；已保存的槽位会预填，可直接修改。"
+            description="保存后写进该资产的 image_prompts，生图计划会立刻把提示词来源标成「已保存提示词」——用它能当场验证第 2 步「资产准备」的保存结果真的被生图读取。留空的槽位不会覆盖原有内容；已保存的槽位会预填，可直接修改。"
           />
           <Spin spinning={editorLoading}>
             {editorSlots.length === 0 ? (

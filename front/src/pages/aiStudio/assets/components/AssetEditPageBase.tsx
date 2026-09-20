@@ -1359,7 +1359,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                               title={
                                 resolvedProjectId
                                   ? undefined
-                                  : '缺少项目作用域：请先从项目工作台第 3 步进入，或在页面顶部选择项目'
+                                  : '缺少项目作用域：请先从项目工作台第 2 步「资产准备」进入，或在页面顶部选择项目'
                               }
                             >
                               <span>

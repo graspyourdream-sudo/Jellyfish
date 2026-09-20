@@ -1229,7 +1229,7 @@ export function ChapterShotEditPage() {
   const nextStepDescription = statusReady
     ? '当前镜头的准备已确认。回到项目工作台按顺序继续：资产提取 → 图片准备 → 整集视频提示词 → 关联绑定 → 生成与交付。'
     : actionBeatsReady
-      ? '当前镜头仍有提取候选、对白或镜头基础信息待确认。确认后回到项目工作台，按六步流程继续后续步骤。'
+      ? '当前镜头仍有提取候选、对白或镜头基础信息待确认。确认后回到项目工作台，按五步流程继续后续步骤。'
       : '当前镜头的动作拍点还没有确认。建议先补齐动作序列，再回到项目工作台继续后续步骤。'
 
   const checklistItems = [

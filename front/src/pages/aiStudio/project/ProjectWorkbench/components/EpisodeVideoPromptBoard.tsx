@@ -111,6 +111,8 @@ export function EpisodeVideoPromptBoard({
   const [rows, setRows] = useState<PreviewRow[]>([])
   const [loading, setLoading] = useState(false)
   const [creatingShots, setCreatingShots] = useState(false)
+  /** 建镜的在途闸门：状态更新是异步的，靠 state 挡不住连点 */
+  const createShotsInFlightRef = useRef(false)
   const [mode, setMode] = useState<PromptBoardMode>('fill_empty')
   const [selectedShotIds, setSelectedShotIds] = useState<string[]>([])
   const [allowPartial, setAllowPartial] = useState(false)
@@ -362,33 +364,80 @@ export function EpisodeVideoPromptBoard({
    *
    * 为什么不做成自动保存：保存是写库动作，必须由用户在预览表里确认过。
    */
+  /**
+   * 粘贴文本里有多少「条目」。
+   *
+   * 为什么要在这里估：本集还没有镜头时，后端 `import-parse` 会直接拒绝解析
+   * （「该集还没有镜头，无法导入」），于是预览表是空的、也就没有「匹配到第几镜」可言。
+   * 但「提示词起步」的正常顺序就是先有提示词再补镜头，所以要用文本段数推出要建几个镜头。
+   */
+  const pendingBlockCount = useMemo(() => {
+    const text = otherText.trim()
+    if (!text) return 0
+    const blocks = text
+      .split(/\n\s*\n/)
+      .map((block) => block.trim())
+      .filter(Boolean)
+    return blocks.length > 0 ? blocks.length : 1
+  }, [otherText])
+
+  /** 还需要创建几个镜头（取「预览行数」与「文本段数」的较大者）。 */
+  const missingShotCount = Math.max(rows.length, pendingBlockCount) - shots.length
+
   const doCreateMissingShots = useCallback(async () => {
     if (!chapterId) return
-    const missing = rows.length - shots.length
-    if (missing <= 0) {
-      message.info('当前镜头数已经不少于导入条数，无需创建')
-      return
-    }
+    // 防重复点击：按钮 loading/disabled 之外再加一道同步闸门（状态更新是异步的）
+    if (createShotsInFlightRef.current) return
+    createShotsInFlightRef.current = true
     setCreatingShots(true)
     try {
-      const maxIndex = shots.reduce((max, shot) => Math.max(max, Number(shot.index) || 0), 0)
-      for (let offset = 1; offset <= missing; offset += 1) {
-        const row = rows[shots.length + offset - 1]
-        const prompt = (row?.prompt ?? '').trim()
-        const title = prompt.slice(0, 20) || `镜头 ${maxIndex + offset}`
-        await StudioShotsService.createShotApiV1StudioShotsPost({
-          requestBody: {
-            chapter_id: chapterId,
-            index: maxIndex + offset,
-            title,
-            script_excerpt: prompt,
-          } as never,
-        })
+      // 以**数据库现状**为准计算缺口，而不是用可能过期的本地状态：
+      // 这样即使上一次部分失败/用户在别处建过镜头，也不会重复创建或撞序号。
+      const latest = await fetchPromptBoard(chapterId)
+      const latestShots = latest.shots ?? []
+      const target = Math.max(rows.length, pendingBlockCount)
+      const missing = target - latestShots.length
+      if (missing <= 0) {
+        message.info('当前镜头数已经不少于导入条数，无需创建')
+        await loadBoard()
+        return
       }
-      message.success(`已创建 ${missing} 个镜头，正在重新匹配提示词…`)
+      const baseIndex = latestShots.reduce((max, shot) => Math.max(max, Number(shot.index) || 0), 0)
+      let created = 0
+      const failures: string[] = []
+      for (let offset = 1; offset <= missing; offset += 1) {
+        const row = rows[latestShots.length + offset - 1]
+        const blocks = otherText
+          .split(/\n\s*\n/)
+          .map((block) => block.trim())
+          .filter(Boolean)
+        const prompt = (row?.prompt ?? blocks[latestShots.length + offset - 1] ?? '').trim()
+        const index = baseIndex + offset
+        try {
+          await StudioShotsService.createShotApiV1StudioShotsPost({
+            requestBody: {
+              // id 是 ShotCreate 的必填字段：用「章节 + 序号 + 时间戳」保证唯一且可排查
+              id: `shot_${chapterId}_${index}_${Date.now()}`,
+              chapter_id: chapterId,
+              index,
+              title: prompt.slice(0, 20) || `镜头 ${index}`,
+              script_excerpt: prompt,
+            } as never,
+          })
+          created += 1
+        } catch (error) {
+          // 单个失败不中断其余：SQLite 唯一约束下更可能是序号冲突，跳过继续
+          failures.push(`第 ${index} 个：${(error as Error)?.message ?? '创建失败'}`)
+        }
+      }
+      if (created > 0) {
+        message.success(`已创建 ${created} 个镜头${failures.length ? `（${failures.length} 个失败，可再次点击补齐）` : ''}`)
+      } else {
+        message.error(`镜头创建失败：${failures[0] ?? '未知原因'}`)
+      }
+      // 关键：立刻刷新镜头列表并按新镜头重新匹配，预览表马上显示正确的编号/内容/状态
       await loadBoard()
       if (otherText.trim()) {
-        // 文本导入的原文还在，直接重解析一次即可把 rows 匹配到新镜头
         const preview = await parsePromptImport(chapterId, otherText)
         setIssues(preview.issues ?? [])
         setCountMismatch(Boolean(preview.count_mismatch))
@@ -398,9 +447,10 @@ export function EpisodeVideoPromptBoard({
       const failure = classifyGenerationFailure(error, 'llm')
       message.error(failureText(failure))
     } finally {
+      createShotsInFlightRef.current = false
       setCreatingShots(false)
     }
-  }, [applyImportPreview, chapterId, loadBoard, otherText, rows, shots.length])
+  }, [applyImportPreview, chapterId, loadBoard, otherText, pendingBlockCount, rows])
 
   const doParseOtherImport = useCallback(async () => {
     if (!chapterId) return
@@ -770,12 +820,25 @@ export function EpisodeVideoPromptBoard({
       />
 
       <Space className="mt-3">
-        {rows.length > shots.length ? (
-          <Button loading={creatingShots} onClick={() => void doCreateMissingShots()}>
-            {`创建缺失镜头（${rows.length - shots.length} 个）并重新匹配`}
-          </Button>
+        {missingShotCount > 0 && (rows.length > 0 || pendingBlockCount > 0) ? (
+          <Tooltip title="按导入顺序补齐本集缺失的镜头，再用同一批提示词重新匹配（建完仍需你点「确认保存」）">
+            <Button
+              loading={creatingShots}
+              disabled={creatingShots}
+              data-testid="prompt-board-create-shots"
+              onClick={() => void doCreateMissingShots()}
+            >
+              {`创建缺失镜头（${missingShotCount} 个）并重新匹配`}
+            </Button>
+          </Tooltip>
         ) : null}
-        <Button type="primary" loading={saving} disabled={!includedCount} onClick={() => void doSave()}>
+        <Button
+          type="primary"
+          loading={saving}
+          disabled={!includedCount || creatingShots}
+          data-testid="prompt-board-save"
+          onClick={() => void doSave()}
+        >
           {`确认保存（${includedCount} 条）`}
         </Button>
         <Typography.Text type="secondary" className="text-[11px]">
@@ -798,6 +861,7 @@ export function EpisodeVideoPromptBoard({
           onChange={(event) => setImportTab(event.target.value as 'jurilu' | 'other')}
           optionType="button"
           className="mb-3"
+          data-testid="prompt-import-source"
           options={[
             { value: 'jurilu', label: '巨日禄 Cookie 导入（主入口）' },
             { value: 'other', label: '其他外部平台（粘贴 / 上传）' },
@@ -851,11 +915,18 @@ export function EpisodeVideoPromptBoard({
             </Upload>
             <Input.TextArea
               rows={10}
+              aria-label="批量提示词文本"
+              data-testid="prompt-import-text"
               placeholder={'整段粘贴：每条之间空行；支持 S001 / #1 / 1. 这类编号，没有编号就按顺序匹配'}
               value={otherText}
               onChange={(e) => setOtherText(e.target.value)}
             />
-            <Button type="primary" loading={parsing} onClick={() => void doParseOtherImport()}>
+            <Button
+              type="primary"
+              loading={parsing}
+              data-testid="prompt-import-parse"
+              onClick={() => void doParseOtherImport()}
+            >
               解析并进入预览表（不写库）
             </Button>
           </Space>

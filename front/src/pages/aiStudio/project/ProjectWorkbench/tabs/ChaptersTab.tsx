@@ -635,7 +635,7 @@ export function ChaptersTab() {
                   showUploadList={false}
                   beforeUpload={(file) => handleImportDocument(file as unknown as File)}
                 >
-                  <Button size="small" icon={<UploadOutlined />} loading={importingDoc}>
+                  <Button size="small" icon={<UploadOutlined />} loading={importingDoc} data-testid="chapter-import-doc">
                     导入 TXT / MD / DOCX
                   </Button>
                 </Upload>
@@ -708,10 +708,21 @@ export function ChaptersTab() {
             />
           </div>
           <div>
-            <span className="text-gray-600 text-sm">章节内容（可粘贴剧本）</span>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-gray-600 text-sm">章节内容（粘贴或导入文档）</span>
+              <Upload
+                accept=".txt,.md,.markdown,.docx,.doc"
+                showUploadList={false}
+                beforeUpload={(file) => handleImportDocument(file as unknown as File)}
+              >
+                <Button size="small" icon={<UploadOutlined />} loading={importingDoc} data-testid="chapter-import-doc">
+                  导入 TXT / MD / DOCX
+                </Button>
+              </Upload>
+            </div>
             <TextArea
               rows={6}
-              placeholder="粘贴文学剧本..."
+              placeholder="粘贴文学剧本，或点右上角导入 TXT / MD / DOCX 文档（老版 .doc 请先另存为 DOCX）"
               value={createContent}
               onChange={(e) => setCreateContent(e.target.value)}
               className="mt-1 font-mono text-sm"

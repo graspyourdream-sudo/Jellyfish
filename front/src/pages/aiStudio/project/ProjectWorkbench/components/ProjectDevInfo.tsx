@@ -88,7 +88,7 @@ export function ProjectDevInfo({ detail, model, resolution, onReload }: ProjectD
               </div>
 
               <div>
-                <div className="mb-1 font-medium text-gray-500">六步判定优先级</div>
+                <div className="mb-1 font-medium text-gray-500">步骤判定优先级（内部 6 个 key → 用户可见 5 步）</div>
                 <pre className="m-0 overflow-x-auto rounded bg-gray-50 p-2 text-[11px] leading-5">
                   {STEP_PRECEDENCE}
                 </pre>

@@ -30,8 +30,14 @@ export type ProjectSignalAsset = {
   type: ProjectSignalAssetType
   /** 已有参考图片（后端 thumbnail 非空即视为已有图） */
   hasImage: boolean
-  /** 定版/缩略图地址（空串 = 还没有图）；第 3 步「查看定版图」用它，不额外发请求。 */
+  /** 定版/缩略图地址（空串 = 还没有图）；第 2 步「查看定版图」用它。 */
   thumbnail: string
+  /**
+   * 是否已设为定版（`*_images.is_primary`）。
+   * 现有列表载荷不暴露这一列，只能按资产逐个查图片表（有界、并发、失败置 null）。
+   * null = 无法判定 —— 业务状态会停在「待设为定版」，不会误报「已定版」。
+   */
+  hasPrimary: boolean | null
   /** 已保存图片提示词；null = 本接口载荷没有暴露 `image_prompts`，无法判定 */
   hasImagePrompt: boolean | null
 }
@@ -48,6 +54,8 @@ export type ProjectStepSignalDetail = {
   projectShotsWithPrompt: number
   assetCounts: { characters: number; scenes: number; props: number; costumes: number }
   assetImageCount: number
+  /** 已设为定版的资产数；null = 无法判定（不阻塞步骤判定） */
+  assetsWithPrimaryCount: number | null
   assetsWithImagePromptCount: number | null
   /** 抓取失败的信号来源（中文），空数组表示全部成功 */
   failedSources: string[]
@@ -75,6 +83,7 @@ const EMPTY_DETAIL: ProjectStepSignalDetail = {
   projectShotsWithPrompt: 0,
   assetCounts: { characters: 0, scenes: 0, props: 0, costumes: 0 },
   assetImageCount: 0,
+  assetsWithPrimaryCount: null,
   assetsWithImagePromptCount: null,
   failedSources: [],
 }
@@ -266,6 +275,7 @@ export function useProjectStepSignals(args: {
           type: 'character',
           hasImage: toText(item.thumbnail) !== '',
           thumbnail: toText(item.thumbnail),
+          hasPrimary: null,
           hasImagePrompt: exposed ? imagePromptCount(item) > 0 : null,
         })
       })
@@ -291,10 +301,43 @@ export function useProjectStepSignals(args: {
             type: entityType,
             hasImage: toText(row.thumbnail) !== '',
             thumbnail: toText(row.thumbnail),
+            hasPrimary: null,
             hasImagePrompt: exposed ? imagePromptCount(row) > 0 : null,
           })
         })
       })
+
+      // —— 定版状态：现有列表载荷没有 is_primary，只能按资产查图片表 ——
+      // 有界（最多 24 个资产）+ 并发 + 失败容忍；拿不到就是 null（业务状态不会跳到「已定版」）。
+      const primaryLookupTargets = nextAssets.slice(0, 24)
+      if (primaryLookupTargets.length > 0) {
+        const imageRows = await Promise.all(
+          primaryLookupTargets.map((asset) =>
+            safeRequest(
+              StudioEntitiesService.listEntityImagesApiV1StudioEntitiesEntityTypeEntityIdImagesGet({
+                entityType: asset.type,
+                entityId: asset.id,
+                page: 1,
+                pageSize: 20,
+                order: null,
+                isDesc: false,
+              }),
+            ),
+          ),
+        )
+        let anyFailed = false
+        imageRows.forEach((res, index) => {
+          const asset = primaryLookupTargets[index]
+          if (!res) {
+            anyFailed = true
+            return
+          }
+          const rows = (res.data?.items ?? []) as Record<string, unknown>[]
+          asset.hasPrimary = rows.some((row) => row.is_primary === true)
+          if (rows.length > 0) asset.hasImage = true
+        })
+        if (anyFailed) failedSources.push('资产图片表接口（定版状态）')
+      }
 
       const assetCounts = {
         characters: nextAssets.filter((asset) => asset.type === 'character').length,
@@ -303,6 +346,10 @@ export function useProjectStepSignals(args: {
         costumes: nextAssets.filter((asset) => asset.type === 'costume').length,
       }
       const assetImageCount = nextAssets.filter((asset) => asset.hasImage).length
+      // 定版数量：只有真查过（非 null）才算，且不把「拿不到」当成「没有」
+      const assetsWithPrimaryCount = primaryLookupTargets.some((asset) => asset.hasPrimary !== null)
+        ? nextAssets.filter((asset) => asset.hasPrimary === true).length
+        : null
       const assetsWithImagePromptCount = promptFieldExposed
         ? nextAssets.filter((asset) => asset.hasImagePrompt === true).length
         : null
@@ -351,6 +398,7 @@ export function useProjectStepSignals(args: {
         projectShotsWithPrompt,
         assetCounts,
         assetImageCount,
+        assetsWithPrimaryCount,
         assetsWithImagePromptCount,
         failedSources,
       })
@@ -362,6 +410,7 @@ export function useProjectStepSignals(args: {
         shotCount: focusChapterShotCount,
         assetCounts,
         assetImageCount,
+        assetsWithPrimaryCount,
         assetsWithImagePromptCount,
         shotsWithVideoPromptCount: focusChapterShotsWithPrompt,
         shotsWithAssetLinkCount: focusChapterShotsWithLinks,
