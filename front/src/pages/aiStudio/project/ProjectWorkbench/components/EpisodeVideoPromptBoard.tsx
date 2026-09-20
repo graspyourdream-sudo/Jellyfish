@@ -62,9 +62,30 @@ import {
   type PromptBoardOrigin,
   type PromptBoardShot,
   extractJuriluDiagnostics,
+  type JuriluScriptGroup,
 } from '../../../../../services/llmPipelineApi'
-import { StudioShotsService } from '../../../../../services/generated'
+import { StudioChaptersService, StudioShotsService } from '../../../../../services/generated'
 import { classifyGenerationFailure, failureText } from '../../../components/generationGate'
+import { useChapters, newId } from '../hooks/useProjectData'
+import { nextChapterIndex } from '../../../chapter/chapterIndexing'
+import JuriluScriptGroupPicker from './JuriluScriptGroupPicker'
+import {
+  activeGroupLabel,
+  applyGroupSwitch,
+  buildJuriluEntries,
+  clearRowsBeforeMatch,
+  countMatchedEntries,
+  groupCoverageNotice,
+  normalizeScriptGroups,
+  planGroupMatch,
+  planShotShortage,
+  resolveScriptSelection,
+  saveButtonText,
+  summarizeScriptGroups,
+  wholeGroupSaveNotice,
+  type JuriluPreviewEntry,
+  type ShortageOptionKey,
+} from './juriluScriptGroups'
 import {
   PHASE_META,
   SAVED_META,
@@ -109,6 +130,10 @@ type PreviewRow = {
   phase?: DraftPhase
   /** 正文能不能按大模型草稿保存（没有服务端令牌就不行） */
   saveable?: boolean
+  /** 巨日禄脚本组（script_id）：统一预览表的「脚本组」列 */
+  scriptId?: string
+  /** 巨日禄那边的分镜序号：统一预览表的「巨日禄序号」列 */
+  juriluSeq?: string
 }
 
 const ORIGIN_META: Record<PromptBoardOrigin, { label: string; color: string }> = {
@@ -155,12 +180,101 @@ type EpisodeVideoPromptBoardProps = {
 
 export function EpisodeVideoPromptBoard({
   projectId,
-  chapterId,
-  chapterLabel,
+  chapterId: chapterIdProp,
+  chapterLabel: chapterLabelProp,
   onEnterStudio,
   onContinueAssets,
   onGoBinding,
 }: EpisodeVideoPromptBoardProps) {
+  /**
+   * **目标章节**（2026-09-20 升级要求：选完脚本组后可以选本项目已有章节，或直接新建章节）。
+   *
+   * 为什么在组件内部维护：本页是"集级"页面，页面级选中集来自 URL（`?chapter=`）。
+   * 巨日禄整组导入的目标集完全可以与 URL 里那一集不同（例如临时验收章节），
+   * 所以内部保留一个目标集，默认跟随 prop；后续所有读写都用这个变量。
+   */
+  const [targetChapterId, setTargetChapterId] = useState<string | null>(chapterIdProp ?? null)
+  useEffect(() => {
+    setTargetChapterId(chapterIdProp ?? null)
+  }, [chapterIdProp])
+  const chapterId = targetChapterId
+  /** 项目章节列表（目标章节选择器用；与「章节列表」同一个 hook / 同一个接口） */
+  const { chapters: projectChapters, loading: chaptersLoading, refresh: refreshChapters } = useChapters(projectId)
+  const [creatingChapter, setCreatingChapter] = useState(false)
+
+  const chapterLabel = useMemo(() => {
+    if (!chapterId) return chapterLabelProp || '未选择章节'
+    if (chapterId === chapterIdProp) return chapterLabelProp || '未选择章节'
+    const matched = projectChapters.find((item) => item.id === chapterId)
+    if (!matched) return `章节 ${chapterId}`
+    return `第${matched.index}集 · ${matched.title}`
+  }, [chapterId, chapterIdProp, chapterLabelProp, projectChapters])
+
+  const chapterOptions = useMemo(
+    () =>
+      [...projectChapters]
+        .sort((a, b) => a.index - b.index)
+        .map((item) => ({
+          value: item.id,
+          label: `第${item.index}集 · ${item.title}`,
+          shotCount: Number(item.storyboardCount) || 0,
+        })),
+    [projectChapters],
+  )
+
+  /**
+   * 换目标章节 = 换了一张要写的表：旧集的匹配结果、勾选与"已匹配组"标记**一律清掉**。
+   * 与"换脚本组先清表"同一条口径 —— 跨章节混表同样是脏数据。
+   */
+  const switchTargetChapter = useCallback(
+    (next: string, opts: { silent?: boolean } = {}) => {
+      if (!next || next === targetChapterId) return
+      setTargetChapterId(next)
+      setRows([])
+      setIssues([])
+      setCountMismatch(false)
+      setAllowPartial(false)
+      setMatchedScriptId('')
+      setMatchedRowCount(0)
+      setShortageDismissed(false)
+      if (!opts.silent) message.info('已切换目标章节：预览表已清空（不会把上一集的匹配结果带过去）', 6)
+    },
+    [targetChapterId],
+  )
+
+  /** 新建章节：**复用项目既有的建章节能力**（章节列表里那一套接口与序号口径）。 */
+  const createChapter = useCallback(
+    async (input: { title: string; summary: string }) => {
+      if (!projectId) return
+      setCreatingChapter(true)
+      try {
+        const nextIndex = nextChapterIndex(projectChapters.map((item) => item.index))
+        const createdId = newId('c')
+        await StudioChaptersService.createChapterApiV1StudioChaptersPost({
+          requestBody: {
+            id: createdId,
+            project_id: projectId,
+            index: nextIndex,
+            title: input.title,
+            summary: input.summary,
+            storyboard_count: 0,
+            status: 'draft',
+          } as never,
+        })
+        message.success(`章节创建成功：第${nextIndex}集 · ${input.title}（未建任何镜头、未写提示词）`, 6)
+        // 让本页的目标章节指向新建的集：后面的建镜头 / 匹配 / 保存都写在这一集
+        // （silent：上面已经给过"章节创建成功"的提示，不再叠一条切换提示）
+        switchTargetChapter(createdId, { silent: true })
+        await refreshChapters()
+      } catch (error) {
+        message.error(`创建章节失败：${error instanceof Error ? error.message : '未知原因'}`)
+      } finally {
+        setCreatingChapter(false)
+      }
+    },
+    [projectChapters, projectId, refreshChapters, switchTargetChapter],
+  )
+
   const [shots, setShots] = useState<PromptBoardShot[]>([])
   const [rows, setRows] = useState<PreviewRow[]>([])
   const [loading, setLoading] = useState(false)
@@ -203,10 +317,53 @@ export function EpisodeVideoPromptBoard({
     setJuriluReferer('')
   }, [])
   const [juriluFetching, setJuriluFetching] = useState(false)
+  /**
+   * 巨日禄**脚本组选择**（2026-09-20 用户要求）：
+   * 一次抓取会拿到三个 scriptId、合计 109 条分镜，**默认不跨 scriptId 合并**，
+   * 必须由用户明确选一组之后，才把那一组送进统一预览与镜头匹配。
+   *
+   * - `scriptGroups`   后端返回的脚本组（第一步记录的可用字段名等都在里面）
+   * - `selectedScriptId` 用户当前勾选（**'' = 默认一组都不选**）
+   * - `matchedScriptId`  当前表里的 rows 属于哪一组（表抬头与保存都要它）
+   */
+  const [scriptGroups, setScriptGroups] = useState<JuriluScriptGroup[]>([])
+  const [selectedScriptId, setSelectedScriptId] = useState('')
+  const [matchedScriptId, setMatchedScriptId] = useState('')
+  const [matchedRowCount, setMatchedRowCount] = useState(0)
+  const [juriluMatching, setJuriluMatching] = useState(false)
+  /** 脚本组状态机给出的中文提示（选组 / 换组 / 后端要求重选时逐条展示） */
+  const [juriluNotices, setJuriluNotices] = useState<string[]>([])
+  /**
+   * 选组后**第二次** preview 要复用的凭证。
+   *
+   * 只活在"本次导入会话"的内存里（React state 之外、不写日志、不回显）：
+   * 抓取 → 选组 → 匹配 是一个连续动作，中途清掉凭证会让第二步永远发不出去。
+   * 生命周期：点「放弃本次导入」、离开页面、组件卸载 → 立即清空。
+   */
+  const juriluSessionRef = useRef<{
+    url: string
+    cookie: string
+    authorization: string
+    auth_mode: string
+    referer: string
+  } | null>(null)
   const [otherText, setOtherText] = useState('')
   const [parsing, setParsing] = useState(false)
 
   const shotById = useMemo(() => new Map(shots.map((shot) => [shot.shot_id, shot])), [shots])
+  /**
+   * **永远最新**的镜头表（ref，不是闭包快照）。
+   *
+   * 为什么需要它（2026-09-20 页面自查实测到的真实缺陷）：
+   * 「创建缺失镜头 → 重新匹配」是一条**跨多个 await 的长链路**，
+   * 其中 `applyImportPreview` / `toRow` 是点击那一刻的闭包，里头的 `shots` 还是"建镜之前"的旧值。
+   * 结果：新镜头其实已经建好、shot_id 也匹配上了，但表里的「镜头编号 / 镜头内容」被算成空 /（未匹配）。
+   * 用 ref 取当下最新的镜头表，任何异步链路都不会再拿到过期快照。
+   */
+  const shotByIdRef = useRef(shotById)
+  useEffect(() => {
+    shotByIdRef.current = shotById
+  }, [shotById])
 
   /** 逐镜状态（每一镜都有一行，含"未开始"）：状态表与"重试谁"都以它为准。 */
   const statuses = useMemo(() => buildShotDraftStatuses({ shots, drafts }), [shots, drafts])
@@ -319,8 +476,14 @@ export function EpisodeVideoPromptBoard({
     void loadBoard()
   }, [loadBoard])
 
-  // 离开页面（含切换步骤/关闭标签）时清空敏感输入
-  useEffect(() => () => clearJuriluCredentials(), [clearJuriluCredentials])
+  // 离开页面（含切换步骤/关闭标签）时清空敏感输入与本次导入会话
+  useEffect(
+    () => () => {
+      clearJuriluCredentials()
+      juriluSessionRef.current = null
+    },
+    [clearJuriluCredentials],
+  )
 
   /**
    * **刻意不在离开页面时释放租约**：此刻可能有一次真实调用正在飞，
@@ -365,8 +528,11 @@ export function EpisodeVideoPromptBoard({
       message?: string
       draftToken?: string
       edited?: boolean
+      scriptId?: string
+      juriluSeq?: string
     }): PreviewRow => {
-      const shot = shotById.get(input.shotId)
+      // 取**当下最新**的镜头表（ref），避免长链路里用到建镜前的旧快照
+      const shot = shotByIdRef.current.get(input.shotId)
       return {
         key: `${input.origin}:${input.shotId}:${Math.random().toString(36).slice(2, 8)}`,
         shotId: input.shotId,
@@ -380,9 +546,11 @@ export function EpisodeVideoPromptBoard({
         draftToken: input.draftToken,
         edited: Boolean(input.edited),
         include: input.status !== 'unmatched' && input.status !== 'duplicate' && input.status !== 'dry_run' && input.status !== 'busy',
+        scriptId: input.scriptId,
+        juriluSeq: input.juriluSeq,
       }
     },
-    [shotById],
+    [],
   )
 
   /**
@@ -660,7 +828,15 @@ export function EpisodeVideoPromptBoard({
 
   const applyImportPreview = useCallback(
     (
-      entries: Array<{ prompt: string; shot_id: string; matched_by: string; status: string; message: string }>,
+      entries: Array<{
+        prompt: string
+        shot_id: string
+        matched_by: string
+        status: string
+        message: string
+        scriptId?: string
+        juriluSeq?: string
+      }>,
       origin: PromptBoardOrigin,
     ) => {
       const next = entries.map((entry) =>
@@ -672,6 +848,8 @@ export function EpisodeVideoPromptBoard({
           status: entry.status === 'ok' ? 'ok' : entry.status === 'duplicate' ? 'duplicate' : 'unmatched',
           message: entry.message,
           edited: false,
+          scriptId: entry.scriptId,
+          juriluSeq: entry.juriluSeq,
         }),
       )
       setRows(next)
@@ -703,76 +881,61 @@ export function EpisodeVideoPromptBoard({
     return blocks.length > 0 ? blocks.length : 1
   }, [otherText])
 
-  /** 还需要创建几个镜头（取「预览行数」与「文本段数」的较大者）。 */
-  const missingShotCount = Math.max(rows.length, pendingBlockCount) - shots.length
+  /** 当前选中的脚本组（'' = 未选组）；整组导入的目标条数就来自它的 record_count。 */
+  const selectedGroup = useMemo(
+    () => scriptGroups.find((group) => group.script_id === selectedScriptId) ?? null,
+    [scriptGroups, selectedScriptId],
+  )
+  /** 已匹配进表的那一组有多少条记录（用于"整组保存"说明与覆盖率提示）。 */
+  const matchedGroupRecordCount = useMemo(
+    () => scriptGroups.find((group) => group.script_id === matchedScriptId)?.record_count ?? 0,
+    [matchedScriptId, scriptGroups],
+  )
+  const juriluTargetCount = Math.max(0, Math.trunc(selectedGroup?.record_count ?? 0))
 
-  const doCreateMissingShots = useCallback(async () => {
-    if (!chapterId) return
-    // 防重复点击：按钮 loading/disabled 之外再加一道同步闸门（状态更新是异步的）
-    if (createShotsInFlightRef.current) return
-    createShotsInFlightRef.current = true
-    setCreatingShots(true)
-    try {
-      // 以**数据库现状**为准计算缺口，而不是用可能过期的本地状态：
-      // 这样即使上一次部分失败/用户在别处建过镜头，也不会重复创建或撞序号。
-      const latest = await fetchPromptBoard(chapterId)
-      const latestShots = latest.shots ?? []
-      const target = Math.max(rows.length, pendingBlockCount)
-      const missing = target - latestShots.length
-      if (missing <= 0) {
-        message.info('当前镜头数已经不少于导入条数，无需创建')
-        await loadBoard()
-        return
-      }
-      const baseIndex = latestShots.reduce((max, shot) => Math.max(max, Number(shot.index) || 0), 0)
-      let created = 0
-      const failures: string[] = []
-      for (let offset = 1; offset <= missing; offset += 1) {
-        const row = rows[latestShots.length + offset - 1]
-        const blocks = otherText
-          .split(/\n\s*\n/)
-          .map((block) => block.trim())
-          .filter(Boolean)
-        const prompt = (row?.prompt ?? blocks[latestShots.length + offset - 1] ?? '').trim()
-        const index = baseIndex + offset
-        try {
-          await StudioShotsService.createShotApiV1StudioShotsPost({
-            requestBody: {
-              // id 是 ShotCreate 的必填字段：用「章节 + 序号 + 时间戳」保证唯一且可排查
-              id: `shot_${chapterId}_${index}_${Date.now()}`,
-              chapter_id: chapterId,
-              index,
-              title: prompt.slice(0, 20) || `镜头 ${index}`,
-              script_excerpt: prompt,
-            } as never,
-          })
-          created += 1
-        } catch (error) {
-          // 单个失败不中断其余：SQLite 唯一约束下更可能是序号冲突，跳过继续
-          failures.push(`第 ${index} 个：${(error as Error)?.message ?? '创建失败'}`)
-        }
-      }
-      if (created > 0) {
-        message.success(`已创建 ${created} 个镜头${failures.length ? `（${failures.length} 个失败，可再次点击补齐）` : ''}`)
-      } else {
-        message.error(`镜头创建失败：${failures[0] ?? '未知原因'}`)
-      }
-      // 关键：立刻刷新镜头列表并按新镜头重新匹配，预览表马上显示正确的编号/内容/状态
-      await loadBoard()
-      if (otherText.trim()) {
-        const preview = await parsePromptImport(chapterId, otherText)
-        setIssues(preview.issues ?? [])
-        setCountMismatch(Boolean(preview.count_mismatch))
-        applyImportPreview(preview.entries ?? [], 'external_import')
-      }
-    } catch (error) {
-      const failure = classifyGenerationFailure(error, 'llm')
-      message.error(failureText(failure))
-    } finally {
-      createShotsInFlightRef.current = false
-      setCreatingShots(false)
-    }
-  }, [applyImportPreview, chapterId, loadBoard, otherText, pendingBlockCount, rows])
+  /** 还需要创建几个镜头（取「预览行数」「文本段数」「选中脚本组记录数」的最大者）。 */
+  const missingShotCount = Math.max(rows.length, pendingBlockCount, juriluTargetCount) - shots.length
+
+  /**
+   * 当前表里**匹配正常**的巨日禄条数（"仅保存已经匹配的条目（N 条）"用的就是它）。
+   * 复用纯函数 `countMatchedEntries`，避免这里和纯逻辑各写一套判定。
+   */
+  const juriluMatchedCount = useMemo(
+    () =>
+      countMatchedEntries(
+        rows
+          .filter((row) => row.origin === 'jurilu_import')
+          .map<JuriluPreviewEntry>((row) => ({
+            prompt: row.prompt,
+            shot_id: row.shotId,
+            matched_by: row.matchBy,
+            status: row.status === 'ok' ? 'ok' : 'unmatched',
+            message: row.message,
+            scriptId: row.scriptId ?? '',
+            juriluSeq: row.juriluSeq ?? '',
+          })),
+      ),
+    [rows],
+  )
+  /**
+   * 镜头不足 → **明确显示缺少数量 + 三个选项**（用户升级要求）。
+   *
+   * 判定放在纯函数 `planShotShortage`（有测试）；这里只负责把它的选项接到动作上：
+   * ① 创建缺失镜头后完整匹配（复用下面同一条建镜链路）② 仅保存已匹配 ③ 返回调整。
+   */
+  const shortage = useMemo(
+    () =>
+      planShotShortage({
+        shotCount: shots.length,
+        // 有匹配结果时以"进表条数"为准；还没匹配（例如本集 0 镜）时用选中组的记录数算缺口
+        entryCount: matchedScriptId ? rows.length : 0,
+        matchedCount: juriluMatchedCount,
+        groupRecordCount: juriluTargetCount || matchedGroupRecordCount,
+      }),
+    [juriluMatchedCount, juriluTargetCount, matchedGroupRecordCount, matchedScriptId, rows.length, shots.length],
+  )
+  const [shortageDismissed, setShortageDismissed] = useState(false)
+
 
   const doParseOtherImport = useCallback(async () => {
     if (!chapterId) return
@@ -812,6 +975,8 @@ export function EpisodeVideoPromptBoard({
     }
     setJuriluFetching(true)
     try {
+      // 第一步**不带** script_ids（空数组 = 还没选组）：后端只返回脚本组、rows 为空。
+      // 「不要因为接口共返回 109 条，就把 109 条当成同一集的连续镜头」——这一步只做分组。
       const preview = await previewJuriluImport(projectId, {
         chapter_id: chapterId,
         url: juriluUrl.trim(),
@@ -822,15 +987,68 @@ export function EpisodeVideoPromptBoard({
         referer: juriluReferer.trim() || juriluUrl.trim(),
         create_missing: false,
         overwrite: false,
+        script_ids: [],
       })
-      // 抓取结果**不落库**：只映射进统一预览表，等用户确认
-      const entries = (preview.rows ?? []).map((row) => ({
-        prompt: row.prompt,
-        shot_id: String(row.shot_id ?? ''),
-        matched_by: row.shot_id ? 'cookie' : 'none',
-        status: row.shot_id ? 'ok' : 'unmatched',
-        message: row.reason || (row.shot_id ? '' : '巨日禄这条没有匹配到镜头'),
-      }))
+      const groups = normalizeScriptGroups(preview.script_groups)
+      const rowsBack = preview.rows?.length ?? 0
+      const selection = resolveScriptSelection({
+        groups,
+        selectedScriptIds: [], // 默认一组都不选
+        requiresScriptSelection: preview.requires_script_selection,
+        rowCount: rowsBack,
+        responseSelectedIds: preview.selected_script_ids,
+      })
+
+      // 旧组的状态一律清干净：换一次抓取就是一次全新的选择
+      setScriptGroups(groups)
+      setSelectedScriptId('')
+      setMatchedScriptId('')
+      setMatchedRowCount(0)
+      setAllowPartial(false)
+
+      if (groups.length) {
+        // 抓到脚本组 → 先让用户选，**这一步不匹配、不写库**
+        setRows([])
+        setIssues(preview.warnings ?? [])
+        setCountMismatch(false)
+        const notices = [...selection.notices, preview.note ?? ''].map((item) => item.trim()).filter(Boolean)
+        notices.push(
+          '本次抓取凭证只保留在本次导入会话内存中（选组后还要再请求一次）；点「放弃本次导入」或离开页面立即清空。',
+        )
+        if (rowsBack > 0 && selection.dropRows) {
+          // 后端一边要求选组、一边给了 rows：一条都不许进表
+          message.warning(selection.notices.find((item) => /必须重新选组/.test(item)) ?? '请重新选择脚本组', 8)
+        }
+        setJuriluNotices(notices)
+        juriluSessionRef.current = {
+          url: juriluUrl.trim(),
+          cookie: juriluCookie,
+          authorization: juriluAuthorization,
+          auth_mode: juriluAuthMode,
+          referer: juriluReferer.trim() || juriluUrl.trim(),
+        }
+        const summary = summarizeScriptGroups(groups)
+        message.success(
+          `已抓到 ${summary.groupCount} 个脚本组、合计 ${summary.recordTotal} 条分镜：默认不合并，请在页面上选择一组后点「用这一组匹配镜头」`,
+          8,
+        )
+        setImportOpen(false)
+        return
+      }
+
+      if (preview.requires_script_selection) {
+        // 后端要求先选组，却没给出脚本组 → 不能拿 rows 硬凑
+        setRows([])
+        setJuriluNotices(selection.notices)
+        setIssues(['后端返回 requires_script_selection=true，但没有返回任何 script_groups：请重新抓取或联系后端核对。'])
+        message.error('后端要求先选脚本组，但没有返回脚本组清单：本次不匹配任何镜头', 8)
+        setImportOpen(false)
+        return
+      }
+
+      // 老后端（没有 script_groups 字段）：保持原有行为，直接进统一预览表
+      const entries = buildJuriluEntries(preview.rows ?? [], '')
+      setJuriluNotices([])
       setIssues(preview.warnings ?? [])
       setCountMismatch((preview.chapter_shot_count ?? 0) !== entries.length)
       setAllowPartial(false)
@@ -852,20 +1070,261 @@ export function EpisodeVideoPromptBoard({
       setJuriluFetching(false)
       clearJuriluCredentials()
     }
-  }, [applyImportPreview, chapterId, juriluAuthorization, juriluAuthMode, juriluCookie, juriluReferer, juriluUrl, projectId])
+  }, [applyImportPreview, chapterId, clearJuriluCredentials, juriluAuthorization, juriluAuthMode, juriluCookie, juriluReferer, juriluUrl, projectId])
+
+  /** 放弃本次巨日禄导入：脚本组、选中状态、会话凭证一起清掉（凭证不留内存）。 */
+  const abandonJuriluImport = useCallback(() => {
+    juriluSessionRef.current = null
+    setScriptGroups([])
+    setSelectedScriptId('')
+    setMatchedScriptId('')
+    setMatchedRowCount(0)
+    setJuriluNotices([])
+    clearJuriluCredentials()
+    message.info('已放弃本次巨日禄导入：脚本组与凭证都已清空（未写库）')
+  }, [clearJuriluCredentials])
+
+  /**
+   * 用户点选/切换脚本组：**先把上一组的 rows / 配对结果清干净**，再等他点「用这一组匹配镜头」。
+   * 纯逻辑在 `juriluScriptGroups.applyGroupSwitch`（有测试），这里只负责落到 state。
+   */
+  const selectScriptGroup = useCallback(
+    (scriptId: string) => {
+      const outcome = applyGroupSwitch<PreviewRow>({
+        previousSelectedId: selectedScriptId,
+        selectedId: scriptId,
+        currentRowCount: rows.length,
+      })
+      if (!outcome.changed) return
+      // 换组即清表：两组分镜绝不出现在同一张表里
+      setRows(outcome.nextRows)
+      setIssues([])
+      setCountMismatch(false)
+      setAllowPartial(false)
+      setSelectedScriptId(outcome.selectedId)
+      // 结论作废：换组后"镜头不足"的处理方式要重新确认
+      setShortageDismissed(false)
+      if (outcome.resetMatched) {
+        setMatchedScriptId('')
+        setMatchedRowCount(0)
+      }
+      if (outcome.notice) message.info(outcome.notice, 6)
+    },
+    [rows.length, selectedScriptId],
+  )
+
+  /**
+   * 「用这一组匹配镜头」：只把**用户明确选中的那一组**送去匹配。
+   *
+   * 顺序刻意如此：先清空旧组 rows（`planGroupMatch.clearBefore`），再发第二次 preview，
+   * 回来的是这一组的 rows —— 默认不合并、不自动选组、不自动保存。
+   */
+  const matchSelectedGroup = useCallback(async () => {
+    if (!projectId || !chapterId) return
+    const plan = planGroupMatch({
+      previousSelectedId: matchedScriptId,
+      selectedId: selectedScriptId,
+      currentRowCount: rows.length,
+    })
+    if (!plan.send) {
+      message.warning(plan.blockedReason)
+      return
+    }
+    const session = juriluSessionRef.current
+    if (!session) {
+      message.warning('本次抓取的凭证已清空（只保留在导入会话内存里）：请重新打开导入抽屉粘贴 Cookie 后再匹配')
+      return
+    }
+    // 清干净之后才允许新请求（这一步是同步的，不会出现"两组数据同表"的瞬间）
+    if (plan.clearBefore) {
+      setRows(clearRowsBeforeMatch(rows, plan))
+      setIssues([])
+      setCountMismatch(false)
+    }
+    if (plan.notice) setJuriluNotices([plan.notice])
+    setShortageDismissed(false)
+    setJuriluMatching(true)
+    try {
+      const preview = await previewJuriluImport(projectId, {
+        chapter_id: chapterId,
+        url: session.url,
+        cookie: session.cookie,
+        authorization: session.authorization,
+        auth_mode: session.auth_mode,
+        referer: session.referer,
+        create_missing: false,
+        overwrite: false,
+        script_ids: plan.scriptIds,
+      })
+      const groupsBack = normalizeScriptGroups(preview.script_groups)
+      const groupsToKeep = groupsBack.length ? groupsBack : scriptGroups
+      // **整组导入**：该组全部 rows 原样进表（不截断、不抽样），每条都带脚本组与巨日禄序号
+      const entries = buildJuriluEntries(preview.rows ?? [], plan.scriptIds[0])
+      const selection = resolveScriptSelection({
+        groups: groupsToKeep,
+        selectedScriptIds: plan.scriptIds,
+        requiresScriptSelection: preview.requires_script_selection,
+        rowCount: entries.length,
+        responseSelectedIds: preview.selected_script_ids,
+      })
+      setScriptGroups(groupsToKeep)
+      setIssues(preview.warnings ?? [])
+      // 组覆盖率：后端少给/多给都要说出来（页面既不截断也不补齐）
+      const groupRecordCount =
+        groupsToKeep.find((item) => item.script_id === plan.scriptIds[0])?.record_count ?? entries.length
+      const coverage = groupCoverageNotice(groupRecordCount, entries.length)
+      const notices = [plan.notice, coverage, ...selection.notices, preview.note ?? '']
+        .map((item) => item.trim())
+        .filter(Boolean)
+      setJuriluNotices(notices)
+      if (selection.dropRows) {
+        // 后端仍要求选组却给了 rows：一条都不进表
+        setRows([])
+        setMatchedScriptId('')
+        setMatchedRowCount(0)
+        setCountMismatch(false)
+        message.warning('后端仍要求重新选择脚本组：这次返回的分镜不会进入预览表，请重新选一组再匹配', 8)
+        return
+      }
+      setCountMismatch((preview.chapter_shot_count ?? 0) !== entries.length)
+      setAllowPartial(false)
+      applyImportPreview(entries, 'jurilu_import')
+      setMatchedScriptId(plan.scriptIds[0])
+      setMatchedRowCount(entries.length)
+      message.success(
+        `已用脚本组 ${plan.scriptIds[0]} 整组匹配 ${entries.length} 条巨日禄提示词（默认不合并、未写库）：请在下面的预览表里核对后确认保存`,
+        8,
+      )
+    } catch (error) {
+      const text = error instanceof Error ? error.message : '巨日禄匹配失败（Cookie 是否有效？）'
+      const diag = extractJuriluDiagnostics(error)
+      if (diag) {
+        setIssues([diag])
+        message.error(`${text}｜${diag}`, 8)
+      } else {
+        message.error(text)
+      }
+    } finally {
+      setJuriluMatching(false)
+    }
+  }, [applyImportPreview, chapterId, matchedScriptId, projectId, rows, scriptGroups, selectedScriptId])
+
+  /**
+   * 按导入顺序**创建缺失镜头**，然后重新匹配（预览表马上显示正确编号/内容/状态），
+   * 最后由用户点「确认保存」才写库 —— **没有任何自动写库、自动建镜头**。
+   *
+   * 巨日禄整组导入（升级要求第 2 条）：目标条数取自**选中脚本组的记录数**，
+   * 所以「本集 0 镜 + 该组 31 条」也能一次补齐 31 个镜头，然后用**同一组**重新匹配
+   * （复用这条既有链路，不另造割裂流程）。
+   *
+   * 为什么放在 `matchSelectedGroup` **后面**：它要复用匹配链路，放在前面会踩
+   * useCallback 依赖数组的 TDZ（数组在渲染时就求值）。
+   */
+  const doCreateMissingShots = useCallback(async () => {
+    if (!chapterId) return
+    // 防重复点击：按钮 loading/disabled 之外再加一道同步闸门（状态更新是异步的）
+    if (createShotsInFlightRef.current) return
+    createShotsInFlightRef.current = true
+    setCreatingShots(true)
+    try {
+      // 以**数据库现状**为准计算缺口，而不是用可能过期的本地状态：
+      // 这样即使上一次部分失败/用户在别处建过镜头，也不会重复创建或撞序号。
+      const latest = await fetchPromptBoard(chapterId)
+      const latestShots = latest.shots ?? []
+      const target = Math.max(rows.length, pendingBlockCount, juriluTargetCount)
+      const missing = target - latestShots.length
+      if (missing <= 0) {
+        message.info('当前镜头数已经不少于导入条数，无需创建')
+        await loadBoard()
+        return
+      }
+      const baseIndex = latestShots.reduce((max, shot) => Math.max(max, Number(shot.index) || 0), 0)
+      let created = 0
+      const failures: string[] = []
+      for (let offset = 1; offset <= missing; offset += 1) {
+        const row = rows[latestShots.length + offset - 1]
+        const blocks = otherText
+          .split(/\n\s*\n/)
+          .map((block) => block.trim())
+          .filter(Boolean)
+        const prompt = (row?.prompt ?? blocks[latestShots.length + offset - 1] ?? '').trim()
+        const index = baseIndex + offset
+        try {
+          await StudioShotsService.createShotApiV1StudioShotsPost({
+            requestBody: {
+              // id 是 ShotCreate 的必填字段：用「章节 + 序号 + 时间戳」保证唯一且可排查
+              id: `shot_${chapterId}_${index}_${Date.now()}`,
+              chapter_id: chapterId,
+              index,
+              title: prompt.slice(0, 20) || `镜头 ${index}`,
+              script_excerpt: prompt,
+            } as never,
+          })
+          created += 1
+        } catch (error) {
+          // 单个失败不中断其余：SQLite 唯一约束下更可能是序号冲突，跳过继续
+          failures.push(`第 ${index} 个：${(error as Error)?.message ?? '创建失败'}`)
+        }
+      }
+      if (created > 0) {
+        message.success(`已创建 ${created} 个镜头${failures.length ? `（${failures.length} 个失败，可再次点击补齐）` : ''}`)
+      } else {
+        message.error(`镜头创建失败：${failures[0] ?? '未知原因'}`)
+      }
+      // 关键：立刻刷新镜头列表再重新匹配，预览表马上显示正确的编号/内容/状态
+      await loadBoard()
+      if (selectedScriptId) {
+        // 巨日禄：用**同一组**重新整组匹配（镜头已经按该组条数补齐）
+        setShortageDismissed(false)
+        await matchSelectedGroup()
+      } else if (otherText.trim()) {
+        const preview = await parsePromptImport(chapterId, otherText)
+        setIssues(preview.issues ?? [])
+        setCountMismatch(Boolean(preview.count_mismatch))
+        applyImportPreview(preview.entries ?? [], 'external_import')
+      }
+    } catch (error) {
+      const failure = classifyGenerationFailure(error, 'llm')
+      message.error(failureText(failure))
+    } finally {
+      createShotsInFlightRef.current = false
+      setCreatingShots(false)
+    }
+  }, [
+    applyImportPreview,
+    chapterId,
+    juriluTargetCount,
+    loadBoard,
+    matchSelectedGroup,
+    otherText,
+    pendingBlockCount,
+    rows,
+    selectedScriptId,
+  ])
+
 
   /** 分组保存：同一张表里允许存在多种来源，按 origin 分组调用。 */
-  const doSave = useCallback(async () => {
-    if (!chapterId) return
-    const included = rows.filter((row) => row.include && row.prompt.trim())
-    if (!included.length) {
-      message.warning('没有勾选任何要保存的提示词')
-      return
-    }
-    if (countMismatch && !allowPartial) {
-      message.error('数量不一致：默认不允许保存，请先确认「仅保存已匹配项」')
-      return
-    }
+  const doSave = useCallback(
+    async (opts: { partialOverride?: boolean } = {}) => {
+      if (!chapterId) return
+      const included = rows.filter((row) => row.include && row.prompt.trim())
+      if (!included.length) {
+        message.warning('没有勾选任何要保存的提示词')
+        return
+      }
+      // 巨日禄这条线的闸门：**必须已经用某一组匹配过**才能保存。
+      // 默认不跨 scriptId 合并 —— 没选组就不该有巨日禄内容写进库（后端 apply 也拒）。
+      // 注意：这里**没有**任何条数上限，选中一组就是整组保存（勾选多少保存多少）。
+      const juriluIncluded = included.filter((row) => resolveSaveOrigin(row) === 'jurilu_import')
+      if (juriluIncluded.length && !matchedScriptId) {
+        message.error('巨日禄分镜必须先选择一组脚本组并点「用这一组匹配镜头」才能保存（默认不跨 scriptId 合并）')
+        return
+      }
+      const partialAllowed = opts.partialOverride ?? allowPartial
+      if (countMismatch && !partialAllowed) {
+        message.error('数量不一致：默认不允许保存，请先确认「仅保存已匹配项」')
+        return
+      }
     // 整表唯一性：必须在**按来源分组之前**校验，否则不同来源会分两次调用先后写同一镜头
     const uniqueError = validateTableUnique(rows)
     if (uniqueError) {
@@ -894,7 +1353,9 @@ export function EpisodeVideoPromptBoard({
           mode,
           origin,
           selected_shot_ids: selectedShotIds,
-          allow_partial: countMismatch ? allowPartial : true,
+          allow_partial: countMismatch ? partialAllowed : true,
+          // 巨日禄路径带上**当前选中的那一个脚本组**（整组保存；后端会拒绝未选/多选）
+          script_ids: origin === 'jurilu_import' && matchedScriptId ? [matchedScriptId] : undefined,
         })
         applied += result.applied_count ?? 0
         cleared += result.cleared_draft_count ?? 0
@@ -904,11 +1365,19 @@ export function EpisodeVideoPromptBoard({
         if (result.error) failures.push(result.error)
       }
       if (applied) {
-        message.success(`已保存 ${applied} 条到镜头（正式提示词）${cleared ? `；服务端已清掉 ${cleared} 份对应草稿` : ''}`, 8)
+        message.success(
+          `已保存 ${applied} 条到镜头（正式提示词${matchedScriptId ? `，来源 jurilu，脚本组 ${matchedScriptId}` : ''}）${cleared ? `；服务端已清掉 ${cleared} 份对应草稿` : ''}`,
+          8,
+        )
       }
       if (failures.length) message.warning(`有 ${failures.length} 条未写入：${failures.slice(0, 3).join('；')}`, 8)
       await loadBoard()
       setRows([])
+      // 表清空了：「已匹配组」标记与条数也要跟着清（否则抬头与按钮还在指上一组）
+      if (matchedScriptId) {
+        setMatchedScriptId('')
+        setMatchedRowCount(0)
+      }
       // 保存后草稿可能已被服务端清掉，但其它镜头（失败/未保存）的草稿要在表里继续可见
       await restoreFromServer()
     } catch (error) {
@@ -916,7 +1385,30 @@ export function EpisodeVideoPromptBoard({
     } finally {
       setSaving(false)
     }
-  }, [allowPartial, chapterId, countMismatch, loadBoard, mode, restoreFromServer, rows, selectedShotIds, validateTableUnique])
+  }, [allowPartial, chapterId, countMismatch, loadBoard, matchedScriptId, mode, restoreFromServer, rows, selectedShotIds, validateTableUnique])
+
+  /** 「镜头不足」三个选项的动作（都由用户点击触发；没有任何一条会自动写库）。 */
+  const onShortageOption = useCallback(
+    (key: ShortageOptionKey) => {
+      if (key === 'create_missing') {
+        void doCreateMissingShots()
+        return
+      }
+      if (key === 'save_matched_only') {
+        // ② 仅保存已经匹配的条目：显式打开 allow_partial 再走同一条保存链路
+        setAllowPartial(true)
+        void doSave({ partialOverride: true })
+        return
+      }
+      // ③ 返回调整：什么都不写，回预览表手工改匹配 / 换脚本组
+      setShortageDismissed(true)
+      message.info('已返回调整：可在预览表里手工改镜头编号或删条目，也可以换一个脚本组；这一步没有写库、没有建镜头。', 8)
+      document
+        .querySelector('[data-testid="prompt-board-preview-table"]')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    },
+    [doCreateMissingShots, doSave],
+  )
 
   /** 清空本集服务端草稿（危险动作：草稿是真金白银生成的，必须二次确认）。 */
   const doClearDrafts = useCallback(async () => {
@@ -935,6 +1427,8 @@ export function EpisodeVideoPromptBoard({
   }, [chapterId, restoreFromServer])
 
   const includedCount = rows.filter((row) => row.include && row.prompt.trim()).length
+  /** 巨日禄流程是否正在进行（选了组或已匹配过一组）：镜头不足面板 / 归属横幅只在它成立时出现。 */
+  const juriluFlowActive = Boolean(selectedScriptId || matchedScriptId)
   const draftDoneCount = statuses.filter((item) => item.phase === 'draft_ok').length
 
   if (!chapterId) {
@@ -1179,6 +1673,9 @@ export function EpisodeVideoPromptBoard({
             setRows([])
             setIssues([])
             setCountMismatch(false)
+            // 表清空了，"已匹配组"标记也要跟着清（否则抬头会指着一组已经没有的 rows）
+            setMatchedScriptId('')
+            setMatchedRowCount(0)
             clearJuriluCredentials()
             message.info('已清空预览表（服务端草稿仍保留，点「从服务端恢复草稿」可找回）')
           }}
@@ -1188,7 +1685,7 @@ export function EpisodeVideoPromptBoard({
         </Button>
       </Space>
 
-      {countMismatch ? (
+      {countMismatch && !(juriluFlowActive && shortage.show && !shortageDismissed) ? (
         <Alert
           type="warning"
           showIcon
@@ -1221,13 +1718,50 @@ export function EpisodeVideoPromptBoard({
         />
       ) : null}
 
+      {/* 脚本组选择区：抓取后显示在统一预览表**上面**；默认一组都不选，选完才整组匹配 */}
+      {scriptGroups.length ? (
+        <JuriluScriptGroupPicker
+          groups={scriptGroups}
+          selectedId={selectedScriptId}
+          onSelect={selectScriptGroup}
+          onMatch={() => void matchSelectedGroup()}
+          matching={juriluMatching}
+          matchedId={matchedScriptId}
+          matchedRowCount={matchedRowCount}
+          notices={juriluNotices}
+          onAbandon={abandonJuriluImport}
+          chapterOptions={chapterOptions}
+          targetChapterId={chapterId ?? ''}
+          onTargetChapterChange={(next) => switchTargetChapter(next)}
+          chaptersLoading={chaptersLoading}
+          onCreateChapter={createChapter}
+          creatingChapter={creatingChapter}
+        />
+      ) : null}
+
+      {scriptGroups.length || matchedScriptId ? (
+        <Alert
+          type="info"
+          showIcon
+          className="mb-2"
+          data-testid="jurilu-active-group-banner"
+          message={`巨日禄表内容归属：${activeGroupLabel(scriptGroups, matchedScriptId)}`}
+          description="默认不跨 scriptId 合并：下面这张表里的巨日禄分镜只来自当前匹配的那一组；换组会先清空这张表再重新匹配。选中一组就是整组导入，不截断、不抽样。"
+        />
+      ) : null}
+
       <Table<PreviewRow>
         size="small"
         rowKey="key"
         loading={loading}
         dataSource={rows}
         pagination={false}
-        locale={{ emptyText: '还没有草稿：点「生成失败/未开始」或「批量导入」开始；刷新后这里会从服务端恢复上次的草稿' }}
+        data-testid="prompt-board-preview-table"
+        locale={{
+          emptyText: scriptGroups.length
+            ? '还没有匹配任何脚本组：请在上面的「巨日禄脚本组选择」里选一组并点「用这一组匹配镜头」（默认不合并、不自动选组）'
+            : '还没有草稿：点「生成失败/未开始」或「批量导入」开始；刷新后这里会从服务端恢复上次的草稿',
+        }}
         rowSelection={{
           selectedRowKeys: rows.filter((row) => row.include).map((row) => row.key),
           onChange: (keys) => {
@@ -1237,10 +1771,30 @@ export function EpisodeVideoPromptBoard({
           getCheckboxProps: (row) => ({ disabled: row.status === 'dry_run' || row.status === 'busy' }),
         }}
         columns={[
-          { title: '编号', dataIndex: 'code', width: 70 },
-          { title: '镜头内容', dataIndex: 'shotText', width: 220, ellipsis: true },
           {
-            title: '提示词（草稿，未写正式列）',
+            title: '脚本组（script_id）',
+            dataIndex: 'scriptId',
+            width: 130,
+            render: (_value, row) =>
+              row.origin === 'jurilu_import' ? (
+                <Tag color="purple" data-testid={`prompt-row-script-${row.key}`}>
+                  {row.scriptId || '未提供脚本组'}
+                </Tag>
+              ) : (
+                <span className="text-gray-400">—</span>
+              ),
+          },
+          {
+            title: '巨日禄序号',
+            dataIndex: 'juriluSeq',
+            width: 100,
+            render: (_value, row) =>
+              row.origin === 'jurilu_import' ? (row.juriluSeq || '未提供') : <span className="text-gray-400">—</span>,
+          },
+          { title: '镜头编号', dataIndex: 'code', width: 80 },
+          { title: '镜头内容', dataIndex: 'shotText', width: 200, ellipsis: true },
+          {
+            title: '待写入提示词',
             dataIndex: 'prompt',
             render: (value: string, row) => (
               <Input.TextArea
@@ -1268,7 +1822,7 @@ export function EpisodeVideoPromptBoard({
           },
           { title: '匹配方式', dataIndex: 'matchBy', width: 90 },
           {
-            title: '状态 / 原因',
+            title: '匹配状态与原因',
             dataIndex: 'status',
             width: 200,
             render: (_value, row) => (
@@ -1329,16 +1883,55 @@ export function EpisodeVideoPromptBoard({
         ]}
       />
 
+      {/* 镜头不足：明确写出缺少数量 + 三个选项（都靠用户点击，没有任何自动写库/自动建镜头） */}
+      {juriluFlowActive && shortage.show && !shortageDismissed ? (
+        <Alert
+          type="warning"
+          showIcon
+          className="mt-3"
+          data-testid="jurilu-shot-shortage"
+          message={shortage.message}
+          description={
+            <Space direction="vertical" size={6} className="w-full">
+              {shortage.options.map((option) => (
+                <Space key={option.key} size={8} align="start" wrap>
+                  <Button
+                    size="small"
+                    type={option.key === 'create_missing' ? 'primary' : 'default'}
+                    disabled={option.disabled || creatingShots || saving}
+                    loading={(option.key === 'create_missing' && creatingShots) || (option.key === 'save_matched_only' && saving)}
+                    data-testid={`jurilu-shortage-${option.key}`}
+                    onClick={() => onShortageOption(option.key)}
+                  >
+                    {option.label}
+                  </Button>
+                  <Typography.Text type="secondary" className="text-[11px]">
+                    {option.hint}
+                  </Typography.Text>
+                </Space>
+              ))}
+              {shortageDismissed ? null : (
+                <Typography.Text type="secondary" className="text-[11px]">
+                  三个选项都不会自动写库：只有「仅保存已经匹配的条目」会立刻发起保存（仍需你在服务端返回前确认过勾选）。
+                </Typography.Text>
+              )}
+            </Space>
+          }
+        />
+      ) : null}
+
       <Space className="mt-3">
-        {missingShotCount > 0 && (rows.length > 0 || pendingBlockCount > 0) ? (
-          <Tooltip title="按导入顺序补齐本集缺失的镜头，再用同一批提示词重新匹配（建完仍需你点「确认保存」）">
+        {missingShotCount > 0 && (rows.length > 0 || pendingBlockCount > 0 || juriluTargetCount > 0) ? (
+          <Tooltip title="按导入顺序补齐本集缺失的镜头，再用同一批（或同一组）提示词重新匹配（建完仍需你点「确认保存」）">
             <Button
               loading={creatingShots}
               disabled={creatingShots}
               data-testid="prompt-board-create-shots"
               onClick={() => void doCreateMissingShots()}
             >
-              {`创建缺失镜头（${missingShotCount} 个）并重新匹配`}
+              {juriluTargetCount > 0 && selectedScriptId
+                ? `按本组提示词创建缺失镜头（${missingShotCount} 个）并重新匹配`
+                : `创建缺失镜头（${missingShotCount} 个）并重新匹配`}
             </Button>
           </Tooltip>
         ) : null}
@@ -1349,10 +1942,13 @@ export function EpisodeVideoPromptBoard({
           data-testid="prompt-board-save"
           onClick={() => void doSave()}
         >
-          {`确认保存（${includedCount} 条）`}
+          {saveButtonText(includedCount)}
         </Button>
-        <Typography.Text type="secondary" className="text-[11px]">
+        <Typography.Text type="secondary" className="text-[11px]" data-testid="prompt-board-save-note">
           保存后即写入各镜的提示词（正式列）；工作室与交付导出读的就是这份已保存内容。草稿不会被自动保存。
+          {matchedScriptId
+            ? ` ${wholeGroupSaveNotice(includedCount, matchedScriptId, matchedGroupRecordCount)}`
+            : ''}
         </Typography.Text>
       </Space>
 
@@ -1383,7 +1979,7 @@ export function EpisodeVideoPromptBoard({
               type="info"
               showIcon
               message="Cookie 只用于本次抓取：不保存、不回显、不写日志"
-              description="抓取结果不会直接落库，会先进入统一预览确认表，由你核对匹配关系后确认保存。正确填法：把浏览器「复制全部 Cookie」的整串（含开头的 Authorization= 项）放进 Cookie 框，Authorization 框留空，授权方式选「不发送（仅 Cookie）」，Referer 留空会默认用页面 URL。"
+              description="抓取结果不会直接落库，会先进入统一预览确认表，由你核对匹配关系后确认保存。正确填法：把浏览器「复制全部 Cookie」的整串（含开头的 Authorization= 项）放进 Cookie 框，Authorization 框留空，授权方式选「不发送（仅 Cookie）」，Referer 留空会默认用页面 URL。抓到脚本组后会先让你选组（默认不合并、不自动选），选完点「用这一组匹配镜头」才匹配。"
             />
             <Input placeholder="巨日禄页面 URL（含 projectId / clipId）" value={juriluUrl} onChange={(e) => setJuriluUrl(e.target.value)} />
             <Input.Password

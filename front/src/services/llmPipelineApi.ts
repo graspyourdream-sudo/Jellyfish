@@ -1075,6 +1075,16 @@ export function savePromptBoard(
     origin: PromptBoardOrigin
     selected_shot_ids?: string[]
     allow_partial?: boolean
+    /**
+     * 巨日禄路径带上当前选中的脚本组。
+     *
+     * 口径：默认不跨 scriptId 合并 —— 保存的必须是用户**明确选过**的那一组。
+     * 服务端 `/jurilu-import/{pid}/apply` 对未选组的请求直接 400；
+     * 页面在点「确认保存」前也自己拦一道（`matchedScriptId` 为空就不发请求）。
+     * 本字段对当前 `/save` 端点是无害的附加信息（pydantic 默认忽略未知字段），
+     * 后端把闸门补到 `/save` 时不需要再改前端。
+     */
+    script_ids?: string[]
   },
 ): Promise<PromptBoardSaveResult> {
   return callApi(`/api/v1/studio/prompt-board/${encodeURIComponent(chapterId)}/save`, body as AnyRecord)
@@ -1144,6 +1154,46 @@ export interface JuriluPreviewRow {
   title?: string
 }
 
+/**
+ * 巨日禄「脚本组」里的**样例记录**（后端取前几条，给用户核对 msgpack 解析是否正确）。
+ * 字段一律可缺：缺了页面就说「未提供」，前端不补默认值。
+ */
+export interface JuriluScriptSampleRecord {
+  seq?: string
+  sbid?: string
+  /** 提示词正文前 60 字 */
+  prompt_head?: string
+  /** 提示词正文字数 */
+  prompt_length?: number
+  /** 摘要前 40 字 */
+  summary_head?: string
+}
+
+/**
+ * 巨日禄「脚本组」= 一个 scriptId 的全部分镜。
+ *
+ * 背景（2026-09-20 真实验收）：一次「获取整集提示词」第一步会拿到**三个 scriptId**，
+ * 第二步共返回 109 条分镜（41 / 37 / 31）。用户明确要求：
+ * 分成三个可选择的脚本组、**默认不跨 scriptId 合并**、**用户选一组后**才匹配镜头；
+ * 若三个其实是同一脚本的不同版本，标出最新版本并说明依据，但**仍由用户确认**。
+ */
+export interface JuriluScriptGroup {
+  script_id: string
+  title: string
+  title_source: string
+  created_at: string
+  updated_at: string
+  record_count: number
+  seq_min: string
+  seq_max: string
+  seq_field: string
+  sample_records: JuriluScriptSampleRecord[]
+  raw_keys: string[]
+  likely_newest: boolean
+  version_reasons: string[]
+  version_hint: string
+}
+
 export interface JuriluPreviewResult {
   chapter_id: string
   chapter_shot_count: number
@@ -1154,6 +1204,14 @@ export interface JuriluPreviewResult {
   diagnostics?: AnyRecord
   warnings?: string[]
   source_url?: string
+  /** 抓到的脚本组（`script_ids` 为空时只返回它、`rows` 为空） */
+  script_groups?: JuriluScriptGroup[]
+  /** 后端回显这次实际用的脚本组 */
+  selected_script_ids?: string[]
+  /** true = 必须由用户先选组（未选组时后端不做匹配） */
+  requires_script_selection?: boolean
+  /** 后端的说明文案（例如「默认不跨 scriptId 合并：请先选择一个脚本组」） */
+  note?: string
 }
 
 /**
@@ -1186,6 +1244,12 @@ export function previewJuriluImport(
     api_url_override?: string
     create_missing?: boolean
     overwrite?: boolean
+    /**
+     * 用户选中的脚本组（**空数组 = 还没选组**）。
+     * 空数组时后端**只返回 script_groups**、`rows` 为空、`requires_script_selection=true`；
+     * 只带一个 id 时**只把那一组**的分镜送去匹配 —— 默认不跨 scriptId 合并。
+     */
+    script_ids?: string[]
   },
 ): Promise<JuriluPreviewResult> {
   return callApi(`/api/v1/studio/jurilu-import/${encodeURIComponent(projectId)}/preview`, body as AnyRecord)
