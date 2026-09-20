@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -10,18 +12,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.task_manager import DeliveryMode, SqlAlchemyTaskStore, TaskManager
 from app.dependencies import get_db
 from app.models.task_links import GenerationTaskLink
+from app.schemas.studio.image_pipeline import VideoAudioPlanRead
 from app.schemas.studio.shots import ShotVideoPromptPackRead
 from app.services.film.generated_video import build_run_args, preview_prompt_and_images
 from app.services.paid_outlet_guard import require_video_outlet
 from app.services.studio.image_pipeline import reference_preflight
 from app.services.studio.image_pipeline.video_submit import (
+    describe_legacy_video_audio,
     preflight_video_input_media,
     validate_legacy_video_input,
 )
 from app.services.studio.llm_orchestration import dry_run
 from app.services.studio.video_audio_input import attach_shot_audio_to_video_input
 from app.services.studio.shot_status import mark_shot_generating
-from app.tasks.execute_task import enqueue_task_execution
+from app.tasks.execute_task import (
+    enqueue_task_execution,
+    run_task_celery,
+    spawn_inline_task_execution,
+)
 from app.schemas.common import ApiResponse, created_response, success_response
 
 from .common import TaskCreated, _CreateOnlyTask
@@ -30,6 +38,16 @@ from .video_request import VideoGenerationTaskRequest
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def _run_legacy_video_inline(task_id: str, _run_args: dict[str, Any]) -> None:
+    """legacy 出视频任务的**同进程内联**执行体。
+
+    复用**同一个**任务执行器（`run_task_celery` → `task_executor_registry.resolve(task_kind)`），
+    所以状态 / 进度 / 结果 / 取消接口全部照旧，只是不再要求本机有 broker + worker
+    （本机两者都没有：无条件入队的结果是真实模式下 500 或永久 pending）。
+    """
+    await asyncio.to_thread(run_task_celery, task_id)
 
 
 def _preflight_blocked_envelope(exc: reference_preflight.ReferencePreflightBlocked) -> JSONResponse:
@@ -56,7 +74,16 @@ class VideoPromptPreviewResponse(BaseModel):
     prompt: str = Field(..., description="最终用于视频生成的提示词")
     images: list[str] = Field(default_factory=list, description="关联参考图 file_id 列表")
     pack: ShotVideoPromptPackRead | None = Field(None, description="视频提示词预览上下文包")
-
+    audio: VideoAudioPlanRead | None = Field(
+        None,
+        description=(
+            "参考音频审计（只增字段）：included / file_id / url / excluded_reason —— "
+            "本次请求是否携带音频、带的是哪个地址、没带是为什么（口径与直提出视频同一份实现）"
+        ),
+    )
+    audio_warnings: list[str] = Field(
+        default_factory=list, description="参考音频相关的提示（未携带时的原因 + 修法）"
+    )
 
 
 @router.post(
@@ -69,7 +96,11 @@ async def preview_video_generation_prompt(
     body: VideoGenerationTaskRequest,
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[VideoPromptPreviewResponse]:
-    """预览视频生成的提示词与自动关联参考图。"""
+    """预览视频生成的提示词与自动关联参考图。
+
+    同时给出**参考音频审计**：这条镜头绑定的声音会不会进请求、带的是哪个地址、没带是为什么。
+    术语澄清：这里说的永远是"**参考音频**"（作为输入），与"最终成片的音轨"是两件事。
+    """
     prompt, images, pack = await preview_prompt_and_images(
         db,
         shot_id=body.shot_id,
@@ -77,7 +108,16 @@ async def preview_video_generation_prompt(
         prompt=body.prompt,
         images=body.images,
     )
-    return success_response(VideoPromptPreviewResponse(prompt=prompt, images=images, pack=pack))
+    audio, audio_warnings = await describe_legacy_video_audio(db, shot_id=body.shot_id)
+    return success_response(
+        VideoPromptPreviewResponse(
+            prompt=prompt,
+            images=images,
+            pack=pack,
+            audio=VideoAudioPlanRead(**dict(audio["audio"])) if audio.get("audio") else None,
+            audio_warnings=audio_warnings,
+        )
+    )
 
 
 @router.post(
@@ -185,7 +225,18 @@ async def create_video_generation_task(
     # 确保任务记录已提交，避免后台 runner 新 session 查询不到任务行而无法更新状态。
     await db.commit()
 
-    enqueue_task_execution(task_record.id)
+    # 派发口径与「AI 首帧提示词」那条一致：**优先同进程内联执行**，
+    # 只有拿不到运行中的事件循环（同步脚本调用等）才退回 Celery 队列。
+    scheduled = spawn_inline_task_execution(
+        task_record.id,
+        runner=_run_legacy_video_inline,
+        run_args=run_args,
+        detail=f"legacy 出视频 shot_id={body.shot_id}",
+    )
+    if not scheduled:
+        enqueue_task_execution(task_record.id)
+    # 音频审计放在**预览端点**（`/tasks/video/preview-prompt` 的 `audio` 字段）与直提出视频的
+    # 计划端点里；这里只回显生成入参修正与音频提示，保持既有响应形状不变。
     return created_response(
         TaskCreated(task_id=task_record.id),
         meta={"video_option_warnings": option_warnings} if option_warnings else None,

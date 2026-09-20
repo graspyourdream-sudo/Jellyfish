@@ -427,6 +427,54 @@ def test_asset_ref_is_not_probed_but_other_media_still_is() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 3.2) 与官方协议（SIX_STEP_ACCEPTANCE.md:128）的对账
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_audio_urls_capped_at_three_like_the_official_contract() -> None:
+    """官方口径「最多 3 条」：接线层截断到 3（适配器层还有一道 ``[:3]``）。"""
+    from app.services.studio.video_audio_input import attach_shot_audio_to_video_input
+
+    db, engine = await build_session()
+    async with db:
+        await _seed(db, audio_key=PUBLIC_AUDIO)
+        payload = {"audio_urls": [f"https://cdn.example.com/{i}.mp3" for i in range(4)]}
+        await attach_shot_audio_to_video_input(
+            db, shot_id=SHOT_ID, input_payload=payload, provider="apimart", model="seedance-2.0-mini"
+        )
+    assert len(payload["audio_urls"]) == 3
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_frame_conflict_warning_does_not_overclaim() -> None:
+    """首尾帧与参考音频互斥：给提示 + 适配器改写，但**不许**暗示"参考音频因此生效"。
+
+    口径来源：``SIX_STEP_ACCEPTANCE.md`` 第 128 行（与首尾帧图片互斥）与第 199 行的更正段落
+    （"参考音频是否被采用"未证实）—— 提示文案必须与后者一致，不能写成"为让参考音频生效"。
+    """
+    from app.services.studio.video_audio_input import attach_shot_audio_to_video_input
+
+    db, engine = await build_session()
+    async with db:
+        await _seed(db, audio_key=PUBLIC_AUDIO)
+        payload = {
+            "first_frame_base64": "https://cdn.example.com/first.png",
+            "last_frame_base64": "https://cdn.example.com/last.png",
+        }
+        warnings = await attach_shot_audio_to_video_input(
+            db, shot_id=SHOT_ID, input_payload=payload, provider="apimart", model="seedance-2.0-mini"
+        )
+    joined = " ".join(warnings)
+    assert payload["audio_urls"] == [PUBLIC_AUDIO]
+    assert "首尾帧图片时参考音频不可用" in joined  # 官方警告原意保留
+    assert "为让参考音频生效" not in joined  # 不夸大：是否被采用尚无证据
+    assert "尚无" in joined or "无真实证据" in joined
+    await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
 # 3.5) legacy 预览端点：同一份判定 + 同一份审计字段
 # ---------------------------------------------------------------------------
 

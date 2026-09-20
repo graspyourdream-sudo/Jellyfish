@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from typing import Any, Callable
@@ -28,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.llm import Model, ModelCategoryKey
 from app.schemas.studio.image_pipeline import (
+    VideoAudioPlanRead,
     VideoPlanFrameRead,
     VideoSubmitPlanRead,
     VideoSubmitPlanRequest,
@@ -43,6 +45,8 @@ from app.services.studio.image_pipeline import reference_preflight
 from app.services.studio.llm_orchestration import dry_run
 from app.services.studio.llm_orchestration.registry import ALLOWED_DURATION_SECONDS
 from app.utils.files import vendor_accepts_data_url
+
+logger = logging.getLogger(__name__)
 
 # 既有 provider 适配器白名单（见 app/core/tasks/bootstrap.py）。
 SUPPORTED_VIDEO_PROVIDERS: tuple[str, ...] = ("openai", "volcengine", "apimart")
@@ -196,26 +200,64 @@ async def describe_plan_audio(
     provider: str,
     model: str,
 ) -> dict[str, Any]:
-    """本次请求的音频状态：绑定且公网可用 / 绑定了但地址不可用 / 未绑定 / 明确无需声音。"""
-    from app.models.studio import FileItem, ShotDetail
-    from app.utils.files import is_public_storage_key
+    """本次请求的音频准入结论（**与提交端是同一个函数**，不再是两份判断）。
 
-    detail = await db.get(ShotDetail, shot_id)
-    opt_out = bool(getattr(detail, "audio_opt_out", False)) if detail is not None else False
-    file_id = str(getattr(detail, "audio_file_id", "") or "") if detail is not None else ""
-    if opt_out and not file_id:
-        return {"audio_file_id": "", "audio_url": "", "audio_opt_out": True, "audio_state": "opt_out"}
-    if not file_id:
-        return {"audio_file_id": "", "audio_url": "", "audio_opt_out": opt_out, "audio_state": "missing"}
-    file_obj = await db.get(FileItem, file_id)
-    key = str(getattr(file_obj, "storage_key", "") or "")
-    public = is_public_storage_key(key)
+    以前这里自己写了一遍"是不是公网前缀"（``is_public_storage_key``），而提交端
+    （``video_audio_input``）另写了一遍 ``startswith("http")`` —— 两处口径不同，
+    于是 ``asset://`` 与内网地址（``http://192.168.x/…``）会出现"页面说能带、提交却剔除"
+    或反过来的自相矛盾。现在统一走
+    ``video_audio_input.resolve_audio_admission`` → ``classify_audio_input``。
+
+    返回的 ``audio`` 是给计划/预览用的**审计结构**（``included`` / ``file_id`` / ``url`` /
+    ``excluded_reason``），``audio_state`` 保留既有四个取值（bound / bound_not_public /
+    missing / opt_out）以兼容页面既有显示。
+    """
+    from app.services.studio.video_audio_input import (
+        plan_audio_state,
+        resolve_audio_admission,
+    )
+
+    admission = await resolve_audio_admission(
+        db, shot_id=shot_id, provider=provider, model=model
+    )
     return {
-        "audio_file_id": file_id,
-        "audio_url": key if public else "",
-        "audio_opt_out": opt_out,
-        "audio_state": "bound" if public else "bound_not_public",
+        "audio_file_id": admission.file_id,
+        # 只有**会进请求**的地址才填这里（公网 http(s) / asset:// / 供应商接受的 data URL）
+        "audio_url": admission.url,
+        "audio_opt_out": admission.opt_out,
+        "audio_state": plan_audio_state(admission),
+        "audio": admission.to_read(),
+        "note": admission.note if admission.file_id else "",
     }
+
+
+async def describe_legacy_video_audio(db: AsyncSession, *, shot_id: str) -> tuple[dict[str, Any], list[str]]:
+    """legacy 出视频入口（``/film/tasks/video``）的音频审计：``(audio 审计结构, 提示列表)``。
+
+    供应商/模型按**该路径真实使用**的默认视频模型解析（``build_run_args`` 用的就是
+    ``resolve_default_video_model``），所以这份审计与 legacy 提交时的判定同源 ——
+    不会出现"预览说能带、提交却剔除"。判定本身复用直提路径的
+    :func:`describe_plan_audio`（→ ``video_audio_input.classify_audio_input``）。
+
+    解析失败时**不抛**：预览端点不该因为"没配默认视频模型"就挂掉，此时返回 ``None`` 审计
+    与一条如实说明的提示。
+    """
+    from app.services.film import load_provider_config_by_model, resolve_default_video_model
+
+    try:
+        model = await resolve_default_video_model(db)
+        provider_config = await load_provider_config_by_model(db, model)
+    except Exception as exc:  # noqa: BLE001 - 预览不因模型配置缺失而失败
+        logger.warning("legacy 出视频预览：参考音频准入无法判定（%s）", exc)
+        return {}, [f"参考音频准入无法判定（{exc}）：本次预览不给出音频结论。"]
+    audio = await describe_plan_audio(
+        db,
+        shot_id=shot_id,
+        provider=str(getattr(provider_config, "provider", "") or ""),
+        model=str(getattr(model, "name", "") or ""),
+    )
+    notes = [str(audio["note"])] if audio.get("note") else []
+    return audio, notes
 
 
 def resolve_plan_seconds(requested: int | None, warnings: list[str]) -> int:
@@ -317,19 +359,10 @@ async def build_video_submit_plan(
     seconds = resolve_plan_seconds(body.duration_seconds, warnings)
 
     # 断点④·声音侧：计划阶段就把"这个镜头的声音到底会不会进请求"说清楚，
-    # 免得用户以为绑了声音就一定会被用上。
-    # 延迟导入：video_audio_input 依赖 bound_asset_files → image_pipeline 包，
-    # 模块级导入会形成环（image_pipeline/__init__ → video_submit → video_audio_input）。
-    from app.services.studio.video_audio_input import describe_shot_audio_for_video
-
-    audio_note = await describe_shot_audio_for_video(
-        db,
-        shot_id=body.shot_id,
-        provider=provider_key,
-        model=model_name,
-    )
-    if audio_note:
-        warnings.append(audio_note)
+    # 免得用户以为绑了声音就一定会被用上。文案来自**提交端同一个准入函数**的结论
+    # （``video_audio_input.classify_audio_input``），不再是计划里另写一套判断。
+    if audio["note"]:
+        warnings.append(str(audio["note"]))
 
     ratio = str(body.ratio or "").strip() or DEFAULT_VIDEO_RATIO
     if not str(body.ratio or "").strip():
@@ -366,6 +399,7 @@ async def build_video_submit_plan(
         audio_url=str(audio["audio_url"]),
         audio_opt_out=bool(audio["audio_opt_out"]),
         audio_state=str(audio["audio_state"]),
+        audio=VideoAudioPlanRead(**dict(audio["audio"])),
         provider=provider_key,
         model_id=str(getattr(model, "id", "") or ""),
         model_name=model_name,
@@ -392,6 +426,21 @@ VIDEO_FRAME_KEYS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _should_probe_media_url(url: str) -> bool:
+    """这个媒体地址要不要做**匿名探活**。
+
+    只有 ``asset://`` 例外：它是**供应商侧的私有素材通道**（由供应商用自己的凭据解析），
+    我们这边匿名探不了 —— 把它丢给探活会被按"本机/相对路径"判死，于是出现
+    "计划说可携带、提交却说不可达"的自相矛盾（同一份地址两条路径口径不一致）。
+    形态合法性已由 ``app.utils.files.is_vendor_accepted_ref`` 判过
+    （http(s):// / asset:// 都算供应商接受的形态）。
+
+    其余一律照常探活：**data URL 也要探**，因为"供应商吃不吃内嵌 base64"由
+    ``vendor_accepts_data_url(provider)`` 在探活里如实判定（APIMart 不吃 → 拦下）。
+    """
+    return not str(url or "").strip().lower().startswith("asset://")
+
+
 def video_media_candidates(
     input_payload: dict[str, Any],
     *,
@@ -403,11 +452,13 @@ def video_media_candidates(
     而 ``build_run_args`` 优先给公网地址（APIMart 只吃 ``http(s)://`` / ``asset://``）。
     所以这里逐条如实探活 —— 故障 A 就是这条路把「只在本机可读的地址」当公网地址发了出去，
     上游抓不到 → 任务 failed（原文「无法获取输入媒体 URL（404/410）」）。
+
+    ``asset://`` 引用不探活（见 :func:`_should_probe_media_url`）：它由供应商侧解析。
     """
     candidates: list[reference_preflight.ReferenceCandidate] = []
     for key, label in VIDEO_FRAME_KEYS:
         url = str(input_payload.get(key) or "").strip()
-        if not url:
+        if not url or not _should_probe_media_url(url):
             continue
         candidates.append(
             reference_preflight.ReferenceCandidate(
@@ -419,7 +470,7 @@ def video_media_candidates(
         )
     for index, url in enumerate(list(input_payload.get("audio_urls") or [])):
         text = str(url or "").strip()
-        if not text:
+        if not text or not _should_probe_media_url(text):
             continue
         candidates.append(
             reference_preflight.ReferenceCandidate(

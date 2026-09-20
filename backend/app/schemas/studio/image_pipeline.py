@@ -345,6 +345,55 @@ class VideoPlanFrameRead(BaseModel):
     reason: str = Field("", description="不可用时的具体原因（可直接展示给用户）")
 
 
+class VideoAudioPlanRead(BaseModel):
+    """本次请求的**参考音频**准入结论（可审计）。
+
+    术语（别和"最终成片的音轨"混为一谈）：
+
+    - **参考音频**：作为**输入**进供应商请求（``audio_urls``）。本字段回答的正是
+      "本次请求会不会带它、带的是哪个地址、没带是为什么"；
+    - **最终成片的音轨**：成片里那条轨，来自供应商侧 ``generate_audio``（模型自己生成）；
+      把已生成的音频混流/回贴成成片音轨是**另一条路径**，当前未实现。
+
+    准入口径：只有**公网 http(s)** 或 **``asset://``** 才允许进入请求；本机相对路径 /
+    内网地址 / 供应商不接受的 data URL 在计划层就被排除（带 ``excluded_reason``）。
+    """
+
+    included: bool = Field(False, description="本次请求是否真的会携带参考音频（会进 audio_urls）")
+    file_id: str = Field("", description="绑定的音频 file_id（未绑定时为空）")
+    url: str = Field(
+        "",
+        description="**真正会进请求**的地址（公网 http(s) / asset:// / 供应商接受的 data URL）；未携带时为空",
+    )
+    declared_url: str = Field(
+        "",
+        description="绑定解析出的原始地址（可能是本机/内网/data URL，仅供技术详情，不会发给供应商）",
+    )
+    excluded_reason: str = Field(
+        "",
+        description="未携带时的原因：未绑定 / 本机相对路径 / 内网地址 / 供应商不吃 data URL / 供应商不接受参考音频…",
+    )
+    reason_code: str = Field(
+        "",
+        description=(
+            "机器可读原因码：not_bound / opt_out / file_missing / vendor_unsupported / no_address / "
+            "local_path / private_address / data_url_rejected；已携带时为空"
+        ),
+    )
+    how_to_fix: str = Field("", description="未携带时的补救办法（可操作）")
+    state: str = Field(
+        "",
+        description=(
+            "准入状态：public_url / asset_ref / data_url_inline（以上三者=携带）/ not_bound / opt_out / "
+            "file_missing / vendor_unsupported / no_address / local_path / private_address / data_url_rejected"
+        ),
+    )
+    vendor_supports_reference_audio: bool = Field(
+        False, description="当前供应商/模型是否声明接受参考音频（seedance 2.0 系列为 true）"
+    )
+    note: str = Field("", description="术语澄清：参考音频（输入）≠ 最终成片音轨（输出侧 generate_audio）")
+
+
 class VideoSubmitPlanRead(BaseModel):
     """直提出视频的计划预览。"""
 
@@ -385,6 +434,13 @@ class VideoSubmitPlanRead(BaseModel):
     audio_url: str = Field("", description="音频地址（仅公网地址会被发送给供应商）")
     audio_opt_out: bool = Field(False, description="本镜是否明确标记无需声音")
     audio_state: str = Field("", description="bound（已绑且可用）/ bound_not_public / missing / opt_out")
+    audio: VideoAudioPlanRead = Field(
+        default_factory=VideoAudioPlanRead,
+        description=(
+            "参考音频审计（只增字段）：included / file_id / url / excluded_reason —— "
+            "本次请求是否携带音频、带的是哪个地址、没带是为什么"
+        ),
+    )
     model_pinned: bool = Field(True, description="是否命中固定模型策略（seedance-2.0-mini）")
     provider_supported: bool = Field(True, description="provider 是否在既有的 openai/volcengine/apimart 白名单内")
     warnings: list[str] = Field(default_factory=list)
