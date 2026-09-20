@@ -201,6 +201,27 @@ export function RealRunModeBadge({
             守卫原文：{view.guardText || '（未提供）'}；开关：{view.env} / {view.confirmEnv}
             {view.restartRequired ? '；改完必须重启后端进程才生效。' : ''}
           </Paragraph>
+          {/* 配置来源只读展示：切模式必须改配置 + 重启，页面不提供任何「一键切真实」开关 */}
+          <Paragraph className="mb-2 text-xs" data-testid="real-run-mode-source">
+            配置来源：<Text strong>{view.switchSourceLabel}</Text>
+            {view.dotenvRealMode ? (
+              <Tag color="volcano" style={{ marginLeft: 6 }}>
+                由 backend/.env 打开真实付费模式
+              </Tag>
+            ) : null}
+            <Text type="secondary">
+              （这里只做展示：切模式要改配置并重启后端进程，页面不提供切换开关）
+            </Text>
+          </Paragraph>
+          {view.dotenvRealMode && view.startupWarning ? (
+            <Alert
+              type="warning"
+              showIcon
+              message="后端启动时已就「真实付费模式」告警"
+              description={view.startupWarning}
+              style={{ marginBottom: 8 }}
+            />
+          ) : null}
 
           <Table<OutletAllowState>
             size="small"

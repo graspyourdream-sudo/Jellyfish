@@ -19,14 +19,25 @@
 未设置 ``JELLYFISH_DRY_RUN`` 时按**开启**处理（默认安全）。
 
 **本地怎么切到真实模式（不需要改代码、不需要翻源码）**：
-设置上面两个环境变量 → **重启后端进程** → 用状态接口确认。具体命令、验证方法与
+设置上面两个开关 → **重启后端进程** → 用状态接口确认。具体命令、验证方法与
 「怎么关回演练」见 :func:`enable_steps` / :func:`restore_steps`，以及仓库文档
 ``docs/real-run-mode.md``；前端顶部角标与 ``GET /api/v1/studio/llm/orchestration/status``
 也会把同样的步骤回显出来，被守卫拦住时错误体里带 ``how_to_enable``。
 
-注意：``backend/.env`` 只会被 pydantic-settings 读进 ``Settings``，**不会**进入
-``os.environ``，因此这两个开关**必须写进进程环境**（``export`` / 启动脚本 / 容器 env），
-写进 ``.env`` 是无效的。这是最常见的坑。
+开关写在哪里都生效，按下面的**优先级**解析（十二要素口径，进程环境变量优先）：
+
+1. **进程环境变量**（``os.environ``：``export`` / 启动脚本 / 容器 env）——最高优先级；
+2. **``backend/.env``**（pydantic-settings 读进 ``Settings``）——与 1 同等有效，优先级更低；
+3. 两处都没写 → **默认值**（``JELLYFISH_DRY_RUN`` 视为开启、确认变量视为未确认）。
+
+解析**只在本模块一处**（:func:`flag_raw` / :func:`flag_source`），其它地方一律复用，
+避免出现两套口径。fail-safe：取值读不懂（例如 ``JELLYFISH_DRY_RUN=maybe``）、
+``Settings`` 读不到、读取过程抛任何异常 → 一律按「未设置」处理；
+而「未设置」对 DRY_RUN 意味着**演练**、对确认变量意味着**未确认**，两个方向都不放行。
+
+若真实模式是**由 ``backend/.env`` 打开**的（而不是进程环境变量），后端启动时会打一条
+醒目中文告警（:func:`startup_warning`），状态接口的 ``source`` / ``source_label`` 字段
+也会如实标出开关来源，避免「.env 悄悄开出去」这条最隐蔽的路。
 """
 
 from __future__ import annotations
@@ -40,6 +51,22 @@ CONFIRM_ENV = "JELLYFISH_REAL_LLM_CONFIRMED"
 
 _TRUTHY = {"1", "true", "yes", "on", "y", "enable", "enabled"}
 _FALSEY = {"0", "false", "no", "off", "n", "disable", "disabled"}
+
+# 开关取值的规范化结果（对外只暴露这三个，避免各处自己写 if 判断）。
+TRUE = "true"
+FALSE = "false"
+UNSET = ""  # 未设置，或取值读不懂（fail-safe 都按「未设置」处理）
+
+# 开关来源：给状态接口与启动告警用，取值与 ``docs/real-run-mode.md`` 的措辞一致。
+SOURCE_ENV = "env"  # 进程环境变量（优先级最高）
+SOURCE_DOTENV = "dotenv"  # backend/.env（经 pydantic-settings 读进 Settings）
+SOURCE_DEFAULT = "default"  # 两处都没写，用默认值（演练 / 未确认）
+
+_SOURCE_LABELS: dict[str, str] = {
+    SOURCE_ENV: "进程环境变量",
+    SOURCE_DOTENV: "backend/.env",
+    SOURCE_DEFAULT: "默认值（两处都没设置）",
+}
 
 # LLM 结果只用于预览，绝不落库；这里显式声明出口清单，便于以后扩展时对账。
 LLM_OUTLET = "llm"
@@ -165,26 +192,116 @@ class RealCallNotConfirmed(RuntimeError):
 # --------------------------------------------------------------------------
 
 
-def _read_flag(name: str) -> str:
-    return (os.environ.get(name) or "").strip().lower()
+# --------------------------------------------------------------------------
+# 开关解析（**唯一**一处口径，其它地方一律复用）
+#
+# 两个来源都生效，优先级：进程环境变量 > backend/.env > 默认值。
+# fail-safe：读不到 / 读不懂 / 抛异常 → 一律按「未设置」处理。
+# --------------------------------------------------------------------------
+
+
+def _settings() -> Any:
+    """``Settings`` 单例（``backend/.env`` 的载体）。
+
+    延迟导入，避免 ``app.config`` 与守卫之间的导入环；测试可以 monkeypatch
+    本函数注入自己的 ``Settings``（例如指向临时 ``.env`` 文件）。
+    """
+    from app.config import settings
+
+    return settings
+
+
+def _env_raw(name: str) -> str:
+    """进程环境变量里的原始取值；未设置或空串 → 空串。"""
+    return (os.environ.get(name) or "").strip()
+
+
+def _dotenv_raw(name: str) -> str:
+    """``backend/.env`` 里的原始取值；读不到或抛异常 → 空串（fail-safe）。"""
+    try:
+        raw = getattr(_settings(), name.lower(), None)
+    except Exception:  # noqa: BLE001 - 读不到配置绝不放行真实调用
+        return ""
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
+def _normalize(raw: str) -> str:
+    """原始取值 → :data:`TRUE` / :data:`FALSE` / :data:`UNSET`。
+
+    无法识别的取值（例如 ``maybe``）一律返回 :data:`UNSET`：
+    对 DRY_RUN 意味着**演练**，对确认变量意味着**未确认**，两个方向都不放行。
+    """
+    value = (raw or "").strip().lower()
+    if not value:
+        return UNSET
+    if value in _FALSEY:
+        return FALSE
+    if value in _TRUTHY:
+        return TRUE
+    return UNSET
+
+
+def flag_raw(name: str) -> str:
+    """按优先级取开关的原始取值：进程环境变量 → ``backend/.env`` → 空串。
+
+    环境变量存在但为空串时视为「没设」，继续看 ``.env``（空值不构成显式设置）。
+    """
+    return _env_raw(name) or _dotenv_raw(name)
+
+
+def flag_source(name: str) -> str:
+    """开关来源：``env`` / ``dotenv`` / ``default``（见模块顶部说明）。"""
+    if _env_raw(name):
+        return SOURCE_ENV
+    if _dotenv_raw(name):
+        return SOURCE_DOTENV
+    return SOURCE_DEFAULT
+
+
+def flag_text(name: str) -> str:
+    """开关取值的规范化结果（:data:`TRUE` / :data:`FALSE` / :data:`UNSET`）。"""
+    return _normalize(flag_raw(name))
+
+
+def source() -> str:
+    """当前「开关来源」：两个开关里**优先级最高**的那个来源。
+
+    - 只要有一个来自进程环境变量 → ``env``；
+    - 否则只要有一个来自 ``backend/.env`` → ``dotenv``；
+    - 两个都没设置 → ``default``。
+    """
+    sources = {flag_source(DRY_RUN_ENV), flag_source(CONFIRM_ENV)}
+    if SOURCE_ENV in sources:
+        return SOURCE_ENV
+    if SOURCE_DOTENV in sources:
+        return SOURCE_DOTENV
+    return SOURCE_DEFAULT
+
+
+def source_label() -> str:
+    """开关来源的中文名（进程环境变量 / backend/.env / 默认值）。"""
+    return _SOURCE_LABELS.get(source(), source())
+
+
+def dotenv_keys() -> list[str]:
+    """真正生效且**来自 backend/.env** 的开关名（启动告警里点名用）。"""
+    return [name for name in (DRY_RUN_ENV, CONFIRM_ENV) if flag_source(name) == SOURCE_DOTENV]
 
 
 def dry_run_enabled() -> bool:
-    """DRY_RUN 是否开启。默认开启；每次实时读环境变量，方便测试中途切换。"""
-    raw = _read_flag(DRY_RUN_ENV)
-    if not raw:
-        return True
-    if raw in _FALSEY:
-        return False
-    if raw in _TRUTHY:
-        return True
-    # 无法识别的取值一律按"开启"处理（fail-safe）。
-    return True
+    """DRY_RUN 是否开启。
+
+    默认开启；只有**显式**读到假值（``0/false/no/off``...）才关闭；
+    取值读不懂、读不到、抛异常都按开启处理。每次实时解析，方便测试中途切换。
+    """
+    return flag_text(DRY_RUN_ENV) != FALSE
 
 
 def real_call_confirmed() -> bool:
-    """用户是否明确确认过可以真实调用（默认否）。"""
-    return _read_flag(CONFIRM_ENV) in _TRUTHY
+    """用户是否明确确认过可以真实调用（默认否；读不懂一律按未确认）。"""
+    return flag_text(CONFIRM_ENV) == TRUE
 
 
 def allow_real_llm_call() -> bool:
@@ -199,8 +316,8 @@ allow_real_call = allow_real_llm_call
 def blocked_reason(detail: str = "") -> str | None:
     """返回被拦截的原因描述；允许真实调用时返回 None。"""
     if dry_run_enabled():
-        raw = os.environ.get(DRY_RUN_ENV, "未设置/默认开启")
-        return f"DRY_RUN 开启（{DRY_RUN_ENV}={raw}）：{detail}".strip("：")
+        raw = flag_raw(DRY_RUN_ENV) or "未设置/默认开启"
+        return f"DRY_RUN 开启（{DRY_RUN_ENV}={raw}，来源：{source_label()}）：{detail}".strip("：")
     if not real_call_confirmed():
         return f"未确认真实调用（需要 {CONFIRM_ENV}=1）：{detail}".strip("：")
     return None
@@ -252,25 +369,61 @@ def is_dry_run_mode() -> bool:
     return mode() == MODE_DRY_RUN
 
 
+def is_dotenv_real_mode() -> bool:
+    """真实模式是否**由 backend/.env** 打开（而不是进程环境变量）。
+
+    触发启动告警的唯一条件：真实模式已放行，且它的开关是从 ``.env`` 读到的。
+    这是最隐蔽的一条路——``.env`` 通常被 gitignore，改它不进代码评审，
+    进程启动参数里也看不出痕迹。
+    """
+    return is_real_mode() and source() == SOURCE_DOTENV
+
+
+def startup_warning() -> str | None:
+    """后端启动时该打的中文告警；不需要告警时返回 ``None``。
+
+    只有「真实模式由 backend/.env 打开」才告警：进程环境变量打开真实模式的人
+    是显式 ``export`` 的，本来就知道自己干了什么；``.env`` 则可能被前人留下、
+    被复制粘贴带进来，需要当面说清。
+    """
+    if not is_dotenv_real_mode():
+        return None
+    keys = "、".join(dotenv_keys()) or "—"
+    return "\n".join(
+        [
+            "!" * 78,
+            "【告警】检测到由 backend/.env 打开的真实付费模式：",
+            f"    {DRY_RUN_ENV}=0 且 {CONFIRM_ENV}=1（来自 backend/.env 的键：{keys}）。",
+            "    真实模式下大模型按 token、出图按张、出视频按次真实计费，请求会真的发出去。",
+            "    请确认这是你要的；CI/测试环境请用演练模式。",
+            f"    关回演练：把 backend/.env 里这两个键改回 {DRY_RUN_ENV}=1（或删掉）后重启；",
+            f"    也可以直接用进程环境变量覆盖（进程环境变量优先）：export {DRY_RUN_ENV}=1。",
+            f"    详见 {_DOC_PATH}。",
+            "!" * 78,
+        ]
+    )
+
+
 def enable_steps() -> list[str]:
     """「怎么开真实模式」的分步中文说明（照做即可，不需要改代码；纯文本，前端直接渲染）。"""
     return [
-        f"第 1 步｜在启动后端的那个终端里导出两个环境变量（必须是同一个 shell）："
-        f"export {DRY_RUN_ENV}=0 与 export {CONFIRM_ENV}=1。"
-        f"注意：写进 backend/.env 无效——.env 只会被 Settings 读取，不会进入进程环境。",
+        f"第 1 步｜设置两个开关。二选一，都生效，但**进程环境变量优先于 backend/.env**："
+        f"① 在启动后端的那个终端里 export {DRY_RUN_ENV}=0 与 export {CONFIRM_ENV}=1；"
+        f"② 或把这两行写进 backend/.env（写进 .env 也能生效，但后端启动时会打真实付费告警）。",
         f"第 2 步｜重启后端进程（外部改不了已启动进程的环境变量，必须重启）：{_START_COMMAND}。",
         f"第 3 步｜验证当前模式：执行 {_VERIFY_COMMAND}，确认 data.mode 为 \"real\"、"
-        f"data.guard.real_call_confirmed 为 true；页面顶部角标应显示「真实模式」。",
-        f"第 4 步｜恢复演练：unset {DRY_RUN_ENV} {CONFIRM_ENV} 后重启进程，角标回到「演练模式」。"
-        f"完整说明见 {_DOC_PATH}。",
+        f"data.guard.real_call_confirmed 为 true、data.switch_source 为 \"env\" 或 \"dotenv\"；"
+        f"页面顶部角标应显示「真实模式」。",
+        f"第 4 步｜恢复演练：unset {DRY_RUN_ENV} {CONFIRM_ENV}（如果 .env 里也写了，一并删掉或改成 1）"
+        f"后重启进程，角标回到「演练模式」。完整说明见 {_DOC_PATH}。",
     ]
 
 
 def how_to_enable_text() -> str:
     """「怎么开真实模式」的单段中文说明（塞进错误体用）。"""
     return (
-        f"开启真实模式：在启动后端的终端里 export {DRY_RUN_ENV}=0 且 export {CONFIRM_ENV}=1，"
-        f"然后重启后端进程（写 backend/.env 无效）；用 {_VERIFY_COMMAND} 确认 data.mode=\"real\"。"
+        f"开启真实模式：export {DRY_RUN_ENV}=0 且 export {CONFIRM_ENV}=1（写进 backend/.env 同样生效，"
+        f"但进程环境变量优先），然后重启后端进程；用 {_VERIFY_COMMAND} 确认 data.mode=\"real\"。"
         f"详见 {_DOC_PATH}。"
     )
 
@@ -279,7 +432,8 @@ def restore_steps() -> list[str]:
     """「怎么关回演练」的分步中文说明。"""
     return [
         f"第 1 步｜在启动后端的终端里 unset {DRY_RUN_ENV} {CONFIRM_ENV}"
-        f"（或显式 export {DRY_RUN_ENV}=1）。",
+        f"（或显式 export {DRY_RUN_ENV}=1）；并检查 backend/.env 里是否写了这两个键，"
+        f"写了就一并删掉或把 {DRY_RUN_ENV} 改回 1。",
         "第 2 步｜重启后端进程。",
         f"第 3 步｜验证：执行 {_VERIFY_COMMAND}，确认 data.mode 为 \"dry_run\"、"
         f"data.guard.dry_run 为 true；页面角标应显示「演练模式」。",
@@ -289,8 +443,8 @@ def restore_steps() -> list[str]:
 def how_to_restore_text() -> str:
     """「怎么关回演练」的单段中文说明。"""
     return (
-        f"恢复演练模式：unset {DRY_RUN_ENV} {CONFIRM_ENV}（或 {DRY_RUN_ENV}=1）后重启后端进程，"
-        f"未设置时默认就是演练模式。"
+        f"恢复演练模式：unset {DRY_RUN_ENV} {CONFIRM_ENV}（或 {DRY_RUN_ENV}=1）、"
+        f"并清掉 backend/.env 里可能写着的这两个键，然后重启后端进程；未设置时默认就是演练模式。"
     )
 
 
@@ -344,7 +498,12 @@ def outlet_states() -> list[dict[str, Any]]:
 
 
 def mode_details() -> dict[str, Any]:
-    """模式 + 出口状态 + 中文开启/恢复步骤的完整快照（状态接口与前端共用）。"""
+    """模式 + 出口状态 + 中文开启/恢复步骤的完整快照（状态接口与前端共用）。
+
+    既有字段保持向后兼容，只做加法；新增的字段用于「开关到底写在哪」这件事：
+    ``source``（``env``/``dotenv``/``default``）、``source_label``、``dry_run_source``、
+    ``real_call_confirmed_source``、``dotenv_real_mode``、``startup_warning``。
+    """
     return {
         "mode": mode(),
         "mode_label": mode_label(),
@@ -355,6 +514,13 @@ def mode_details() -> dict[str, Any]:
         "env": DRY_RUN_ENV,
         "confirm_env": CONFIRM_ENV,
         "restart_required_on_change": RESTART_REQUIRED,
+        # --- 新增：开关来源（进程环境变量 / backend/.env / 默认值） ---
+        "source": source(),
+        "source_label": source_label(),
+        "dry_run_source": flag_source(DRY_RUN_ENV),
+        "real_call_confirmed_source": flag_source(CONFIRM_ENV),
+        "dotenv_real_mode": is_dotenv_real_mode(),
+        "startup_warning": startup_warning(),
         "outlets": outlet_states(),
         "enable_steps": enable_steps(),
         "how_to_enable": how_to_enable_text(),
@@ -427,7 +593,9 @@ def state() -> dict[str, Any]:
 
     既有字段（``dry_run`` / ``real_call_confirmed`` / ``env`` / ``confirm_env`` /
     ``network_guard`` / ``outlets`` / ``blocked_count``）保持向后兼容，只做加法：
-    新增 ``mode`` / ``mode_label`` / ``blocked_reason``。
+    新增 ``mode`` / ``mode_label`` / ``blocked_reason``，以及开关来源字段
+    ``source``（``env`` / ``dotenv`` / ``default``）/ ``source_label`` /
+    ``dry_run_source`` / ``real_call_confirmed_source`` / ``dotenv_real_mode``。
     """
     return {
         "dry_run": dry_run_enabled(),
@@ -464,7 +632,10 @@ def extra_allowed_hosts() -> set[str]:
 
 
 def _check_host(host: str, detail: str = "", outlet: str = OUTLET_LLM) -> None:
-    if not dry_run_enabled():
+    # 只有「真实模式且已确认」（is_real_mode）才放行外部主机。
+    # 以前这里是 `if not dry_run_enabled(): return` —— 「关演练但没确认」(real_unconfirmed)
+    # 这条路会**绕过兜底**，与 call_text_llm 里那个缺口同源（那份已修）。
+    if is_real_mode():
         return
     normalized = (host or "").strip().strip("[]").lower()
     if not normalized or normalized in extra_allowed_hosts():
@@ -474,7 +645,12 @@ def _check_host(host: str, detail: str = "", outlet: str = OUTLET_LLM) -> None:
 
 
 def install_network_guard() -> bool:
-    """给 httpx 打补丁，DRY_RUN 下掐断非本机出站。幂等。"""
+    """给 httpx 打补丁：**非真实模式（演练 / 未确认）**下掐断非本机出站。幂等。
+
+    按需安装：生产默认**不装**，显式设置 ``JELLYFISH_NETWORK_GUARD=1`` 后由 `main.py`
+    的 lifespan 安装（测试里可直接调用）。装上后只放行「真实模式且已确认」的进程，
+    以及本机地址与 ``JELLYFISH_DRY_RUN_ALLOW_HOSTS`` 白名单。
+    """
     with _guard_lock:
         if _guard_state["installed"]:
             return False
@@ -527,8 +703,20 @@ def uninstall_network_guard() -> bool:
 
 
 def short_status() -> str:
+    """一句话守卫状态（任务行 / 预览体里的 ``guard_status`` / ``dry_run_reason``）。
+
+    默认（两处都没设置）时输出**逐字不变**，避免动到既有验收记录与前端文案；
+    只有当开关被显式写在某处时才追加来源后缀，让「.env 悄悄开出去」也看得见。
+    """
     if dry_run_enabled():
-        return f"DRY_RUN=开（{DRY_RUN_ENV}，未发起真实调用）"
-    if not real_call_confirmed():
-        return f"DRY_RUN=关但未确认（{CONFIRM_ENV} 未设置，仍会拒绝真实调用）"
-    return "DRY_RUN=关且已确认（真实付费链路）"
+        text = f"DRY_RUN=开（{DRY_RUN_ENV}，未发起真实调用）"
+    elif not real_call_confirmed():
+        text = f"DRY_RUN=关但未确认（{CONFIRM_ENV} 未设置，仍会拒绝真实调用）"
+    else:
+        text = "DRY_RUN=关且已确认（真实付费链路）"
+    if source() == SOURCE_DEFAULT:
+        return text
+    suffix = f"｜开关来源：{source_label()}"
+    if is_dotenv_real_mode():
+        suffix += "（真实付费模式，请确认这是你要的）"
+    return text + suffix

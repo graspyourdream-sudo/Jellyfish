@@ -10,16 +10,34 @@
 
 ## 0. 一句话结论
 
-- **默认就是演练模式**：不发任何真实请求、不产生任何费用。删掉环境变量就回到这个状态。
-- **切到真实模式只需两件事**：在**启动后端的那个终端**里 `export` 两个环境变量，然后**重启后端进程**。
+- **默认就是演练模式**：不发任何真实请求、不产生任何费用。删掉两个开关就回到这个状态。
+- **两个开关写在两处都生效**：进程环境变量（`export` / 启动脚本 / 容器 env）与
+  `backend/.env` 都认，**进程环境变量优先于 `.env`**；两处都没写才落到默认值（演练）。
+- **切到真实模式只需两件事**：设好两个开关，然后**重启后端进程**。
+- **如果真实模式是由 `backend/.env` 打开的，后端启动时会打一条醒目中文告警**，
+  状态接口里的 `switch_source` 字段也会标出开关来源是 `env` 还是 `dotenv`。
 - 页面右上角角标和状态接口都会如实告诉你现在是哪一种模式；被守卫拦住时，接口返回的错误里
   直接带「原因 + 怎么开」。
 
 | 模式 | 判定条件 | 行为 |
 | --- | --- | --- |
-| 演练模式（默认） | `JELLYFISH_DRY_RUN` 未设置 / `1` / `true` / `yes` / `on` | 四个付费出口全部拦截，返回占位结果，**零费用** |
+| 演练模式（默认） | `JELLYFISH_DRY_RUN` 两处都没写 / `1` / `true` / `yes` / `on` | 四个付费出口全部拦截，返回占位结果，**零费用** |
 | 真实模式（未确认） | `JELLYFISH_DRY_RUN=0` 但 `JELLYFISH_REAL_LLM_CONFIRMED` 不是 `1` | 仍然拦截，原因明确写「缺少付费确认」 |
 | 真实模式 | `JELLYFISH_DRY_RUN=0` **且** `JELLYFISH_REAL_LLM_CONFIRMED=1` | 允许真实调用，**会花钱**，成本确认/限额/去重仍生效 |
+
+### 开关解析优先级（唯一口径）
+
+| 优先级 | 来源 | 说明 |
+| --- | --- | --- |
+| 1（最高） | 进程环境变量 `os.environ` | `export`、启动脚本、容器 `environment:` |
+| 2 | `backend/.env` | 经 pydantic-settings 读进 `Settings`；与 1 同等有效，但优先级更低 |
+| 3（最低） | 默认值 | 两处都没写 → 演练 / 未确认 |
+
+- 解析只在一处：`backend/app/services/studio/llm_orchestration/dry_run.py` 的
+  `flag_raw()` / `flag_source()`，其它地方（含状态接口、拦截错误体）一律复用，不存在第二套口径。
+- **fail-safe**：取值读不懂（例如 `JELLYFISH_DRY_RUN=maybe`）、`Settings` 读不到、
+  读取过程抛任何异常 → 一律当「未设置」处理；而「未设置」对演练开关就是**演练**，
+  绝不会因为读不到就放行真实付费调用。
 
 ---
 
@@ -51,8 +69,40 @@ uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 跑完之后，**在这个终端里**关回演练（见第 4 节），再重启。
 
-> ⚠️ **为什么必须重启**：守卫在每一次真实动作前都会读当前进程的环境变量，但**外部改不了
-> 已经启动的进程的环境**。所以在另一个终端 `export`、或者改完不重启，都不会生效。
+> ⚠️ **为什么必须重启**：守卫在每一次真实动作前都会重新解析开关，但**外部改不了
+> 已经启动的进程的环境变量**，`.env` 也只在进程启动时被 pydantic-settings 读一次。
+> 所以在另一个终端 `export`、或者改完不重启，都不会生效。
+
+### 方式 A2：写进 `backend/.env`（也生效，但会打真实付费告警）
+
+`backend/.env` 里的这两个键**真的会生效**（守卫按「进程环境变量 → `.env` → 默认值」解析）：
+
+```bash
+cd /path/to/仓库根/backend
+# .env 里追加（注意：这一步就是"把付费闸门打开"，别提交这个文件）
+printf 'JELLYFISH_DRY_RUN=0\nJELLYFISH_REAL_LLM_CONFIRMED=1\n' >> .env
+# 重启后端进程后生效
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+后端启动时会在日志里打一条**醒目中文告警**（`!!` 框起来，`WARNING` 级别）：
+
+```
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+【告警】检测到由 backend/.env 打开的真实付费模式：
+    JELLYFISH_DRY_RUN=0 且 JELLYFISH_REAL_LLM_CONFIRMED=1（来自 backend/.env 的键：...）。
+    真实模式下大模型按 token、出图按张、出视频按次真实计费，请求会真的发出去。
+    请确认这是你要的；CI/测试环境请用演练模式。
+    ...
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+```
+
+> 为什么不推荐：`.env` 通常被 `.gitignore` 忽略，改它不进代码评审，也看不出是谁什么时候
+> 打开的，是最容易「悄悄开出去」的一条路。临时验证请优先用方式 A（`export`），
+> 让「谁开的」留在 shell 历史里。
+>
+> 想用进程环境变量**临时压掉** `.env` 里的真实模式（进程环境变量优先）：
+> `export JELLYFISH_DRY_RUN=1` 后重启。
 
 ### 方式 B：用仓库自带的启动脚本（自带二次确认与模式回显）
 
@@ -63,13 +113,13 @@ bash backend/scripts/run_backend.sh --real     # 真实模式启动，需要按�
 bash backend/scripts/run_backend.sh --real --yes   # 非交互环境（CI/脚本）用
 ```
 
-脚本只做三件事：设好两个变量 → 打印当前模式 → `exec uv run uvicorn ...`。
-它**不改**默认启动方式，不用它也一样能跑（方式 A 就是等价的）。
+脚本只做三件事：设好两个变量（用 `export` 覆盖 `.env` 里的可能残留）→ 打印当前模式 →
+`exec uv run uvicorn ...`。它**不改**默认启动方式，不用它也一样能跑（方式 A 就是等价的）。
 
 ### 方式 C：容器 / 部署环境
 
-把这两个变量写进容器的环境变量（`deploy/` 下的 compose 或编排配置的 `environment:`），
-**不要**指望 `.env`（见第 6 节第一个坑）。
+把这两个变量写进容器的环境变量（`deploy/` 下的 compose 或编排配置的 `environment:`）最稳妥。
+容器里也读 `.env`，但容器镜像里的 `.env` 更容易被误带进生产，所以还是显式环境变量优先。
 
 ---
 
@@ -91,6 +141,9 @@ curl -s http://localhost:8000/api/v1/studio/llm/orchestration/status | python3 -
 | `mode_label` | 中文模式名：`演练模式` / `真实模式（未确认）` / `真实模式` |
 | `is_real_mode` | 是否真的放行（只有两个开关都对才是 `true`） |
 | `guard.dry_run` / `guard.real_call_confirmed` | 两个开关的实时取值 |
+| `switch_source` / `switch_source_label` | 开关**写在哪**：`env`（进程环境变量）/ `dotenv`（`backend/.env`）/ `default`（都没写），中文名同 `guard.source_label` |
+| `dotenv_real_mode` | `true` = 真实模式是由 `backend/.env` 打开的（后端启动时会告警） |
+| `guard.source` / `guard.dry_run_source` / `guard.real_call_confirmed_source` | 每个开关**各自**的来源，排查「.env 和 export 打架」时看这里 |
 | `outlet_states[]` | 四个出口（大模型/出图/出视频/对象存储上传）各自 `allowed` 与拦截原因 |
 | `enable_steps` / `restore_steps` | 中文的开启步骤与恢复步骤 |
 | `dry_run_audit` | 最近的拦截/放行审计（排查「刚才为什么没发出去」） |
@@ -119,8 +172,18 @@ unset JELLYFISH_DRY_RUN JELLYFISH_REAL_LLM_CONFIRMED
 # 或者显式写死：export JELLYFISH_DRY_RUN=1
 ```
 
+**两处都要清**：如果 `backend/.env` 里也写过这两个键，光 `unset` 是不够的
+（`.env` 里还写着 `JELLYFISH_DRY_RUN=0`，进程环境变量又没设，守卫就会按 `.env` 放行）。
+检查并清掉：
+
+```bash
+cd backend && grep -nE 'JELLYFISH_(DRY_RUN|REAL_LLM_CONFIRMED)' .env || echo "（.env 里没有这两个键，安全）"
+# 有输出就手动删掉那两行，或把 JELLYFISH_DRY_RUN 改成 1
+```
+
 重启后端进程，然后按第 3 节确认：`data.mode` 应该是 `dry_run`、`data.guard.dry_run` 应该是
-`true`，页面角标回到「演练模式」。
+`true`、`data.switch_source` 应该是 `default`（或你在环境变量里显式写的 `env`），
+页面角标回到「演练模式」。
 
 > 想更保险：`JELLYFISH_DRY_RUN` 只要不设置（或设成任意非 0/false/no/off 的值）就是演练模式；
 > 取值读不懂时一律按**演练**处理（fail-safe）。
@@ -155,16 +218,18 @@ unset JELLYFISH_DRY_RUN JELLYFISH_REAL_LLM_CONFIRMED
 
 ## 6. 常见坑
 
-1. **把两个变量写进 `backend/.env` —— 不生效。**
-   `.env` 只被 pydantic-settings 读进 `Settings`（数据库、存储等配置），**不会**进入
-   `os.environ`，而守卫读的是进程环境变量。必须 `export`、用启动脚本，或写进容器环境。
-   这是踩坑最多的一条：`.env` 里写了 `JELLYFISH_DRY_RUN=0`，接口仍报「演练模式」。
-2. **只设了一个变量。** 只设 `JELLYFISH_DRY_RUN=0` 会停在「真实模式（未确认）」，
-   错误原因写的是 `real_call_not_confirmed`，仍然不会发真实请求——这是设计如此，不是 bug。
-3. **改完环境变量没重启进程。** 包括 `--reload` 的情况：`--reload` 只在**代码变更**时重启，
-   环境变量变了必须自己重启（`Ctrl+C` 再起）。
+1. **`.env` 和进程环境变量打架。** 两处都生效，**进程环境变量优先**。典型症状：
+   `.env` 里写着 `JELLYFISH_DRY_RUN=0`，你以为 `unset` 就关回去了，其实 `.env` 还在放行
+   （`switch_source` 会显示 `dotenv`，启动日志里也有醒目告警）。排查顺序：
+   先看状态接口的 `switch_source` / `guard.dry_run_source`，再 `grep` 一遍 `backend/.env`。
+2. **只设了一个变量。** 只设 `JELLYFISH_DRY_RUN=0`（`export` 或 `.env` 都一样）会停在
+   「真实模式（未确认）」，错误原因写的是 `real_call_not_confirmed`，仍然不会发真实请求
+   ——这是设计如此，不是 bug。
+3. **改完开关没重启进程。** 包括 `--reload` 的情况：`--reload` 只在**代码变更**时重启，
+   环境变量变了、`.env` 改了都必须自己重启（`Ctrl+C` 再起）。`.env` 是进程启动时读一次的。
 4. **worker / Celery 进程是另一套环境。** 如果真实调用由 worker 执行，**worker 进程**也必须
-   带上这两个变量，否则任务会在执行入口被拦下并标记失败。
+   能在它自己的工作目录里读到这两个开关（它也会读自己工作目录下的 `.env`），
+   否则任务会在执行入口被拦下并标记失败。
 5. **前端角标显示「模式未知」。** 说明读不到状态接口：后端没起、端口不对
    （默认 `http://localhost:8000`，可用 `VITE_BACKEND_URL` 覆盖），或 CORS 拦住了。
    在确认之前请按「不会真花钱」对待。
@@ -173,16 +238,20 @@ unset JELLYFISH_DRY_RUN JELLYFISH_REAL_LLM_CONFIRMED
 7. **演练模式下有些接口会返回占位产物**（例如 `dry-run.invalid` 域名下的图片地址、
    `status: dry_run` 的任务）。这些地址不可访问是**预期行为**，不要当成故障去"修"。
 8. **别把真实模式当默认。** 需要付费的验证请开一个独立终端、用完立刻关回演练；
-   提交代码时不要带任何真实开关的环境文件。
+   提交代码时不要带任何真实开关的环境文件（`.env` 不进库）。
+9. **测试里不会被 `.env` 打开真实模式。** 测试套件有 autouse 夹具
+   （`backend/tests/conftest.py::_force_dry_run_in_tests`）把两个来源都钉成「未设置」，
+   即使本机 `.env` 打开了真实模式，跑测试也不会真实付费。
 
 ---
 
 ## 7. 相关测试（都不会产生真实费用）
 
 ```bash
-# 后端：模式判定 / 出口放行 / 结构化拦截错误 / 状态接口
+# 后端：模式判定 / 出口放行 / 结构化拦截错误 / 状态接口 / .env 开关与优先级
 cd backend && DATABASE_URL="sqlite+aiosqlite:////tmp/jf_test.db" \
-  uv run python -m pytest -q tests/test_dry_run_real_mode.py tests/test_paid_outlet_guard.py -p no:cacheprovider
+  uv run python -m pytest -q tests/test_dry_run_real_mode.py tests/test_dry_run_dotenv_switch.py \
+  tests/test_paid_outlet_guard.py -p no:cacheprovider
 
 # 前端：模式解析与拦截错误解析（纯逻辑）
 cd front && node --test src/pages/aiStudio/components/realRunModeCore.test.ts
@@ -192,9 +261,12 @@ cd front && node --test src/pages/aiStudio/components/realRunModeCore.test.ts
 
 | 关注点 | 位置 |
 | --- | --- |
-| 开关判定、模式、中文步骤 | `backend/app/services/studio/llm_orchestration/dry_run.py` |
+| 开关判定（含 `.env` 解析与优先级）、模式、中文步骤 | `backend/app/services/studio/llm_orchestration/dry_run.py` |
+| `backend/.env` 里的两个开关字段（`jellyfish_dry_run` / `jellyfish_real_llm_confirmed`） | `backend/app/config.py` |
+| 启动告警（`dry_run.startup_warning()` 的调用点） | `backend/app/main.py`（`lifespan`） |
 | 拦截异常与结构化 409 | `backend/app/services/paid_outlet_guard.py`、`backend/app/main.py` |
 | 状态接口 | `backend/app/api/v1/routes/studio/llm_orchestration.py`（`GET /api/v1/studio/llm/orchestration/status`） |
+| 测试「默认演练」的保险丝 | `backend/tests/conftest.py`（autouse 夹具 `_force_dry_run_in_tests`） |
 | 前端角标 | `front/src/pages/aiStudio/components/RealRunModeBadge.tsx` |
 | 前端纯逻辑 | `front/src/pages/aiStudio/components/realRunModeCore.ts` |
 | 前端接口封装 | `front/src/services/orchestrationStatusApi.ts` |

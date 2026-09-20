@@ -43,6 +43,19 @@ export type RealRunModeView = {
   guardText: string
   env: string
   confirmEnv: string
+  /**
+   * 开关来源：`env`（进程环境变量）/ `dotenv`（backend/.env）/ `default`（两处都没配）。
+   *
+   * 页面只**显示**来源，绝不提供「点一下就切真实模式」的开关：
+   * 切模式必须改配置 + 重启进程（见 enableSteps），这是有意的权限边界。
+   */
+  switchSource: string
+  /** 中文来源标签，例如「进程环境变量」「backend/.env」「默认（未显式配置）」 */
+  switchSourceLabel: string
+  /** 真实模式是不是由 backend/.env 打开的（后端会就此打启动告警） */
+  dotenvRealMode: boolean
+  /** 后端给的真实付费启动告警原文（只有 dotenv 打开真实模式时才有） */
+  startupWarning: string
   /** 改完环境变量是否需要重启后端进程 */
   restartRequired: boolean
   outlets: OutletAllowState[]
@@ -75,6 +88,22 @@ export const BLOCKED_REASON_NOT_CONFIRMED = 'real_call_not_confirmed'
 export const DEFAULT_GUARD_ENV = 'JELLYFISH_DRY_RUN'
 export const DEFAULT_CONFIRM_ENV = 'JELLYFISH_REAL_LLM_CONFIRMED'
 export const DEFAULT_MODE_DOC = 'docs/real-run-mode.md'
+
+/** 开关来源的中文标签（后端没给标签时的兜底；只展示，不含任何密钥）。 */
+export const DEFAULT_SOURCE_LABEL: Record<string, string> = {
+  env: '进程环境变量',
+  dotenv: 'backend/.env',
+  default: '默认（未显式配置 = 演练）',
+}
+
+/** 把后端给的来源码 + 标签归一成人能读的中文（只展示，不含任何密钥）。 */
+export function sourceLabelOf(rawSource: string, rawLabel: string): string {
+  const label = String(rawLabel ?? '').trim()
+  if (label) return label
+  const code = String(rawSource ?? '').trim()
+  if (DEFAULT_SOURCE_LABEL[code]) return DEFAULT_SOURCE_LABEL[code]
+  return code || DEFAULT_SOURCE_LABEL.default
+}
 
 export const MODE_LABEL: Record<RealRunMode, string> = {
   dry_run: '演练模式',
@@ -123,19 +152,23 @@ export function notConfirmedReasonText(confirmEnv: string): string {
 /** 本地生成的「怎么开真实模式」步骤（后端没给时用，口径与后端一致）。 */
 export function buildEnableSteps(env = DEFAULT_GUARD_ENV, confirmEnv = DEFAULT_CONFIRM_ENV): string[] {
   return [
-    `第 1 步｜在启动后端的那个终端里导出两个环境变量（必须是同一个 shell）：export ${env}=0 与 export ${confirmEnv}=1。` +
-      '注意：写进 backend/.env 无效——.env 只会被 Settings 读取，不会进入进程环境。',
+    `第 1 步｜设置两个开关（二选一，都生效，但进程环境变量优先于 backend/.env）：` +
+      `① 在启动后端的那个终端里 export ${env}=0 与 export ${confirmEnv}=1；` +
+      `② 或把这两行写进 backend/.env（也生效，但后端启动时会打真实付费告警）。`,
     `第 2 步｜重启后端进程（外部改不了已启动进程的环境变量，必须重启）：${START_COMMAND}。`,
     `第 3 步｜验证当前模式：执行 ${VERIFY_COMMAND}，确认 data.mode 为 "real"、` +
-      'data.guard.real_call_confirmed 为 true；页面顶部角标应显示「真实模式」。',
-    `第 4 步｜恢复演练：unset ${env} ${confirmEnv} 后重启进程，角标回到「演练模式」。完整说明见 ${DEFAULT_MODE_DOC}。`,
+      'data.guard.real_call_confirmed 为 true、data.switch_source 为 "env"/"dotenv"；' +
+      '页面顶部角标应显示「真实模式」。',
+    `第 4 步｜恢复演练：unset ${env} ${confirmEnv}（.env 里若也写了要一并清掉）后重启进程，` +
+      `角标回到「演练模式」。完整说明见 ${DEFAULT_MODE_DOC}。`,
   ]
 }
 
 /** 本地生成的「怎么关回演练」步骤。 */
 export function buildRestoreSteps(env = DEFAULT_GUARD_ENV, confirmEnv = DEFAULT_CONFIRM_ENV): string[] {
   return [
-    `第 1 步｜在启动后端的终端里 unset ${env} ${confirmEnv}（或显式 export ${env}=1）。`,
+    `第 1 步｜在启动后端的终端里 unset ${env} ${confirmEnv}（或显式 export ${env}=1）；` +
+      '并检查 backend/.env 里是否写了这两个键，写了就一并删掉或把演练开关改回 1。',
     '第 2 步｜重启后端进程。',
     `第 3 步｜验证：执行 ${VERIFY_COMMAND}，确认 data.mode 为 "dry_run"、data.guard.dry_run 为 true；` +
       '页面角标应显示「演练模式」。',
@@ -144,8 +177,8 @@ export function buildRestoreSteps(env = DEFAULT_GUARD_ENV, confirmEnv = DEFAULT_
 
 export function buildHowToEnable(env = DEFAULT_GUARD_ENV, confirmEnv = DEFAULT_CONFIRM_ENV): string {
   return (
-    `开启真实模式：在启动后端的终端里 export ${env}=0 且 export ${confirmEnv}=1，` +
-    `然后重启后端进程（写 backend/.env 无效）；用 ${VERIFY_COMMAND} 确认 data.mode="real"。` +
+    `开启真实模式：export ${env}=0 且 export ${confirmEnv}=1（写进 backend/.env 同样生效，` +
+    `但进程环境变量优先），然后重启后端进程；用 ${VERIFY_COMMAND} 确认 data.mode="real"。` +
     `详见 ${DEFAULT_MODE_DOC}。`
   )
 }
@@ -285,6 +318,13 @@ export function parseRealRunMode(payload: unknown): RealRunModeView {
     guardText: readString(source, 'guard_status_text'),
     env,
     confirmEnv,
+    switchSource: readString(source, 'switch_source') || readString(guard, 'source') || 'default',
+    switchSourceLabel: sourceLabelOf(
+      readString(source, 'switch_source') || readString(guard, 'source'),
+      readString(source, 'switch_source_label') || readString(guard, 'source_label') || readString(source, 'source_label'),
+    ),
+    dotenvRealMode: readBool(source, 'dotenv_real_mode') ?? readBool(guard, 'dotenv_real_mode') ?? false,
+    startupWarning: readString(source, 'startup_warning') || readString(guard, 'startup_warning'),
     restartRequired: readBool(source, 'restart_required_on_change') !== false,
     outlets,
     enableSteps: enableSteps.length ? enableSteps : buildEnableSteps(env, confirmEnv),

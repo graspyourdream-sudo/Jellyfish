@@ -16,6 +16,41 @@ except Exception:  # noqa: BLE001
     app = None
 
 
+DRY_RUN_ENV = "JELLYFISH_DRY_RUN"
+CONFIRM_ENV = "JELLYFISH_REAL_LLM_CONFIRMED"
+
+
+class _NoSwitchSettings:
+    """``Settings`` 替身：等价于 ``backend/.env`` 里**没写**这两个开关。"""
+
+    jellyfish_dry_run: str | None = None
+    jellyfish_real_llm_confirmed: str | None = None
+
+
+@pytest.fixture(autouse=True)
+def _force_dry_run_in_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """测试环境一律「两处都没写开关」，保证整个测试套件默认是**演练模式**。
+
+    为什么必须有这一条：守卫现在也认 ``backend/.env``（pydantic-settings 读进
+    ``Settings``）。如果本机 / CI 缓存里正好有一份打开了真实模式的 ``.env``，
+    整套测试就会在**真实模式**下跑——那是会花钱的。这里把两个来源都钉死：
+
+    - 进程环境变量：``delenv``；
+    - ``backend/.env``：把守卫读 ``Settings`` 的唯一入口 :func:`dry_run._settings`
+      换成「什么都没有」的替身。
+
+    需要测环境变量 / ``.env`` 的用例，在自己用例体内 monkeypatch 覆盖回来即可：
+    用例体内的 monkeypatch 在夹具之后生效，优先级更高。
+    """
+    monkeypatch.delenv(DRY_RUN_ENV, raising=False)
+    monkeypatch.delenv(CONFIRM_ENV, raising=False)
+    try:
+        from app.services.studio.llm_orchestration import dry_run
+    except Exception:  # noqa: BLE001 - 可选依赖缺失时不影响不需要守卫的用例
+        return
+    monkeypatch.setattr(dry_run, "_settings", lambda: _NoSwitchSettings())
+
+
 @pytest.fixture
 def client() -> TestClient:
     """FastAPI 应用 TestClient，用于集成测试。"""

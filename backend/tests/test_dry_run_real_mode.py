@@ -33,8 +33,40 @@ def _default_guard_state() -> None:
 
 
 def _force_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把两个开关钉成「两处都没写」（进程环境变量 + backend/.env 都清掉）。
+
+    ``.env`` 一侧通过替换守卫读 ``Settings`` 的入口来清（见 tests/conftest.py 的
+    autouse 夹具，这里是文件内显式版本，让单个用例也能自己保证默认演练）。
+    """
     monkeypatch.delenv(DRY_RUN_ENV, raising=False)
     monkeypatch.delenv(CONFIRM_ENV, raising=False)
+    monkeypatch.setattr(dry_run, "_settings", lambda: _NoSwitchSettings())
+
+
+class _NoSwitchSettings:
+    """``Settings`` 替身：等价于 backend/.env 里没写这两个开关。"""
+
+    jellyfish_dry_run: str | None = None
+    jellyfish_real_llm_confirmed: str | None = None
+
+
+class _DotenvSettings:
+    """``Settings`` 替身：等价于只在 backend/.env 里写了这两个开关。"""
+
+    def __init__(self, dry_run: str | None, confirm: str | None) -> None:
+        self.jellyfish_dry_run = dry_run
+        self.jellyfish_real_llm_confirmed = confirm
+
+
+def _only_dotenv(monkeypatch: pytest.MonkeyPatch, dry_run_value: str, confirm_value: str) -> None:
+    """只让 ``backend/.env`` 生效：进程环境变量清空 + 注入 .env 侧取值。"""
+    monkeypatch.delenv(DRY_RUN_ENV, raising=False)
+    monkeypatch.delenv(CONFIRM_ENV, raising=False)
+    monkeypatch.setattr(
+        dry_run,
+        "_settings",
+        lambda: _DotenvSettings(dry_run_value, confirm_value),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -324,3 +356,135 @@ def test_status_route_reports_real_mode_without_calling_anything(
     assert data["is_real_mode"] is True
     assert all(item["allowed"] is True for item in data["outlet_states"])
     assert data["guard"]["real_call_confirmed"] is True
+
+
+# --------------------------------------------------------------------------
+# 6. 开关来源与优先级（进程环境变量 > backend/.env > 默认值）
+#
+# 本节的用例都**只读解析结果与状态**：真实模式分支不发起任何真实请求，
+# 守卫本身只做判定（`test_*` 里不出现任何 httpx / client 调用）。
+# --------------------------------------------------------------------------
+
+
+def test_no_switch_anywhere_is_dry_run_from_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """两处都没有 → 演练模式、来源 default、四个出口全部 allowed=false。"""
+    _force_dry_run(monkeypatch)
+
+    assert dry_run.dry_run_enabled() is True
+    assert dry_run.real_call_confirmed() is False
+    assert dry_run.source() == dry_run.SOURCE_DEFAULT == "default"
+    assert dry_run.source_label() == "默认值（两处都没设置）"
+    assert dry_run.state()["source"] == "default"
+    assert dry_run.state()["dotenv_real_mode"] is False
+    assert dry_run.startup_warning() is None
+    assert all(item["allowed"] is False for item in dry_run.outlet_states())
+    assert all(item["reason"] == "dry_run" for item in dry_run.outlet_states())
+
+
+def test_env_dry_run_without_confirm_blocks_as_not_confirmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """只设进程环境变量 ``DRY_RUN=0`` 但没确认 → 原因必须是 real_call_not_confirmed。"""
+    _force_dry_run(monkeypatch)
+    monkeypatch.setenv(DRY_RUN_ENV, "0")
+
+    assert dry_run.mode() == dry_run.MODE_REAL_UNCONFIRMED
+    assert dry_run.blocked_reason_code() == dry_run.BLOCKED_REASON_NOT_CONFIRMED == (
+        "real_call_not_confirmed"
+    )
+    states = dry_run.outlet_states()
+    assert all(item["allowed"] is False for item in states)
+    assert all(item["reason"] == "real_call_not_confirmed" for item in states)
+    assert not any(item["reason"] == "dry_run" for item in states)
+    assert dry_run.startup_warning() is None  # 没确认就不是真实模式，不告警
+
+
+def test_env_both_switches_is_real_mode_with_env_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """进程环境变量两个都设 → 真实模式，来源 env，且**不**打 .env 告警。"""
+    _force_dry_run(monkeypatch)
+    monkeypatch.setenv(DRY_RUN_ENV, "0")
+    monkeypatch.setenv(CONFIRM_ENV, "1")
+
+    assert dry_run.mode() == dry_run.MODE_REAL
+    assert dry_run.source() == dry_run.SOURCE_ENV == "env"
+    assert dry_run.source_label() == "进程环境变量"
+    assert dry_run.state()["source"] == "env"
+    assert dry_run.state()["dry_run_source"] == "env"
+    assert dry_run.state()["real_call_confirmed_source"] == "env"
+    assert dry_run.state()["dotenv_real_mode"] is False
+    assert dry_run.startup_warning() is None
+    assert all(item["allowed"] is True for item in dry_run.outlet_states())
+
+
+def test_priority_env_wins_over_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """.env 说演练、环境变量说真实 → 以环境变量为准。"""
+    _only_dotenv(monkeypatch, "1", "0")
+    monkeypatch.setenv(DRY_RUN_ENV, "0")
+    monkeypatch.setenv(CONFIRM_ENV, "1")
+
+    assert dry_run.mode() == dry_run.MODE_REAL
+    assert dry_run.source() == "env"
+    assert dry_run.flag_raw(DRY_RUN_ENV) == "0"  # 环境变量的值，不是 .env 的 1
+    assert all(item["allowed"] is True for item in dry_run.outlet_states())
+
+
+def test_priority_env_dry_run_wins_over_dotenv_real(monkeypatch: pytest.MonkeyPatch) -> None:
+    """反向：.env 说真实、环境变量说演练 → 仍然按演练拦截（安全方向优先）。"""
+    _only_dotenv(monkeypatch, "0", "1")
+    monkeypatch.setenv(DRY_RUN_ENV, "1")
+
+    assert dry_run.dry_run_enabled() is True
+    assert dry_run.mode() == dry_run.MODE_DRY_RUN
+    assert dry_run.source() == "env"
+    assert dry_run.flag_raw(DRY_RUN_ENV) == "1"
+    assert dry_run.state()["dotenv_real_mode"] is False
+    assert all(item["allowed"] is False for item in dry_run.outlet_states())
+
+
+def test_unparsable_value_is_treated_as_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``JELLYFISH_DRY_RUN=maybe`` → 当演练处理（fail-safe，绝不因读不懂就放行）。"""
+    _force_dry_run(monkeypatch)
+    monkeypatch.setenv(DRY_RUN_ENV, "maybe")
+    monkeypatch.setenv(CONFIRM_ENV, "1")
+
+    assert dry_run.flag_text(DRY_RUN_ENV) == dry_run.UNSET == ""
+    assert dry_run.dry_run_enabled() is True
+    assert dry_run.mode() == dry_run.MODE_DRY_RUN
+    assert dry_run.blocked_reason_code() == dry_run.BLOCKED_REASON_DRY_RUN
+    assert all(item["allowed"] is False for item in dry_run.outlet_states())
+
+
+def test_unparsable_confirm_value_is_not_confirmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """确认变量读不懂 → 一律按未确认（仍然拒绝真实调用）。"""
+    _force_dry_run(monkeypatch)
+    monkeypatch.setenv(DRY_RUN_ENV, "0")
+    monkeypatch.setenv(CONFIRM_ENV, "yes please")
+
+    assert dry_run.real_call_confirmed() is False
+    assert dry_run.mode() == dry_run.MODE_REAL_UNCONFIRMED
+    assert dry_run.blocked_reason_code() == dry_run.BLOCKED_REASON_NOT_CONFIRMED
+
+
+def test_read_failure_is_fail_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """读 ``Settings`` 抛异常 → 当演练处理，绝不因为读不到就放行真实调用。"""
+    _force_dry_run(monkeypatch)
+
+    def _boom() -> object:
+        raise RuntimeError("配置读取失败")
+
+    monkeypatch.setattr(dry_run, "_settings", _boom)
+
+    assert dry_run.flag_raw(DRY_RUN_ENV) == ""
+    assert dry_run.dry_run_enabled() is True
+    assert dry_run.real_call_confirmed() is False
+    assert dry_run.mode() == dry_run.MODE_DRY_RUN
+    assert all(item["allowed"] is False for item in dry_run.outlet_states())
+    assert dry_run.startup_warning() is None
+
+
+def test_short_status_stays_byte_identical_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认（两处都没写）时既有文案逐字不变；开关被显式写出时才追加来源后缀。"""
+    _force_dry_run(monkeypatch)
+    assert dry_run.short_status() == f"DRY_RUN=开（{DRY_RUN_ENV}，未发起真实调用）"
+
+    monkeypatch.setenv(DRY_RUN_ENV, "1")
+    assert dry_run.short_status().endswith("｜开关来源：进程环境变量")
+

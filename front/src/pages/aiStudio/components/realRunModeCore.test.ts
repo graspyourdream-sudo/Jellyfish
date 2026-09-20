@@ -255,3 +255,55 @@ test('readBlockedErrorPayload 支持 message 里内嵌的 body JSON', () => {
   assert.equal(payload?.code, 'paid_outlet_blocked')
   assert.equal(payload?.reason, 'dry_run')
 })
+
+/* ------------------------------------------------ 开关来源（只读展示，不含密钥） */
+
+test('开关来源：后端给了来源码与标签就照实显示，页面不提供切换开关', () => {
+  const view = parseRealRunMode({
+    mode: 'dry_run',
+    switch_source: 'dotenv',
+    switch_source_label: 'backend/.env',
+    dotenv_real_mode: false,
+    guard: { dry_run: true, real_call_confirmed: false },
+  })
+  assert.equal(view.switchSource, 'dotenv')
+  assert.equal(view.switchSourceLabel, 'backend/.env')
+  assert.equal(view.dotenvRealMode, false)
+  // 只读视图：解析结果里不出现任何「写入/切换」语义的字段或函数
+  assert.deepEqual(
+    Object.keys(view).filter((key) => /^(set|toggle|write|apply|turn)/i.test(key)),
+    [],
+  )
+})
+
+test('开关来源：后端没给标签时用中文兜底，绝不显示空', () => {
+  const byCode = parseRealRunMode({
+    mode: 'dry_run',
+    switch_source: 'env',
+    guard: { dry_run: true, real_call_confirmed: false },
+  })
+  assert.equal(byCode.switchSourceLabel, '进程环境变量')
+
+  const byDefault = parseRealRunMode({
+    mode: 'dry_run',
+    guard: { dry_run: true, real_call_confirmed: false },
+  })
+  assert.equal(byDefault.switchSource, 'default')
+  assert.match(byDefault.switchSourceLabel, /默认/)
+})
+
+test('开关来源：由 .env 打开真实模式时带出告警原文与标记', () => {
+  const view = parseRealRunMode({
+    mode: 'real',
+    switch_source: 'dotenv',
+    switch_source_label: 'backend/.env',
+    dotenv_real_mode: true,
+    startup_warning: '【告警】检测到由 backend/.env 打开的真实付费模式：…',
+    guard: { dry_run: false, real_call_confirmed: true },
+  })
+  assert.equal(view.mode, 'real')
+  assert.equal(view.dotenvRealMode, true)
+  assert.match(view.startupWarning, /真实付费模式/)
+  // 告警原文里不能出现任何密钥样式的内容
+  assert.doesNotMatch(view.startupWarning, /(sk-|AKIA|LTAI|eyJ)/)
+})

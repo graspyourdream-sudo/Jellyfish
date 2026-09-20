@@ -11,9 +11,14 @@
 #
 # 这个脚本只做三件事：设好两个守卫环境变量 → 回显当前模式 → exec uvicorn。
 # 它不改变仓库原有的启动方式（`uv run uvicorn app.main:app --reload` 依然可用），
-# 存在的意义是：不必猜环境变量名，也不会踩「写进 .env 不生效」的坑。
+# 存在的意义是：不必猜环境变量名，并且用**进程环境变量**压住 backend/.env 里可能
+# 残留的开关（守卫的优先级是「进程环境变量 > .env > 默认值」，所以这里的 export
+# 一定赢；演练模式启动时脚本会显式 export JELLYFISH_DRY_RUN=1 并 unset 确认变量）。
 #
 # 完整说明见 docs/real-run-mode.md。
+#
+# 注：`--status` 只读**环境变量**这一侧，看不到 `.env` 里写了什么；要看最终生效结果，
+# 用状态接口的 data.switch_source / data.dotenv_real_mode，或启动时的告警日志。
 
 set -euo pipefail
 
@@ -30,7 +35,7 @@ MODE="dry-run"
 ASSUME_YES="no"
 
 usage() {
-  sed -n '3,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -59,7 +64,17 @@ print_mode() {
     confirm_label="${!CONFIRM_ENV}"
   fi
   echo "守卫环境变量：${DRY_RUN_ENV}=${dry_run_label}　${CONFIRM_ENV}=${confirm_label}"
+  # .env 里的同类开关**也生效**（优先级低于进程环境变量）。这里显式点出来，
+  # 免得只看环境变量就以为「已经关回演练了」。
+  if [ -f "${BACKEND_DIR}/.env" ] \
+    && grep -qE "^[[:space:]]*(${DRY_RUN_ENV}|${CONFIRM_ENV})[[:space:]]*=" "${BACKEND_DIR}/.env"; then
+    echo "⚠️  ${BACKEND_DIR}/.env 里也写了这两个开关（优先级低于上面的环境变量）："
+    grep -nE "^[[:space:]]*(${DRY_RUN_ENV}|${CONFIRM_ENV})[[:space:]]*=" "${BACKEND_DIR}/.env" \
+      | sed 's/^/    .env:/'
+    echo "    → 只关环境变量不够，要一并改掉/删掉 .env 里的那两行。"
+  fi
   echo "验证当前模式：curl -s http://localhost:${PORT}/api/v1/studio/llm/orchestration/status"
+  echo "                （看 data.mode 与 data.switch_source：env / dotenv / default）"
   echo "说明文档：docs/real-run-mode.md"
 }
 
