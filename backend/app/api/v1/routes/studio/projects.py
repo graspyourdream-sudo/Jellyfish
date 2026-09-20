@@ -101,7 +101,9 @@ async def list_projects(
     db: AsyncSession = Depends(get_db),
     q: str | None = Query(None, description="关键字，过滤 name/description"),
     order: str | None = Query(None, description="排序字段"),
-    is_desc: bool = Query(False, description="是否倒序"),
+    # 默认倒序：项目列表要「最新创建的在最上面」。以前默认 ASC，最新项目被排到最后，
+    # 前端又拿从不写入的 stats.updated_at 兜底成「当前时间」，导致本地排序完全失效。
+    is_desc: bool = Query(True, description="是否倒序（默认按创建时间倒序：最新项目在最上面）"),
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
 ) -> ApiResponse[PaginatedData[ProjectRead]]:

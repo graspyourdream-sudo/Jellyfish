@@ -11,7 +11,6 @@ import {
   Form,
   Select,
   AutoComplete,
-  InputNumber,
   Switch,
   message,
   Space,
@@ -37,8 +36,7 @@ import {
 } from './ProjectVisualStyleAndStyleFields'
 import { useProjectStyleOptions } from './useProjectStyleOptions'
 import { getChapterPreparationState } from './ProjectWorkbench/chapterPreparation'
-import { ensureHasShotsBeforeShooting } from './ProjectWorkbench/ensureHasShotsBeforeShooting'
-import { getChapterShotsPath, getChapterStudioPath } from './ProjectWorkbench/routes'
+import { getChapterShotsPath } from './ProjectWorkbench/routes'
 import { loadProjectFlowStatsForChapters, type ProjectFlowStats } from './ProjectWorkbench/projectFlowStats'
 
 type ViewMode = 'grid' | 'compact' | 'large'
@@ -60,6 +58,20 @@ type ProjectView = Project & {
   defaultVideoRatio?: string | null
 }
 
+/**
+ * 项目卡片上的时间显示。
+ *
+ * 只显示后端下发的真实创建时间（`created_at`）；拿不到就显示「—」，
+ * 绝不用 `new Date()` 兜底——那正是「每个项目的时间都等于打开页面那一刻」的来源。
+ */
+function formatProjectTime(value?: string): string {
+  if (!value) return '—'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+}
+
 const ProjectLobby: React.FC = () => {
   const navigate = useNavigate()
   const [projects, setProjects] = useState<ProjectView[]>([])
@@ -67,7 +79,7 @@ const ProjectLobby: React.FC = () => {
   const [search, setSearch] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>('grid')
   const [filterTab, setFilterTab] = useState<FilterTab>('all')
-  const [sortKey, setSortKey] = useState<SortKey>('updatedAt')
+  const [sortKey, setSortKey] = useState<SortKey>('createdAt')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [multiSelectMode, setMultiSelectMode] = useState(false)
@@ -94,10 +106,15 @@ const ProjectLobby: React.FC = () => {
       return typeof v === 'number' && Number.isFinite(v) ? v : 0
     }
 
-    const updatedAt =
-      (typeof stats.updated_at === 'string' && stats.updated_at) ||
-      (typeof stats.updatedAt === 'string' && stats.updatedAt) ||
-      new Date().toISOString()
+    /**
+     * 时间戳只认后端下发的真实值。
+     *
+     * 历史问题：这里原来读 `stats.updated_at`，后端从不写 stats，于是所有项目都回退成
+     * `new Date().toISOString()`——列表上每个项目的时间都等于「打开页面的那一刻」，
+     * 「最近更新」排序因此完全失效，卡片上显示的也是这个假时间。
+     */
+    const createdAt = typeof p.created_at === 'string' ? p.created_at : ''
+    const updatedAt = (typeof p.updated_at === 'string' && p.updated_at) || createdAt
 
     return {
       id: p.id,
@@ -113,6 +130,7 @@ const ProjectLobby: React.FC = () => {
         scenes: getNum('scenes'),
         props: getNum('props'),
       },
+      createdAt,
       updatedAt,
       visualStyle: (p.visual_style as ProjectVisualStyleChoice | undefined) ?? '现实',
       defaultVideoRatio: p.default_video_ratio ?? null,
@@ -330,8 +348,10 @@ const ProjectLobby: React.FC = () => {
         av = a.stats.chapters
         bv = b.stats.chapters
       } else if (sortKey === 'createdAt') {
-        av = a.id
-        bv = b.id
+        // 真实创建时间：后端 created_at（ISO 字符串，可直接字典序比较）。
+        // 以前这里比较的是 a.id / b.id，跟时间毫无关系。
+        av = a.createdAt ?? ''
+        bv = b.createdAt ?? ''
       } else {
         av = a.updatedAt
         bv = b.updatedAt
@@ -384,7 +404,6 @@ const ProjectLobby: React.FC = () => {
     form.setFieldsValue({
       visual_style: defaultVisual,
       style: defaultStyle,
-      seed: Math.floor(Math.random() * 99999),
       unifyStyle: true,
       default_video_ratio: defaultVideoRatio,
     })
@@ -396,7 +415,6 @@ const ProjectLobby: React.FC = () => {
     description?: string
     style: string
     visual_style: ProjectVisualStyleChoice
-    seed: number
     unifyStyle: boolean
     default_video_ratio?: string
   }) => {
@@ -409,7 +427,6 @@ const ProjectLobby: React.FC = () => {
           description: values.description ?? '',
           style: values.style,
           visual_style: values.visual_style as any,
-          seed: values.seed,
           unify_style: values.unifyStyle,
           default_video_ratio: values.default_video_ratio || null,
           progress: 0,
@@ -435,7 +452,6 @@ const ProjectLobby: React.FC = () => {
       description: p.description,
       style: p.style,
       visual_style: p.visualStyle ?? '现实',
-      seed: p.seed,
       unifyStyle: p.unifyStyle,
       default_video_ratio: p.defaultVideoRatio ?? undefined,
     })
@@ -447,7 +463,6 @@ const ProjectLobby: React.FC = () => {
     description?: string
     style: string
     visual_style: ProjectVisualStyleChoice
-    seed: number
     unifyStyle: boolean
     default_video_ratio?: string
   }) => {
@@ -460,7 +475,6 @@ const ProjectLobby: React.FC = () => {
           description: values.description ?? '',
           style: values.style,
           visual_style: values.visual_style as any,
-          seed: values.seed,
           unify_style: values.unifyStyle,
           default_video_ratio: values.default_video_ratio || null,
         },
@@ -517,16 +531,13 @@ const ProjectLobby: React.FC = () => {
       navigate(getChapterShotsPath(project.id, stageSummary.chapterId))
       return
     }
-    if (stageSummary.key === 'prepare_shots') {
-      navigate(getChapterStudioPath(project.id, stageSummary.chapterId))
+    if (stageSummary.key === 'prepare_shots' || stageSummary.key === 'shoot') {
+      // 有分镜之后不再从列表直接跳进分镜工作室：交给项目工作台，
+      // 由 `resolveProjectStep` 判定当前应该落在哪一步（资产提取 / 图片准备 / …）。
+      navigate(`/projects/${project.id}`)
       return
     }
-    void ensureHasShotsBeforeShooting({
-      projectId: project.id,
-      chapterId: stageSummary.chapterId,
-      storyboardCount: stageSummary.storyboardCount,
-      navigate,
-    })
+    navigate(`/projects/${project.id}`)
   }
 
   /**
@@ -595,7 +606,7 @@ const ProjectLobby: React.FC = () => {
                 {p.name}
               </div>
               <div className="text-[10px] text-gray-500 truncate">
-                {p.updatedAt}
+                {formatProjectTime(p.createdAt)}
               </div>
             </div>
             <div className="flex flex-col items-end gap-2">
@@ -688,7 +699,7 @@ const ProjectLobby: React.FC = () => {
         )}
 
         <div className={`mt-1 border-t border-gray-100 flex items-center justify-between gap-1 ${isCompact ? 'pt-1' : 'pt-1.5'}`}>
-          <span className="text-[11px] text-gray-500 truncate">{p.updatedAt}</span>
+          <span className="text-[11px] text-gray-500 truncate">{formatProjectTime(p.createdAt)}</span>
           <Space size="small" onClick={(e) => e.stopPropagation()}>
             <Button
               type="primary"
@@ -926,7 +937,7 @@ const ProjectLobby: React.FC = () => {
                   </div>
                   <div className="flex items-center justify-between text-[11px] text-gray-500">
                     <span>视频风格：{selectedProject.style}</span>
-                    <span>种子：{selectedProject.seed}</span>
+                    <span>创建：{formatProjectTime(selectedProject.createdAt)}</span>
                   </div>
                   <div>
                     <div className="text-[11px] text-gray-500 mb-0.5">进度</div>
@@ -978,7 +989,6 @@ const ProjectLobby: React.FC = () => {
               projectStyleOptions.defaultStyleByVisual?.[projectStyleOptions.visualStyles[0]?.value ?? '现实'] ??
               projectStyleOptions.stylesByVisual[projectStyleOptions.visualStyles[0]?.value ?? '现实']?.[0]?.value ??
               '真人都市',
-            seed: Math.floor(Math.random() * 99999),
             unifyStyle: true,
             default_video_ratio: defaultVideoRatio,
           }}
@@ -994,13 +1004,11 @@ const ProjectLobby: React.FC = () => {
             <Input.TextArea rows={4} placeholder="项目简介与风格说明，建议 80–120 字" />
           </Form.Item>
           <ProjectVisualStyleAndStyleFields form={form} options={projectStyleOptions} />
-          <Form.Item
-            name="seed"
-            label="全局种子值"
-            tooltip="固定种子可确保整部短剧视觉调性一致"
-          >
-            <InputNumber min={0} className="w-full" />
-          </Form.Item>
+          {/*
+            全局种子值暂时隐藏：目前没有任何生成路径消费项目级 seed
+            （图片/视频请求里的 seed 都是单次请求字段，前端也从不传），
+            留着只会让用户以为它能控制全片一致性。数据库字段保留兼容，不做迁移。
+          */}
           <Form.Item
             name="default_video_ratio"
             label="默认视频比例"
@@ -1051,9 +1059,6 @@ const ProjectLobby: React.FC = () => {
             <Input.TextArea rows={3} placeholder="项目简介与风格说明" />
           </Form.Item>
           <ProjectVisualStyleAndStyleFields form={editForm} options={projectStyleOptions} />
-          <Form.Item name="seed" label="全局种子值" tooltip="固定种子可确保整部短剧视觉调性一致">
-            <InputNumber min={0} className="w-full" />
-          </Form.Item>
           <Form.Item
             name="default_video_ratio"
             label="默认视频比例"

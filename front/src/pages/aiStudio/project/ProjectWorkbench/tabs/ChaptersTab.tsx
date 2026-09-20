@@ -17,7 +17,6 @@ import { chapterStatusMap } from '../constants'
 import { getChapterShotsPath, getChapterStudioPath } from '../routes'
 import { useChapters, newId, type Chapter } from '../hooks/useProjectData'
 import { ChapterRawTextEditorModal } from '../../../chapter/components/ChapterRawTextEditorModal'
-import { ensureHasShotsBeforeShooting } from '../ensureHasShotsBeforeShooting'
 import { getChapterPreparationState } from '../chapterPreparation'
 import { loadChapterFlowStats, type ChapterFlowStats } from '../projectFlowStats'
 import { executeTaskCancel } from '../../../components/taskActionHelpers'
@@ -273,16 +272,13 @@ export function ChaptersTab() {
       navigate(getChapterShotsPath(projectId, record.id))
       return
     }
-    if (state.key === 'prepare_shots') {
-      navigate(getChapterStudioPath(projectId, record.id))
+    if (state.key === 'prepare_shots' || state.key === 'shoot') {
+      // 有分镜之后不再从章节行直接跳进分镜工作室：按六步顺序先做资产提取。
+      // （工作室仍可从步骤条第 5/6 步或分镜页的次按钮进入，用于单镜查看与补漏。）
+      navigate(`/projects/${projectId}?step=extract_assets`)
       return
     }
-    void ensureHasShotsBeforeShooting({
-      projectId,
-      chapterId: record.id,
-      storyboardCount: record.storyboardCount,
-      navigate,
-    })
+    navigate(`/projects/${projectId}?step=extract_assets`)
   }
 
   const handleDivideAsync = async (record: Chapter) => {

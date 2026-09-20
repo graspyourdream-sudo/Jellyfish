@@ -24,7 +24,7 @@ import {
 } from '../../../services/generated'
 import { defaultTaskActionErrorMessage, executeTaskCancel, notifyExistingTask } from '../components/taskActionHelpers'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
-import { getChapterShotEditPath, getChapterShotsPath, getChapterStudioPath } from '../project/ProjectWorkbench/routes'
+import { getChapterShotEditPath, getChapterShotsPath } from '../project/ProjectWorkbench/routes'
 import { DisplayImageCard } from '../assets/components/DisplayImageCard'
 import { ChapterShotAssetBindingSection } from './components/ChapterShotAssetBindingSection'
 import { ChapterShotAssetConfirmation } from './components/ChapterShotAssetConfirmation'
@@ -1220,15 +1220,17 @@ export function ChapterShotEditPage() {
   const currentShotActionable = shot ? isActionablePreparationShot(shot) || !basicInfoReady || !actionBeatsReady : false
   const extractionSummary = getShotExtractionSummary(shot)
   const extractionStateMeta = getExtractionStateMeta(shot, pendingConfirmCount)
-  const goToStudio = () => navigate(getChapterStudioPath(projectId, chapterId), {
-    state: { focusShotId: shotId, selectedShotIds: shotId ? [shotId] : [] },
-  })
-  const nextStepTitle = statusReady ? '下一步：进入分镜工作室继续生成' : '下一步：先完成镜头准备，再进入工作室'
+  /**
+   * 「下一步」只走六步主流程：分镜完成之后先做资产提取，而不是直接进分镜工作室
+   * （直接进工作室会跳过资产提取 / 图片准备 / 整集提示词 / 关联绑定）。
+   */
+  const continueFlow = () => navigate(`/projects/${projectId}?step=extract_assets`)
+  const nextStepTitle = '下一步：资产提取'
   const nextStepDescription = statusReady
-    ? '当前镜头的信息提取确认已经完成，接下来更适合去分镜工作室继续关键帧、参考图、视频提示词和视频生成。'
+    ? '当前镜头的准备已确认。回到项目工作台按顺序继续：资产提取 → 图片准备 → 整集视频提示词 → 关联绑定 → 生成与交付。'
     : actionBeatsReady
-      ? '当前镜头仍有提取候选、对白或镜头基础信息待确认。先在这里完成准备，准备完成后再进入分镜工作室继续生成。'
-      : '当前镜头的动作拍点还没有确认。建议先补齐动作序列，再进入工作室继续关键帧和视频生成。'
+      ? '当前镜头仍有提取候选、对白或镜头基础信息待确认。确认后回到项目工作台，按六步流程继续后续步骤。'
+      : '当前镜头的动作拍点还没有确认。建议先补齐动作序列，再回到项目工作台继续后续步骤。'
 
   const checklistItems = [
     {
@@ -1773,7 +1775,7 @@ export function ChapterShotEditPage() {
                       checklistItems={checklistItems}
                       nextStepTitle={nextStepTitle}
                       nextStepDescription={nextStepDescription}
-                      onGoToStudio={goToStudio}
+                      onContinueFlow={continueFlow}
                     />
                   </div>
                 }

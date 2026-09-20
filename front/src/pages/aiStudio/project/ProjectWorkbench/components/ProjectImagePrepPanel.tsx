@@ -19,6 +19,7 @@ import type { TableColumnsType } from 'antd'
 import {
   ArrowRightOutlined,
   EditOutlined,
+  FileTextOutlined,
   PictureOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -40,6 +41,8 @@ import {
   type ProjectStepSignalDetail,
 } from '../hooks/useProjectStepSignals'
 import { AssetImagePromptLlmPanel } from './AssetImagePromptLlmPanel'
+import { GenerationGateBanner } from '../../../components/GenerationGateBanner'
+import { useGenerationGate } from '../../../components/generationGate'
 
 /** 待准备资产最多补抓多少个名称（场景/道具/服装的关联行只有 id，没有 name）。 */
 const NAME_LOOKUP_LIMIT = 20
@@ -97,11 +100,20 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
   const navigate = useNavigate()
   const { projectId } = useParams<{ projectId: string }>()
 
-  const openAssetEditor = (asset: ProjectSignalAsset) => {
+  /**
+   * 打开资产编辑页。
+   *
+   * `generate=true` 时带上 `?generate=1`：资产编辑页会自动打开该资产的出图确认弹窗，
+   * 这样「生成」入口就不是把用户扔到一个还要再点两下的页面。
+   * 两条路径都带项目作用域（character 走项目角色路由，其余带 returnTo），
+   * 避免出现「从资产库进入 → 缺项目作用域 → 出图静默失败」。
+   */
+  const openAssetEditor = (asset: ProjectSignalAsset, options?: { generate?: boolean }) => {
     if (!projectId) return
     const assetType = asset.type
+    const generateParam = options?.generate ? '?generate=1' : ''
     if (assetType === 'character') {
-      navigate(`/projects/${projectId}/roles/${asset.id}/edit`)
+      navigate(`/projects/${projectId}/roles/${asset.id}/edit${generateParam}`)
       return
     }
     const tabByType: Record<Exclude<ProjectSignalAssetType, 'character'>, 'scenes' | 'props' | 'costumes'> = {
@@ -112,7 +124,8 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
     const segment = assetType === 'scene' ? 'scenes' : assetType === 'prop' ? 'props' : 'costumes'
     // 回到第 3 步（图片准备），而不是退回旧的资产 Tab 链接。
     const returnTo = encodeURIComponent(`/projects/${projectId}?step=image_prep&tab=${tabByType[assetType]}`)
-    navigate(`/assets/${segment}/${asset.id}/edit?returnTo=${returnTo}`)
+    const separator = '?'
+    navigate(`/assets/${segment}/${asset.id}/edit${separator}returnTo=${returnTo}${options?.generate ? '&generate=1' : ''}`)
   }
 
   const pending = useMemo(
@@ -132,6 +145,10 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
   } | null>(null)
   const [planLoading, setPlanLoading] = useState(false)
   const [planError, setPlanError] = useState('')
+  /** 「查看定版图」预览的资产 */
+  const [previewAsset, setPreviewAsset] = useState<ProjectSignalAsset | null>(null)
+  /** 出图门禁/模型状态（点击前显示：被 DRY_RUN 拦住 ≠ 接口没接通） */
+  const gate = useGenerationGate()
 
   const loadPlan = useCallback(async () => {
     if (!projectId) return
@@ -386,16 +403,43 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
       },
     },
     {
+      title: '定版图',
+      key: 'primary',
+      width: 92,
+      render: (_, record) =>
+        record.hasImage ? (
+          <Button size="small" type="link" className="!px-0" onClick={() => setPreviewAsset(record)}>
+            查看
+          </Button>
+        ) : (
+          <Tooltip title="该资产还没有参考图/定版图">
+            <Tag bordered={false} className="text-gray-400">
+              未生成
+            </Tag>
+          </Tooltip>
+        ),
+    },
+    {
       title: '操作',
       key: 'action',
-      width: 210,
+      width: 250,
       render: (_, record) => (
-        <Space size={6}>
-          <Button size="small" type="primary" icon={<PictureOutlined />} onClick={() => openAssetEditor(record)}>
-            准备图片
+        <Space size={6} wrap>
+          <Tooltip title="进入资产编辑页并直接打开出图确认（复用既有 image-pipeline，不新建出图链路）">
+            <Button
+              size="small"
+              type="primary"
+              icon={<PictureOutlined />}
+              onClick={() => openAssetEditor(record, { generate: true })}
+            >
+              生成
+            </Button>
+          </Tooltip>
+          <Button size="small" icon={<EditOutlined />} onClick={() => openAssetEditor(record)}>
+            编辑
           </Button>
           <Tooltip title="手工填写/修改这个资产的图片提示词并保存到 image_prompts（不调用大模型、不花钱）">
-            <Button size="small" icon={<EditOutlined />} onClick={() => void openPromptEditor(record)}>
+            <Button size="small" type="text" icon={<FileTextOutlined />} onClick={() => void openPromptEditor(record)}>
               填提示词
             </Button>
           </Tooltip>
@@ -429,9 +473,12 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
       }
     >
       <div className="mb-3 text-xs text-gray-500">
-        为角色、场景、道具准备参考图片与图片提示词。图片提示词在资产编辑页生成并保存到资产上，
-        参考图直接决定后续镜头画面的统一性。
+        为角色、场景、道具准备参考图片与图片提示词。每行都可以直接「生成」（进入既有出图链路）、「编辑」
+        或「查看定版图」；参考图直接决定后续镜头画面的统一性。
       </div>
+
+      {/* 点击前先讲清楚：模型有没有配置、是否被 DRY_RUN 演练门禁挡住 */}
+      <GenerationGateBanner gate={gate} outlet="image" />
 
       <Spin spinning={loading}>
         {assets.length === 0 ? (
@@ -589,6 +636,25 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
             )}
           </Spin>
         </div>
+      </Modal>
+
+      {/* 「查看定版图」：直接看这张定版参考图，不用再进编辑页翻槽位 */}
+      <Modal
+        title={previewAsset ? `定版图 · ${previewAsset.name}` : '定版图'}
+        open={Boolean(previewAsset)}
+        onCancel={() => setPreviewAsset(null)}
+        footer={null}
+        width={560}
+      >
+        {previewAsset?.thumbnail ? (
+          <img
+            src={previewAsset.thumbnail}
+            alt={previewAsset.name}
+            style={{ width: '100%', borderRadius: 8 }}
+          />
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该资产还没有参考图" />
+        )}
       </Modal>
     </Card>
   )

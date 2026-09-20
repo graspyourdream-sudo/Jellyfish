@@ -56,7 +56,6 @@ export default function ProvidersTab() {
   const [treeCollapsed, setTreeCollapsed] = useState(false)
   const [providerModalOpen, setProviderModalOpen] = useState(false)
   const [providerEditing, setProviderEditing] = useState<ProviderRead | null>(null)
-  const [testConnecting, setTestConnecting] = useState(false)
   const [form] = Form.useForm()
   const { lg } = Grid.useBreakpoint()
   const isLargeScreen = lg ?? false
@@ -137,18 +136,31 @@ export default function ProvidersTab() {
     return list
   }, [providers, sortBy])
 
-  const handleTestConnection = async (provider?: ProviderRead) => {
+  /**
+   * 配置检查（**不是**假的「连接成功」）。
+   *
+   * 为什么不叫「测试连接」：本环境没有连通性探测端点，唯一的真实连通性验证
+   * 就是发一次真实请求——那会产生费用，且演练门禁（DRY_RUN）下会被守卫拦下。
+   * 以前这里用 `setTimeout(800)` 后恒报「连接成功」，属于纯粹的假反馈，
+   * 正是「按钮存在但不知道接口有没有接通」的来源之一，已删除。
+   * 现在只核对后端确实下发的字段，并把「真实连通性怎么验」讲清楚。
+   */
+  const handleCheckConfig = (provider?: ProviderRead) => {
     const p = provider ?? selectedProvider
     if (!p) return
-    setTestConnecting(true)
-    try {
-      await new Promise((r) => setTimeout(r, 800))
-      message.success('连接成功')
-    } catch {
-      message.error('连接失败，请检查 Base URL 与 AK/SK')
-    } finally {
-      setTestConnecting(false)
+    const issues: string[] = []
+    if (!p.base_url?.trim()) issues.push('缺少 Base URL')
+    if (p.status === 'disabled') issues.push('账号状态为「已停用」')
+    if (issues.length > 0) {
+      message.warning(`配置不完整：${issues.join('；')}`)
+      return
     }
+    message.info(
+      `${p.name}：配置完整（Base URL 已填，状态「${p.status === 'active' ? '活跃' : '测试中'}」）。` +
+        '本环境没有连通性探测端点，真实连通性需要发起一次真实请求（会计费，演练门禁下会被拦）；' +
+        '请在各个生成入口顶部的状态条确认当前是否允许真实调用。',
+      8,
+    )
   }
 
   const handleSaveProvider = async () => {
@@ -309,7 +321,7 @@ export default function ProvidersTab() {
               }}
             />
           </Tooltip>
-          <Tooltip title="测试连接">
+          <Tooltip title="检查配置（不做真实连通性探测：那会产生费用）">
             <Button
               type="text"
               size="small"
@@ -317,7 +329,7 @@ export default function ProvidersTab() {
               icon={<ThunderboltOutlined />}
               onClick={(e) => {
                 e.stopPropagation()
-                void handleTestConnection(record)
+                handleCheckConfig(record)
               }}
             />
           </Tooltip>
@@ -498,10 +510,10 @@ export default function ProvidersTab() {
                       icon={<ThunderboltOutlined />}
                       onClick={(e) => {
                         e.stopPropagation()
-                        handleTestConnection(p)
+                        handleCheckConfig(p)
                       }}
                     >
-                      测试
+                      检查配置
                     </Button>,
                     <Dropdown
                       key="more"
@@ -590,12 +602,8 @@ export default function ProvidersTab() {
                 >
                   编辑
                 </Button>
-                <Button
-                  icon={<ThunderboltOutlined />}
-                  loading={testConnecting}
-                  onClick={() => handleTestConnection()}
-                >
-                  测试连接
+                <Button icon={<ThunderboltOutlined />} onClick={() => handleCheckConfig()}>
+                  检查配置
                 </Button>
               </Space>
             </div>
@@ -635,11 +643,8 @@ export default function ProvidersTab() {
                 >
                   编辑
                 </Button>
-                <Button
-                  icon={<ThunderboltOutlined />}
-                  onClick={() => handleTestConnection()}
-                >
-                  测试连接
+                <Button icon={<ThunderboltOutlined />} onClick={() => handleCheckConfig()}>
+                  检查配置
                 </Button>
               </Space>
             </div>

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Button, Card, Space, Tag, Tooltip } from 'antd'
+import { Button, Card, Space, Spin, Tag, Tooltip } from 'antd'
 import { ArrowLeftOutlined, InfoCircleOutlined, RightOutlined } from '@ant-design/icons'
 import {
   getPrevProjectStepKey,
@@ -21,6 +21,21 @@ type ProjectStepSummaryStripProps = {
   onGoStep: (step: ProjectStepKey) => void
   /** 「继续」：进入判定出的下一步/当前未完成步骤 */
   onContinue: () => void
+  /**
+   * 进度判定是否仍在进行（信号未抓完）。
+   *
+   * 为什么必须有：判定入参的初值是「全 0 快照」，在信号回来之前它会得出
+   * 「项目还没有章节」这种确信但错误的结论，并把六步标签摆到一个错误的步骤上。
+   * 加载期间只允许说「正在判断项目进度」，不允许给出任何结论。
+   */
+  loading?: boolean
+  /**
+   * 「继续」不可用的原因（非空则禁用按钮并把原因显示在 tooltip 里）。
+   * 文案、目标步骤与点击动作必须同源，所以禁用理由与按钮文案都由调用方按同一份判定算出。
+   */
+  continueDisabledReason?: string
+  /** 「继续」按钮文案（与顶部主按钮同一份判定算出的同一句话）。 */
+  continueLabel?: string
   /** 折叠起来的「开发信息」节点 */
   devInfo?: ReactNode
 }
@@ -38,6 +53,9 @@ export function ProjectStepSummaryStrip({
   chapterLabel,
   onGoStep,
   onContinue,
+  loading = false,
+  continueDisabledReason = '',
+  continueLabel,
   devInfo,
 }: ProjectStepSummaryStripProps) {
   const meta = getProjectStepMeta(step)
@@ -45,6 +63,27 @@ export function ProjectStepSummaryStrip({
   const prevStep = getPrevProjectStepKey(step)
   const onResolvedStep = step === resolution.step
   const isLastStep = index === PROJECT_STEPS.length - 1
+
+  // 判定中：只说明正在判定，不摆任何结论（步骤标签、缺失项、继续按钮全部让位）。
+  if (loading) {
+    return (
+      <Card size="small" className="mb-3" styles={{ body: { padding: '8px 12px' } }}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
+            <Spin size="small" />
+            <span>正在判断项目进度…</span>
+            <span className="text-gray-400">（读取章节、分镜、资产与提示词状态后给出下一步）</span>
+          </div>
+          <Space size="small" className="shrink-0">
+            <Button size="small" type="primary" icon={<RightOutlined />} disabled loading>
+              正在判断项目进度
+            </Button>
+          </Space>
+        </div>
+        {devInfo ? <div className="mt-2">{devInfo}</div> : null}
+      </Card>
+    )
+  }
 
   return (
     <Card size="small" className="mb-3" styles={{ body: { padding: '8px 12px' } }}>
@@ -91,9 +130,17 @@ export function ProjectStepSummaryStrip({
               返回修改
             </Button>
           ) : null}
-          <Button size="small" type="primary" icon={<RightOutlined />} onClick={onContinue}>
-            {isLastStep && onResolvedStep ? '生成与交付' : `继续：${resolution.nextActionLabel}`}
-          </Button>
+          <Tooltip title={continueDisabledReason || resolution.reason}>
+            <Button
+              size="small"
+              type="primary"
+              icon={<RightOutlined />}
+              disabled={Boolean(continueDisabledReason)}
+              onClick={onContinue}
+            >
+              {continueLabel ?? (isLastStep && onResolvedStep ? '生成与交付' : `继续：${resolution.nextActionLabel}`)}
+            </Button>
+          </Tooltip>
         </Space>
       </div>
 

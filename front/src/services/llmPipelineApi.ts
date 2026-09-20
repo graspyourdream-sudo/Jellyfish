@@ -15,6 +15,23 @@ import { OpenAPI } from './generated'
 
 export type AnyRecord = Record<string, any>
 
+/**
+ * 带 HTTP 状态码的请求异常。
+ *
+ * 为什么需要：五类生成状态（DRY_RUN 门禁 / 模型未配置 / 参数缺失 / 服务错误 / 正在处理）
+ * 要靠状态码区分，而普通 Error 只剩一句 message，前端只能猜。
+ * 它继承 Error，所以既有 `catch (e) { e.message }` 的调用方行为不变。
+ */
+export class GenerationRequestError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'GenerationRequestError'
+    this.status = status
+  }
+}
+
 async function callApi<T = AnyRecord>(path: string, body?: AnyRecord): Promise<T> {
   const response = await fetch(`${OpenAPI.BASE}${path}`, {
     method: body === undefined ? 'GET' : 'POST',
@@ -33,7 +50,10 @@ async function callApi<T = AnyRecord>(path: string, body?: AnyRecord): Promise<T
     const error = (meta.error ?? {}) as AnyRecord
     const detail = payload?.detail
     const suffix = detail ? `（${typeof detail === 'string' ? detail : JSON.stringify(detail)}）` : ''
-    throw new Error(String(error.message ?? payload?.message ?? text ?? `HTTP ${response.status}`) + suffix)
+    throw new GenerationRequestError(
+      String(error.message ?? payload?.message ?? text ?? `HTTP ${response.status}`) + suffix,
+      response.status,
+    )
   }
   return (payload?.data ?? null) as T
 }
@@ -57,7 +77,10 @@ async function callApiPatch<T = AnyRecord>(path: string, body: AnyRecord): Promi
     const error = (meta.error ?? {}) as AnyRecord
     const detail = payload?.detail
     const suffix = detail ? `（${typeof detail === 'string' ? detail : JSON.stringify(detail)}）` : ''
-    throw new Error(String(error.message ?? payload?.message ?? text ?? `HTTP ${response.status}`) + suffix)
+    throw new GenerationRequestError(
+      String(error.message ?? payload?.message ?? text ?? `HTTP ${response.status}`) + suffix,
+      response.status,
+    )
   }
   return (payload?.data ?? null) as T
 }

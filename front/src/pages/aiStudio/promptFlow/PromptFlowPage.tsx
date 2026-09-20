@@ -11,6 +11,7 @@ import {
   Divider,
   Empty,
   Input,
+  Modal,
   Row,
   Segmented,
   Select,
@@ -25,6 +26,7 @@ import type { ColumnsType } from 'antd/es/table'
 import {
   CloudDownloadOutlined,
   CloudUploadOutlined,
+  PlusOutlined,
   ReloadOutlined,
   EyeOutlined,
   ThunderboltOutlined,
@@ -273,6 +275,77 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
   const [loadingPreview, setLoadingPreview] = useState(false)
   const [loadingApply, setLoadingApply] = useState(false)
 
+  /** 内联新建章节：本页要求在既有章节上写提示词，缺章节时必须能就地补出来，不能只给一句灰按钮。 */
+  const [createChapterOpen, setCreateChapterOpen] = useState(false)
+  const [createChapterTitle, setCreateChapterTitle] = useState('')
+  const [createChapterText, setCreateChapterText] = useState('')
+  const [creatingChapter, setCreatingChapter] = useState(false)
+
+  const reloadChapters = useCallback(
+    async (autoSelectId?: string) => {
+      if (!projectId) {
+        setChapters([])
+        return
+      }
+      const items = await loadAll(async (page, pageSize) => {
+        const res = await StudioChaptersService.listChaptersApiV1StudioChaptersGet({
+          projectId,
+          page,
+          pageSize,
+        })
+        return {
+          items: res.data?.items ?? [],
+          maxPage: res.data?.pagination?.max_page ?? 1,
+        }
+      })
+      const options = items.map((c) => ({ label: c.title || c.id, value: c.id }))
+      setChapters(options)
+      if (autoSelectId && options.some((option) => option.value === autoSelectId)) {
+        setChapterId(autoSelectId)
+        setPreview(undefined)
+      }
+      return options
+    },
+    [projectId],
+  )
+
+  const handleCreateChapter = useCallback(async () => {
+    if (!projectId) return
+    const title = createChapterTitle.trim()
+    if (!title) {
+      message.warning('请填写章节标题')
+      return
+    }
+    setCreatingChapter(true)
+    try {
+      // id 是 ChapterCreate 的必填字段（与工作台建章节用的是同一套字段）
+      const createdId = `c_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`
+      const nextIndex = chapters.length + 1
+      const created = await StudioChaptersService.createChapterApiV1StudioChaptersPost({
+        requestBody: {
+          id: createdId,
+          project_id: projectId,
+          index: nextIndex,
+          title,
+          summary: '',
+          raw_text: createChapterText || undefined,
+          storyboard_count: 0,
+          status: 'draft',
+        } as never,
+      })
+      const newId = String((created.data as { id?: string } | undefined)?.id ?? '')
+      message.success('章节已创建，并已自动选中；现在可以预览与确认写入')
+      setCreateChapterOpen(false)
+      setCreateChapterTitle('')
+      setCreateChapterText('')
+      await reloadChapters(newId || undefined)
+    } catch (error) {
+      message.error(`新建章节失败：${describeError(error)}`)
+    } finally {
+      setCreatingChapter(false)
+    }
+  }, [chapters.length, createChapterText, createChapterTitle, projectId, reloadChapters])
+
   useEffect(() => {
     setChapterId(undefined)
     setPreview(undefined)
@@ -414,7 +487,8 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
     (counts.update ?? 0) + (counts.overwrite ?? 0) + (counts.create ?? 0)
 
   return (
-    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+    <>
+      <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <Row gutter={16}>
         <Col span={12}>
           <Text strong>目标章节</Text>
@@ -430,7 +504,35 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
             disabled={!projectId}
             showSearch
             optionFilterProp="label"
+            notFoundContent={
+              projectId ? (
+                <div className="p-2 text-xs text-gray-500">
+                  该项目还没有章节
+                  <div className="mt-1 text-[11px] text-gray-400">
+                    提示词要写到章节的镜头上，所以必须先有章节。
+                  </div>
+                </div>
+              ) : null
+            }
           />
+          {projectId && chapters.length === 0 ? (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginTop: 8 }}
+              message="该项目还没有章节"
+              description={
+                <span className="text-xs">
+                  提示词要写到章节的镜头上，没有章节就无法继续。请先创建章节（也可以回到项目工作台第 1 步创建）。
+                </span>
+              }
+              action={
+                <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => setCreateChapterOpen(true)}>
+                  新建章节
+                </Button>
+              }
+            />
+          ) : null}
         </Col>
         <Col span={12}>
           <Text strong>巨日禄页面 URL</Text>
@@ -625,6 +727,38 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         <Empty description="还没有预览结果" />
       )}
     </Space>
+
+    {/* 内联新建章节：本页需要在既有章节上写提示词，缺章节时不能只留一条死路 */}
+    <Modal
+      title="新建章节"
+      open={createChapterOpen}
+      onCancel={() => setCreateChapterOpen(false)}
+      onOk={() => void handleCreateChapter()}
+      okText="创建并选中"
+      cancelText="取消"
+      confirmLoading={creatingChapter}
+      destroyOnClose
+    >
+      <Space direction="vertical" size="small" style={{ width: '100%' }}>
+        <Text strong>章节标题</Text>
+        <Input
+          placeholder="例如：第 1 集"
+          value={createChapterTitle}
+          onChange={(e) => setCreateChapterTitle(e.target.value)}
+        />
+        <Text strong>章节内容（可粘贴剧本，选填）</Text>
+        <Input.TextArea
+          rows={6}
+          placeholder="可留空：提示词导入只需要章节作为镜头的载体"
+          value={createChapterText}
+          onChange={(e) => setCreateChapterText(e.target.value)}
+        />
+        <Text type="secondary" className="text-xs">
+          创建后会自动选中该章节并恢复「预览 / 确认写入」按钮；镜头不足时导入会按既有规则补建。
+        </Text>
+      </Space>
+    </Modal>
+    </>
   )
 }
 

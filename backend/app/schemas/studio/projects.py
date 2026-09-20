@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -51,6 +52,10 @@ class ProjectRead(ProjectBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
+    # 时间戳下发给前端：项目列表按真实创建时间排序并在卡片上显示，
+    # 而不是像以前那样用前端 `stats.updated_at`（后端从不写入）回退成「当前时间」。
+    created_at: datetime | None = Field(None, description="创建时间")
+    updated_at: datetime | None = Field(None, description="最后更新时间")
 
 
 class ChapterBase(BaseModel):

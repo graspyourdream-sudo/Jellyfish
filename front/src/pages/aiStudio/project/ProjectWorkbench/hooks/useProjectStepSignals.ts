@@ -30,6 +30,8 @@ export type ProjectSignalAsset = {
   type: ProjectSignalAssetType
   /** 已有参考图片（后端 thumbnail 非空即视为已有图） */
   hasImage: boolean
+  /** 定版/缩略图地址（空串 = 还没有图）；第 3 步「查看定版图」用它，不额外发请求。 */
+  thumbnail: string
   /** 已保存图片提示词；null = 本接口载荷没有暴露 `image_prompts`，无法判定 */
   hasImagePrompt: boolean | null
 }
@@ -261,6 +263,7 @@ export function useProjectStepSignals(args: {
           name: toText(item.name) || id,
           type: 'character',
           hasImage: toText(item.thumbnail) !== '',
+          thumbnail: toText(item.thumbnail),
           hasImagePrompt: exposed ? imagePromptCount(item) > 0 : null,
         })
       })
@@ -285,6 +288,7 @@ export function useProjectStepSignals(args: {
             name: toText(row.name) || assetId,
             type: entityType,
             hasImage: toText(row.thumbnail) !== '',
+            thumbnail: toText(row.thumbnail),
             hasImagePrompt: exposed ? imagePromptCount(row) > 0 : null,
           })
         })

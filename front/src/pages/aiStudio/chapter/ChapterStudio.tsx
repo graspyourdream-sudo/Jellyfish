@@ -132,6 +132,7 @@ import {
   type ShotReadiness,
 } from './components/shotReadiness'
 import { TASK_COPY } from '../components/taskCopy'
+import { classifyGenerationFailure, failureText } from '../components/generationGate'
 import { ChapterStudioBatchToolbar } from './components/ChapterStudioBatchToolbar'
 import { ChapterStudioMaintenancePanel } from './components/ChapterStudioMaintenancePanel'
 import { ChapterStudioReadinessDiagnosisPanel } from './components/ChapterStudioReadinessDiagnosisPanel'
@@ -3450,7 +3451,8 @@ function Inspector(props: {
           '演练模式（DRY_RUN）：未真实生成、未产生费用。要真实生成请在后端显式关闭守卫（JELLYFISH_DRY_RUN=0 且 JELLYFISH_REAL_LLM_CONFIRMED=1）后重试。',
           8,
         )
-        return { taskId: null }
+        // 关键：把「被门禁阻止」和「没有任务 ID」区分开，否则调用方会再报一次红字。
+        return { taskId: null, gated: true }
       }
       if (result.status !== 'completed' || !result.url) {
         throw new Error(result.error || `视频生成未完成（status=${result.status}）`)
@@ -3460,8 +3462,13 @@ function Inspector(props: {
         shotId: selectedShot.id,
       })
       if (refreshed.data) onPatchShotDetail(refreshed.data)
+      // 这条链路是**同进程内联执行**：走到这里视频已经生成并落库，
+      // 返回的是产物 file_id，不是可轮询的任务 ID。
+      // 以前调用方拿它去轮询 `/film/tasks/{id}/status` → 必然 404 → 页面永久显示 pending。
       return {
         taskId: fileId,
+        completed: true as const,
+        videoUrl: result.url,
       }
     },
   })
@@ -4794,13 +4801,31 @@ function Inspector(props: {
     setVideoPromptPreviewSubmitting(true)
     try {
       const submitted = await videoPromptDraft.submitNow()
-      const taskId = submitted?.taskId
+      const result = submitted as
+        | { taskId: string | null; gated?: boolean; completed?: boolean; videoUrl?: string }
+        | null
+      if (result?.gated) {
+        // DRY_RUN 提示已经在提交实现里说清楚了，这里不再叠加误导性的红字。
+        return
+      }
+      if (result?.completed && result.videoUrl) {
+        // 内联执行已完成的成功路径：本轮就结束，不启动任何轮询。
+        setVideoTaskId(result.taskId ?? null)
+        setVideoTaskStatus('已生成')
+        setVideoTaskPolling(false)
+        setVideoSettledTask(null)
+        setVideoTask(null)
+        setVideoPromptPreviewOpen(false)
+        message.success('视频已生成并写入本镜')
+        return
+      }
+      const taskId = result?.taskId
       if (!taskId) {
-        message.error('视频生成任务创建失败：缺少任务 ID')
+        message.error('视频生成未返回产物：接口没有返回任务 ID，也没有返回视频地址')
         return
       }
       setVideoTaskId(taskId)
-      setVideoTaskStatus('pending')
+      setVideoTaskStatus('排队中')
       setVideoTaskPolling(true)
       setVideoTask({
         taskId,
@@ -4810,8 +4835,12 @@ function Inspector(props: {
       })
       setVideoSettledTask(null)
       setVideoPromptPreviewOpen(false)
-    } catch {
-      message.error('发起视频生成失败')
+    } catch (error) {
+      // 真实原因照原样显示（DRY_RUN / 模型未配置 / 参数缺失 / 服务错误都能看出来）
+      const failure = classifyGenerationFailure(error, 'video')
+      setVideoTaskStatus(null)
+      setVideoTaskPolling(false)
+      message.error(failureText(failure))
     } finally {
       setVideoPromptPreviewSubmitting(false)
     }

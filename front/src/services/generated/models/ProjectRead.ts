@@ -41,5 +41,13 @@ export type ProjectRead = {
      */
     stats?: Record<string, any>;
     id: string;
+    /**
+     * 创建时间
+     */
+    created_at?: (string | null);
+    /**
+     * 最后更新时间
+     */
+    updated_at?: (string | null);
 };
 

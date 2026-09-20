@@ -30,7 +30,7 @@ import {
   UnorderedListOutlined,
   DownOutlined,
   RightOutlined,
-  ThunderboltOutlined,
+  QuestionCircleOutlined,
 } from '@ant-design/icons'
 import { LlmService } from '../../../services/generated/services/LlmService'
 import type {
@@ -43,7 +43,6 @@ import {
   MODEL_CATEGORIES,
   TABLE_ACTION_BTN_EDIT_CLASS,
   TABLE_ACTION_BTN_MORE_CLASS,
-  TABLE_ACTION_BTN_TEST_CLASS,
   categoryLabelMap,
   categoryColorMap,
   SORT_OPTIONS,
@@ -349,17 +348,6 @@ export default function ModelsTab() {
               }}
             />
           </Tooltip>
-          <Tooltip title="测试生成">
-            <Button
-              type="text"
-              size="small"
-              className={TABLE_ACTION_BTN_TEST_CLASS}
-              icon={<ThunderboltOutlined />}
-              onClick={(e) => {
-                e.stopPropagation()
-              }}
-            />
-          </Tooltip>
           <Dropdown
             menu={{
               items: [
@@ -543,9 +531,6 @@ export default function ModelsTab() {
                     >
                       编辑
                     </Button>,
-                    <Button key="test" type="text" size="small" icon={<ThunderboltOutlined />}>
-                      测试生成
-                    </Button>,
                     <Dropdown
                       key="more"
                       menu={{
@@ -641,7 +626,11 @@ export default function ModelsTab() {
                 >
                   编辑
                 </Button>
-                <Button icon={<ThunderboltOutlined />}>快速测试</Button>
+                <Tooltip title="没有「快速测试」：唯一真实的验证方式是一次真实调用，会计费且在演练门禁下会被拦。请到生成入口顶部的状态条查看模型与门禁状态。">
+                  <Button icon={<QuestionCircleOutlined />} disabled>
+                    快速测试（已移除）
+                  </Button>
+                </Tooltip>
               </Space>
             </div>
           </div>
@@ -674,7 +663,11 @@ export default function ModelsTab() {
                 >
                   编辑
                 </Button>
-                <Button icon={<ThunderboltOutlined />}>快速测试</Button>
+                <Tooltip title="没有「快速测试」：唯一真实的验证方式是一次真实调用，会计费且在演练门禁下会被拦。请到生成入口顶部的状态条查看模型与门禁状态。">
+                  <Button icon={<QuestionCircleOutlined />} disabled>
+                    快速测试（已移除）
+                  </Button>
+                </Tooltip>
               </Space>
             </div>
           </Drawer>

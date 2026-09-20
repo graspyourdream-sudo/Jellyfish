@@ -18,6 +18,8 @@ export interface Project {
   unifyStyle: boolean
   progress: number
   stats: ProjectStats
+  /** 真实创建时间（后端 created_at）。项目列表按它倒序排列，缺失时界面显示「—」。 */
+  createdAt?: string
   updatedAt: string
 }
 

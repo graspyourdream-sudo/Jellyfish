@@ -2,7 +2,6 @@ import React, { useEffect, useMemo } from 'react'
 import { Button, Card, Dropdown, Empty, Segmented, Select, Space, Tag, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
 import {
-  PlusOutlined,
   EllipsisOutlined,
   ArrowLeftOutlined,
   VideoCameraFilled,
@@ -21,9 +20,8 @@ import { CostumesTab, PropsTab } from './tabs/PropsTab'
 import { FilesTab } from './tabs/FilesTab'
 import { EditTab } from './tabs/EditTab'
 import { SettingsTab } from './tabs/SettingsTab'
-import { getChapterShotsPath, getChapterStudioPath, getProjectEditorPath } from './routes'
+import { getChapterStudioPath, getProjectEditorPath } from './routes'
 import { useProject, useChapters } from './hooks/useProjectData'
-import { ensureHasShotsBeforeShooting } from './ensureHasShotsBeforeShooting'
 import { getChapterPreparationState } from './chapterPreparation'
 import {
   DEFAULT_PROJECT_STEP,
@@ -253,88 +251,54 @@ const ProjectWorkbench: React.FC = () => {
     )
   }, [projectId, explicitStep, mappedStepFromLegacyTab, legacyPanelTab, signalsLoading, resolution.step, setSearchParams])
 
-  const primaryCta = (() => {
-    if (!projectId) {
-      return {
-        label: '创建第一章',
-        hint: '先创建章节，再进入分镜准备流程',
-        icon: <PlusOutlined />,
-        onClick: () => {},
-      }
-    }
-    if (!recommendedChapter) {
-      return {
-        label: '创建第一章',
-        hint: '先创建章节，再进入分镜准备流程',
-        icon: <PlusOutlined />,
-        onClick: () => {
-          setTabInUrl('chapters')
-          updateSearchParams((next) => {
-            next.set(CREATE_PARAM, '1')
-          })
-        },
-      }
-    }
-    const state = getChapterPreparationState(recommendedChapter)
-    const chapterLabel = `第${recommendedChapter.index}章`
-    if (state.key === 'edit_raw') {
-      return {
-        label: `编辑${chapterLabel}原文`,
-        hint: `${chapterLabel}还没有原文内容，建议先补章节原文`,
-        icon: state.primaryIcon,
-        onClick: () => {
-          setTabInUrl('chapters')
-          updateSearchParams((next) => {
-            next.set(TAB_PARAM, 'chapters')
-            next.set(EDIT_PARAM, recommendedChapter.id)
-          })
-        },
-      }
-    }
-    if (state.key === 'extract_shots') {
-      return {
-        label: `提取${chapterLabel}分镜`,
-        hint: `${chapterLabel}已有原文，下一步更适合先提取分镜`,
-        icon: state.primaryIcon,
-        onClick: () => navigate(getChapterShotsPath(projectId, recommendedChapter.id)),
-      }
-    }
-    if (state.key === 'prepare_shots') {
-      return {
-        label: `进入${chapterLabel}分镜工作室`,
-        hint: `${chapterLabel}已有分镜，建议继续补齐镜头准备`,
-        icon: state.primaryIcon,
-        onClick: () => navigate(getChapterStudioPath(projectId, recommendedChapter.id)),
-      }
-    }
-    return {
-      label: `进入${chapterLabel}拍摄`,
-      hint: `${chapterLabel}已具备分镜，可继续进入拍摄流程`,
-      icon: state.primaryIcon,
-      onClick: () =>
-        ensureHasShotsBeforeShooting({
-          projectId,
-          chapterId: recommendedChapter.id,
-          storyboardCount: recommendedChapter.storyboardCount,
-          navigate,
-        }),
-    }
-  })()
+  /**
+   * 「继续」的目标步骤、禁用理由与点击动作——三者全部来自同一份 `resolveProjectStep` 结果。
+   *
+   * 历史问题（本次修复）：旧实现里按钮文案来自项目级六步判定，而点击动作在
+   * 「已处于目标步骤」时回退执行章节级 `getChapterPreparationState()` 得出的 primaryCta，
+   * 于是按钮写着「继续：准备资产图片」却跳进了分镜工作室，直接跳过
+   * 图片准备 → 整集视频提示词 → 关联绑定。现在只认 resolution.step。
+   */
+  const continueTarget = resolution.step
+  /** 第 4 步的主入口在工作台内（集级提示词页面），不进工作室。 */
+  const continueEntersStudio =
+    isStudioProjectStep(continueTarget) && continueTarget !== 'video_prompt' && Boolean(focusChapter)
+  /** 第 1 步且还没有章节：动作就是打开「新建章节」，这仍是第 1 步自己的动作。 */
+  const continueOpensChapterCreate = continueTarget === 'script' && !recommendedChapter
+  const continueChangesView =
+    continueEntersStudio || continueOpensChapterCreate || continueTarget !== activeStep
 
-  /** T3「继续」：去判定出的当前未完成步骤；若已经在该步骤，则执行该步骤的具体下一步动作。 */
+  const continueDisabledReason = signalsLoading
+    ? '正在判断项目进度，稍候…'
+    : continueChangesView
+      ? ''
+      : `当前就在第 ${getProjectStepIndex(continueTarget) + 1} 步：请在本页完成本步操作`
+  /** 已经站在判定出的这一步上：按钮不给假动作，也不假装还能「继续」。 */
+  const continueAtCurrentStep = !signalsLoading && !continueChangesView
+
+  /** 两个「继续」按钮共用同一句话——文案、目标与动作同源。 */
+  const continueLabel = signalsLoading
+    ? '正在判断项目进度'
+    : continueAtCurrentStep
+      ? `已在本步：${resolvedStepMeta.label}`
+      : `继续：${resolution.nextActionLabel}`
+
+  /** T3「继续」：唯一入口，只按判定结果导航（不再有任何「跳到工作室」的隐式回退）。 */
   const handleContinue = () => {
-    const target = resolution.step
-    // 第 4 步的集级入口留在工作台内（与顶部步骤条一致），不直接跳工作室。
-    if (isStudioProjectStep(target) && focusChapter && target !== 'video_prompt') {
-      openChapterStudio(target)
+    if (!projectId || signalsLoading) return
+    if (continueOpensChapterCreate) {
+      setTabInUrl('chapters')
+      updateSearchParams((next) => {
+        next.set(STEP_PARAM, 'script')
+        next.set(CREATE_PARAM, '1')
+      })
       return
     }
-    if (activeStep !== target) {
-      openStep(target)
+    if (continueEntersStudio) {
+      openChapterStudio(continueTarget)
       return
     }
-    // 已在目标步骤（落地步）：沿用原有的「推荐动作」，避免出现点了没反应的按钮。
-    primaryCta.onClick()
+    openStep(continueTarget)
   }
 
   const moreMenuItems: MenuProps['items'] = [
@@ -395,8 +359,13 @@ const ProjectWorkbench: React.FC = () => {
               }))}
             />
           </div>
-          {/* 第 2 步的产物概览（只读）：真实提取后的候选有多少、哪些能挂已有资产 */}
-          <ProjectExtractCandidatesPanel chapterId={focusChapter?.id ?? null} chapterLabel={chapterLabel} />
+          {/* 第 2 步的工作面板：点前门禁状态 → 开始/重新提取 → 候选预览 → 确认写入 */}
+          <ProjectExtractCandidatesPanel
+            projectId={projectId ?? null}
+            chapterId={focusChapter?.id ?? null}
+            chapterLabel={chapterLabel}
+            onReload={reloadSignals}
+          />
           {/* 只挂载当前子页签，保持与原来 Tab 切换一致的加载行为 */}
           <div className="flex-1 min-h-0 overflow-hidden">
             {assetSubTab === 'roles' && <RolesTab />}
@@ -474,14 +443,17 @@ const ProjectWorkbench: React.FC = () => {
           </div>
 
           <Space size="small" wrap className="shrink-0">
-            <Tooltip title={resolution.reason}>
-              <Button icon={<RightOutlined />} onClick={handleContinue}>
-                继续：{resolution.nextActionLabel}
+            <Tooltip title={continueDisabledReason || resolution.reason}>
+              <Button
+                type="primary"
+                icon={<RightOutlined />}
+                loading={signalsLoading}
+                disabled={Boolean(continueDisabledReason)}
+                onClick={handleContinue}
+              >
+                {continueLabel}
               </Button>
             </Tooltip>
-            <Button type="primary" icon={primaryCta.icon} onClick={primaryCta.onClick}>
-              {primaryCta.label}
-            </Button>
             <Button
               icon={<VideoCameraFilled />}
               onClick={() => projectId && navigate(getProjectEditorPath(projectId))}
@@ -500,14 +472,18 @@ const ProjectWorkbench: React.FC = () => {
         <ProjectStepNav
           activeStep={activeStep}
           resolvedStep={resolution.step}
+          loading={signalsLoading}
           onSelectStep={handleSelectStep}
         />
 
         <div className="mt-0 mb-2 flex flex-wrap items-center gap-2 text-xs text-gray-500">
-          <span>{primaryCta.hint}</span>
+          {/* 同一份判定的理由：不再展示章节级状态机给出的「建议」，避免两套口径同屏打架。 */}
+          <span>{signalsLoading ? '正在读取章节、分镜、资产与提示词状态…' : resolution.reason}</span>
           <span className="flex items-center gap-1">
             <InfoCircleOutlined />
-            当前流程位置：第 {getProjectStepIndex(resolution.step) + 1} 步 · {resolvedStepMeta.label}
+            {signalsLoading
+              ? '正在判断项目进度…'
+              : `当前流程位置：第 ${getProjectStepIndex(resolution.step) + 1} 步 · ${resolvedStepMeta.label}`}
           </span>
         </div>
       </div>
@@ -545,6 +521,9 @@ const ProjectWorkbench: React.FC = () => {
                 step={activeStep}
                 resolution={resolution}
                 chapterLabel={chapterLabel}
+                loading={signalsLoading}
+                continueDisabledReason={continueDisabledReason}
+                continueLabel={continueLabel}
                 onGoStep={openStep}
                 onContinue={handleContinue}
                 devInfo={

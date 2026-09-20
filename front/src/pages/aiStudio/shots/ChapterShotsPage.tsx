@@ -27,7 +27,6 @@ import {
   PlusOutlined,
   ReloadOutlined,
   ScissorOutlined,
-  VideoCameraOutlined,
 } from '@ant-design/icons'
 import type { ShotRead, ShotRuntimeSummaryRead, ShotStatus } from '../../../services/generated'
 import { ScriptProcessingService, StudioChaptersService, StudioShotsService } from '../../../services/generated'
@@ -588,18 +587,23 @@ export function ChapterShotsPage() {
 
         {shots.length > 0 ? (
           <Space>
+            {/*
+              分镜做完之后的「下一步」是资产提取，不再直接进分镜工作室：
+              直接进工作室会跳过 资产提取 → 图片准备 → 整集提示词 → 关联绑定。
+              工作室入口保留为次按钮（单镜查看与补漏）。
+            */}
             <Button
               type="primary"
+              icon={<ScissorOutlined />}
+              onClick={() => navigate(`/projects/${projectId}?step=extract_assets`)}
+            >
+              下一步：提取资产
+            </Button>
+            <Button
               icon={<FileSearchOutlined />}
               onClick={() => navigate(getChapterStudioPath(projectId, chapterId))}
             >
-              进入分镜工作室
-            </Button>
-            <Button
-              icon={<VideoCameraOutlined />}
-              onClick={() => navigate(getChapterStudioPath(projectId, chapterId))}
-            >
-              继续当前镜头
+              进入分镜工作室（单镜查看）
             </Button>
           </Space>
         ) : null}

@@ -31,7 +31,7 @@ export class StudioProjectsService {
     public static listProjectsApiV1StudioProjectsGet({
         q,
         order,
-        isDesc = false,
+        isDesc = true,
         page = 1,
         pageSize = 10,
     }: {
@@ -44,7 +44,7 @@ export class StudioProjectsService {
          */
         order?: (string | null),
         /**
-         * 是否倒序
+         * 是否倒序（默认按创建时间倒序：最新项目在最上面）
          */
         isDesc?: boolean,
         page?: number,

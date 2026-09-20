@@ -31,6 +31,8 @@ type ProjectStepNavProps = {
   activeStep: ProjectStepKey | null
   /** 判定出的当前未完成步骤，用于把前面的步骤标记为已完成 */
   resolvedStep: ProjectStepKey
+  /** 进度判定中：不标「当前」也不标「已完成」，避免用空快照给出错误结论 */
+  loading?: boolean
   onSelectStep: (step: ProjectStepKey) => void
 }
 
@@ -41,7 +43,7 @@ const NO_ACTIVE_STEP = '__workspace_other__'
  * 项目级六步导航：外观沿用原来的 antd `Tabs`，只把 10 个平级 Tab 换成 6 步流程。
  * 第 4-6 步属于「章节工作室」内的步骤，点进去会跳到工作室路由（本轮不重建）。
  */
-export function ProjectStepNav({ activeStep, resolvedStep, onSelectStep }: ProjectStepNavProps) {
+export function ProjectStepNav({ activeStep, resolvedStep, loading = false, onSelectStep }: ProjectStepNavProps) {
   const resolvedIndex = getProjectStepIndex(resolvedStep)
 
   return (
@@ -54,7 +56,7 @@ export function ProjectStepNav({ activeStep, resolvedStep, onSelectStep }: Proje
       size="middle"
       className="project-workbench-tabs flex-1 min-w-0"
       items={PROJECT_STEPS.map((step, index) => {
-        const done = index < resolvedIndex
+        const done = !loading && index < resolvedIndex
         const inStudio = isStudioProjectStep(step.key)
         return {
           key: step.key,
@@ -66,7 +68,7 @@ export function ProjectStepNav({ activeStep, resolvedStep, onSelectStep }: Proje
                   {index + 1}. {step.label}
                 </span>
                 {inStudio ? <ExportOutlined className="text-[10px] text-gray-400" /> : null}
-                {step.key === resolvedStep ? (
+                {!loading && step.key === resolvedStep ? (
                   <Tag bordered={false} color="blue" className="mr-0 ml-0.5 text-[10px] leading-4">
                     当前
                   </Tag>

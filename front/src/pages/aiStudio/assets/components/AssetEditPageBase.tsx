@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Button,
@@ -11,6 +11,7 @@ import {
   InputNumber,
   Modal,
   Row,
+  Select,
   Space,
   Spin,
   Tag,
@@ -28,7 +29,7 @@ import {
   SafetyCertificateOutlined,
   UploadOutlined,
 } from '@ant-design/icons'
-import { ScriptProcessingService, StudioFilesService } from '../../../../services/generated'
+import { ScriptProcessingService, StudioFilesService, StudioProjectsService } from '../../../../services/generated'
 import {
   adoptGeneratedImage,
   getAssetImagePrompts,
@@ -49,6 +50,7 @@ import { useRelationTaskNotification } from '../../components/taskNotificationHe
 import { useTaskPageContext } from '../../components/taskPageContext'
 import { TASK_COPY } from '../../components/taskCopy'
 import { useLocation } from 'react-router-dom'
+import { classifyGenerationFailure, failureText } from '../../components/generationGate'
 import { useGenerationDraft } from '../../hooks/useGenerationDraft'
 import {
   CHARACTER_PORTRAIT_ANALYSIS_RELATION_TYPE,
@@ -296,6 +298,23 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   })
   const promptPreviewDraft = promptDraft.base.prompt
   const promptPreviewRefFileIds = promptDraft.context.images
+
+  /**
+   * 从第 3 步「生成」入口进来时（`?generate=1`）自动打开该资产的出图确认弹窗。
+   * 只在图片加载完成后触发一次，避免与用户手动操作打架。
+   */
+  const autoGenerateHandledRef = useRef(false)
+  useEffect(() => {
+    if (autoGenerateHandledRef.current) return
+    const params = new URLSearchParams(location.search)
+    if (params.get('generate') !== '1') return
+    if (loading || images.length === 0) return
+    autoGenerateHandledRef.current = true
+    const preferred = images.find((item) => item.is_primary) ?? images[0]
+    if (preferred) void openPromptPreview(preferred)
+    // openPromptPreview / images 每次渲染都是新引用，这里只用「是否已处理」把关
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [images, loading, location.search])
 
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historyLoading, setHistoryLoading] = useState(false)
@@ -628,6 +647,15 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     onNavigate: () => onNavigate(location.pathname),
   })
   const openPromptPreview = async (image: TImage) => {
+    // 缺项目作用域时，先让用户选项目；不要等提交后才抛「缺少项目 ID」。
+    if (
+      !requireProjectScope(
+        () => openPromptPreview(image),
+        '出图需要项目作用域：请先在弹窗里选择项目',
+      )
+    ) {
+      return
+    }
     if (!assetId) return
 
     try {
@@ -675,14 +703,20 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       }
       const url = String(submitted?.url ?? '').trim()
       if (!url) {
-        message.error(submitted?.message || `出图未返回可用图片地址（status=${submitted?.status || 'unknown'}）`)
+        // 不再输出 status=unknown 这种空话：有后端 message 就用它，没有就把后端状态原样带上。
+        message.error(
+          submitted?.message ||
+            `出图没有返回可用图片地址（后端返回状态：${submitted?.status || '未提供'}）`,
+        )
         return
       }
       setSingleGenResult({ url, prompt, status: String(submitted?.status ?? '') })
       setPromptPreviewOpen(false)
       setPromptPreviewImage(null)
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '发起生成失败')
+      // 真实原因照原样显示：缺项目作用域 / 被 DRY_RUN 拦住 / 参数缺失 / 服务错误都能一眼看出。
+      const failure = classifyGenerationFailure(error, 'image')
+      message.error(failureText(failure))
     } finally {
       setGeneratingByImageId((prev) => ({ ...prev, [promptPreviewImage.id]: false }))
     }
@@ -955,22 +989,74 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     const projectId = resolvedProjectId.trim()
     if (!projectId) {
       // 场景/道具/服装的读模型没有 project_id，从资产库直接打开时也拿不到 URL 线索
-      setProjectIdDraft('')
-      setProjectIdModalOpen(true)
+      requireProjectScope(
+        (picked) => runReferenceBatch(picked),
+        '批量出图需要项目作用域：请先选择项目',
+      )
       return
     }
     await runReferenceBatch(projectId)
   }
 
+  /**
+   * 可选项目列表：给「缺少项目作用域」时用**选择**代替手填项目 ID。
+   *
+   * 为什么要改：原来这里是一个纯文本输入框，要求用户自己去地址栏抄 `<项目 ID>`，
+   * 填错或留空就变成一个没有信息量的失败（曾经显示成 status=unknown）。
+   * 现在直接列项目让用户选。
+   */
+  const [projectOptions, setProjectOptions] = useState<{ label: string; value: string }[]>([])
+  const [projectOptionsLoading, setProjectOptionsLoading] = useState(false)
+
+  const loadProjectOptions = useCallback(async () => {
+    setProjectOptionsLoading(true)
+    try {
+      const res = await StudioProjectsService.listProjectsApiV1StudioProjectsGet({ page: 1, pageSize: 100 })
+      const items = res.data?.items ?? []
+      setProjectOptions(items.map((item) => ({ label: item.name, value: item.id })))
+    } catch {
+      setProjectOptions([])
+    } finally {
+      setProjectOptionsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (projectIdModalOpen && projectOptions.length === 0) void loadProjectOptions()
+  }, [projectIdModalOpen, loadProjectOptions, projectOptions.length])
+
+  /** 记住用户选的项目，选中后立刻继续原来的动作（出图 / 批量出图）。 */
+  const pendingProjectActionRef = useRef<((projectId: string) => Promise<void> | void) | null>(null)
+
   const handleConfirmProjectId = async () => {
     const next = projectIdDraft.trim()
     if (!next) {
-      message.warning('请输入项目 ID')
+      message.warning('请先选择项目')
       return
     }
     setManualProjectId(next)
     setProjectIdModalOpen(false)
+    const action = pendingProjectActionRef.current
+    pendingProjectActionRef.current = null
+    if (action) {
+      await action(next)
+      return
+    }
     await runReferenceBatch(next)
+  }
+
+  /** 缺项目作用域时统一入口：先让用户选项目，再继续原动作。 */
+  const requireProjectScope = (
+    action: (projectId: string) => Promise<void> | void,
+    reason: string,
+  ): boolean => {
+    const current = resolvedProjectId.trim()
+    if (current) return true
+    pendingProjectActionRef.current = action
+    setProjectIdDraft('')
+    setProjectIdModalOpen(true)
+    message.warning(reason)
+    return false
   }
 
   const imagePromptDryRun = imagePromptResult?.meta?.dry_run === true
@@ -1174,13 +1260,40 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                   <div className="text-xs text-gray-500">
                     <span>{assetNavigateRelationType ? `资产类型：${assetNavigateRelationType}` : '资产类型：未知'}</span>
                     <span className="ml-3">
-                      {resolvedProjectId ? `项目 ID：${resolvedProjectId}` : '项目 ID：未自动识别（提交前需填写）'}
+                      {resolvedProjectId ? `项目作用域：${resolvedProjectId}` : '项目作用域：未识别'}
                     </span>
                     {referenceBatchSupported && !hasPrimaryImage ? (
                       <span className="ml-3 text-orange-500">未设置定版（垫图会退回正面视角图）</span>
                     ) : null}
                   </div>
                 </div>
+                {referenceBatchSupported && !resolvedProjectId ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    message="缺少项目作用域：出图已禁用"
+                    description={
+                      <span className="text-xs">
+                        从全局资产库直接打开时拿不到资产所属项目，出图无法定位资产。
+                        请先从「项目工作台 → 第 3 步 图片准备」进入本页，或
+                        <Button
+                          type="link"
+                          size="small"
+                          className="!px-1"
+                          onClick={() => {
+                            pendingProjectActionRef.current = null
+                            setProjectIdDraft('')
+                            setProjectIdModalOpen(true)
+                          }}
+                        >
+                          在这里选择项目
+                        </Button>
+                        。
+                      </span>
+                    }
+                  />
+                ) : null}
                 <div className="text-xs text-gray-400">
                   图片提示词保存在资产的 `image_prompts`（按槽位类别合并）；批量出图结果本页不落库，
                   请在对应角度卡片点「编辑」→ 选择历史生成图片 →「选中并更新当前角度」采纳。
@@ -1205,15 +1318,25 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                         }
                         footer={
                           <div className="flex flex-wrap items-center gap-2">
-                            <Button
-                              type="primary"
-                              size="small"
-                              disabled={!slot.image}
-                              loading={Boolean(slot.image && generatingByImageId[slot.image.id])}
-                              onClick={() => slot.image && void openPromptPreview(slot.image)}
+                            <Tooltip
+                              title={
+                                resolvedProjectId
+                                  ? undefined
+                                  : '缺少项目作用域：请先从项目工作台第 3 步进入，或在页面顶部选择项目'
+                              }
                             >
-                              生成
-                            </Button>
+                              <span>
+                                <Button
+                                  type="primary"
+                                  size="small"
+                                  disabled={!slot.image || !resolvedProjectId}
+                                  loading={Boolean(slot.image && generatingByImageId[slot.image.id])}
+                                  onClick={() => slot.image && void openPromptPreview(slot.image)}
+                                >
+                                  生成
+                                </Button>
+                              </span>
+                            </Tooltip>
                             <Button
                               size="small"
                               icon={<EditOutlined />}
@@ -1693,11 +1816,14 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       </Modal>
 
       <Modal
-        title="需要项目 ID"
+        title="出图需要项目作用域：请选择项目"
         open={projectIdModalOpen}
-        onCancel={() => setProjectIdModalOpen(false)}
+        onCancel={() => {
+          pendingProjectActionRef.current = null
+          setProjectIdModalOpen(false)
+        }}
         onOk={() => void handleConfirmProjectId()}
-        okText="继续提交"
+        okText="用这个项目继续"
         cancelText="取消"
         confirmLoading={referenceBatchLoading}
         destroyOnClose
@@ -1705,17 +1831,26 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         <div className="space-y-3">
           <div className="text-sm text-gray-600">
             当前页面拿不到该资产所属的项目（场景 / 道具 / 服装 / 演员的资产读模型不含 project_id，
-            直接打开资产编辑页时 URL 里也没有项目线索）。垫图批量出图需要项目 ID 才能定位资产。
+            直接从资产库打开时 URL 里也没有项目线索）。出图必须知道项目才能定位资产。
+            推荐做法是从「项目工作台 → 第 3 步 图片准备」进入本页；也可以在这里直接选一个项目。
           </div>
-          <Input
-            value={projectIdDraft}
-            onChange={(e) => setProjectIdDraft(e.target.value)}
-            placeholder="请输入项目 ID"
-            onPressEnter={() => void handleConfirmProjectId()}
+          <Select
+            showSearch
+            allowClear
+            loading={projectOptionsLoading}
+            value={projectIdDraft || undefined}
+            onChange={(value) => setProjectIdDraft(value ?? '')}
+            placeholder="选择项目"
+            optionFilterProp="label"
+            options={projectOptions}
+            style={{ width: '100%' }}
+            notFoundContent={projectOptionsLoading ? '加载中…' : '没有可选项目'}
           />
-          <div className="text-xs text-gray-400">
-            项目 ID 可在项目工作台地址栏 `/projects/&lt;项目 ID&gt;` 中看到；从工作台进入本页时会自动识别。
-          </div>
+          {projectOptions.length === 0 && !projectOptionsLoading ? (
+            <div className="text-xs text-gray-400">
+              没有读到任何项目；项目 ID 也可以在工作台地址栏 `/projects/&lt;项目 ID&gt;` 中查看。
+            </div>
+          ) : null}
         </div>
       </Modal>
     </div>
