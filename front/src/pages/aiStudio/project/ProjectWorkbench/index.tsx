@@ -508,7 +508,7 @@ const ProjectWorkbench: React.FC = () => {
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-600">
                 <span>
                   你正在查看工作台的其他功能页（{LEGACY_PANEL_TABS.find((item) => item.key === legacyPanelTab)?.label}），
-                  它不属于六步主流程。
+                  它不属于五步主流程。
                 </span>
                 <Space size="small">
                   <Button size="small" icon={<ArrowLeftOutlined />} onClick={() => openStep(resolution.step)}>

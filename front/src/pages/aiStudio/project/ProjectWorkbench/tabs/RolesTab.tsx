@@ -570,7 +570,7 @@ export function RolesTab() {
       >
         <div className="space-y-3">
           <div className="text-[11px] text-gray-500">
-            演员来自**全局演员库**（可跨项目复用）；选中后角色会引用该演员的定版图与文件，
+            演员来自全局演员库（可跨项目复用）；选中后角色会引用该演员的定版图与文件，
             角色的名称 / 描述 / 服装仍然是本项目自己的字段。
           </div>
           <Input.Search

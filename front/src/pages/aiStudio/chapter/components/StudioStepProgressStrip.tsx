@@ -204,7 +204,7 @@ export function StudioStepProgressStrip({ projectId, chapterId, step, selectedSh
         <div className="mt-1 text-[11px] text-red-500">{error}</div>
       ) : step === 'video_prompt' ? (
         <div className="mt-1 text-[11px] text-gray-400">
-          来源必须是 大模型生成 / 巨日禄导入 / 人工编辑 / 一键技能生成；模板拼装不算来源，也不会进交付导出。
+          只有正式保存过的提示词才算（大模型生成 / 外部导入 / 人工编辑 / 一键技能生成）；临时拼装的模板不计入，也不会进交付导出。
         </div>
       ) : null}
     </div>

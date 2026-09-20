@@ -1225,9 +1225,9 @@ export function ChapterShotEditPage() {
    * （直接进工作室会跳过资产提取 / 图片准备 / 整集提示词 / 关联绑定）。
    */
   const continueFlow = () => navigate(`/projects/${projectId}?step=extract_assets`)
-  const nextStepTitle = '下一步：资产提取'
+  const nextStepTitle = '下一步：第 2 步 资产准备'
   const nextStepDescription = statusReady
-    ? '当前镜头的准备已确认。回到项目工作台按顺序继续：资产提取 → 图片准备 → 整集视频提示词 → 关联绑定 → 生成与交付。'
+    ? '当前镜头的准备已确认。回到项目工作台按顺序继续：剧本与分镜 → 资产准备 → 整集视频提示词 → 资产与声音绑定 → 生成与交付。'
     : actionBeatsReady
       ? '当前镜头仍有提取候选、对白或镜头基础信息待确认。确认后回到项目工作台，按五步流程继续后续步骤。'
       : '当前镜头的动作拍点还没有确认。建议先补齐动作序列，再回到项目工作台继续后续步骤。'
@@ -1253,7 +1253,7 @@ export function ChapterShotEditPage() {
       tone: assetsReady ? 'success' : shotAssetsOverview ? 'warning' : 'default',
       text: assetsReady
         ? extractionSummary.state === 'skipped'
-          ? '已跳过资产提取'
+          ? '已跳过资产准备'
           : extractionSummary.state === 'extracted_empty'
             ? '已提取无候选'
             : linkedAssetCount > 0

@@ -168,7 +168,7 @@ export function ShotAudioBindingSection({
         const created = res.data as unknown as { id?: string } | undefined
         const fileId = String(created?.id ?? '').trim()
         if (!fileId) {
-          message.error('上传成功但没有拿到 file_id，请刷新后重试')
+          message.error('上传成功但没有拿到文件编号，请刷新后重试')
           return
         }
         await loadAudioFiles()
@@ -224,7 +224,7 @@ export function ShotAudioBindingSection({
         <div className="min-w-0">
           <div className="text-sm font-medium text-slate-900">声音绑定</div>
           <Typography.Text type="secondary" className="text-[11px]">
-            给这条分镜绑定配音 / 台词音频（写入 `shot_details.audio_file_id`）。绑定后它一定会出现在交付内容的
+            给这条分镜绑定配音 / 台词音频。绑定后它一定会出现在交付内容的
             「绑定素材·实际文件」里。能否随视频生成请求发出去看两点：①供应商支持参考音频（seedance 支持，
             字段 `audio_urls`，最多 3 条、总时长 ≤15s、与首尾帧图片互斥）；②音频地址必须公网可达
             （本地 `/files/...` 地址供应商抓不到）。任一不满足时，生成响应与计划预览会明确写"本次未携带"

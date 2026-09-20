@@ -290,7 +290,7 @@ export function ProjectStudioStepPanel({
                   </Space>
                   <Typography.Text type="secondary" className="text-[11px]">
                     {step === 'binding'
-                      ? '「实际文件」= 该镜头绑定资产解析到的定版图（生成请求会用它们当参考图）；「声音」= shot_details.audio_file_id。未绑定的镜头排在前面。'
+                      ? '「实际文件」= 该镜头绑定资产解析到的定版图（生成请求会用它们当参考图）；「声音」= 该镜头绑定并已保存的配音音频。未绑定的镜头排在前面。'
                       : '来源必须是 大模型生成 / 巨日禄导入 / 人工编辑 / 一键技能生成；模板拼装只是本地预览，不计为来源，也不会进交付导出。缺口镜头排在前面。'}
                   </Typography.Text>
                   <Table<PromptDeliveryRow>
@@ -348,7 +348,7 @@ export function ProjectStudioStepPanel({
                     <Tag color="blue">{`可交付 ${delivery.exportable_count} 条`}</Tag>
                     <Tag color={delivery.skipped_count > 0 ? 'orange' : 'default'}>{`跳过 ${delivery.skipped_count} 条`}</Tag>
                     <Tag>{`范围：${delivery.scope_label}`}</Tag>
-                    <Tag color="purple">{`来源白名单：${delivery.export_sources.map(sourceLabel).join(' / ')}`}</Tag>
+                    <Tag color="purple">{`可交付来源：${delivery.export_sources.map(sourceLabel).join(' / ')}`}</Tag>
                     <Tag color={delivery.include_bindings ? 'green' : 'default'}>
                       {delivery.include_bindings ? '带出绑定素材' : '不带绑定素材'}
                     </Tag>

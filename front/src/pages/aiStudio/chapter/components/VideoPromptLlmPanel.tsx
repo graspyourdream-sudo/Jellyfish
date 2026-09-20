@@ -280,7 +280,7 @@ export function VideoPromptLlmPanel({
         <ThunderboltOutlined /> {title}
       </div>
       <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] leading-5 text-slate-600">
-        整集提示词请到**项目工作台第 4 步**批量生成或导入并统一确认；这里只用于当前镜头的补漏与返工：
+        整集提示词请到项目工作台第 3 步「整集视频提示词」批量生成或导入并统一确认；这里只用于当前镜头的补漏与返工：
         单镜生成草稿 → 检查/修改 → 保存到本镜（只有你确认保存的内容才会进入交付导出与视频生成）。
       </div>
 

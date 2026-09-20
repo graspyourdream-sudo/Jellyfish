@@ -26,6 +26,14 @@ test('file_id / storage_key / key= 形态都屏蔽', () => {
   assert.ok(masked.includes('test_voice'), '业务名称保留')
 })
 
+test('裸字段名也换成业务说法（后端提示常见写法）', () => {
+  const raw = '该帧槽位没有 file_id：请先上传或生成该帧。'
+  const masked = maskInternalIds(raw)
+  assert.equal(masked.includes('file_id'), false)
+  assert.ok(masked.includes('文件编号'))
+  assert.ok(masked.includes('请先上传或生成该帧'), '人话部分保留')
+})
+
 test('不含内部标识的文案原样返回', () => {
   const raw = '本镜已具备生成条件：提示词与参考帧齐全'
   assert.equal(maskInternalIds(raw), raw)

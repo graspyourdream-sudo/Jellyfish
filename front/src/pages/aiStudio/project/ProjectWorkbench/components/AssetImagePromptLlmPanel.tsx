@@ -245,7 +245,7 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
       </div>
       <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] leading-5 text-slate-600">
         这里的「生成」调用后端的 LLM 编排接口（/studio/llm/image-prompt/preview），真的会调用大模型。
-        保存的位置是生图实际读取的那一列（&lt;entities&gt;.image_prompts），保存后上面的「生图计划预览」会把提示词来源标成「已保存提示词」——
+        保存的位置就是生图实际读取的那份资产提示词，保存后上面的「生图计划预览」会把提示词来源标成「已保存提示词」——
         用它能当场验证这一步确认保存的内容真的被生图使用了。
       </div>
 

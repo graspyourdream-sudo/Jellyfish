@@ -122,7 +122,7 @@ export function evaluateShotReadiness(input: ReadinessInput): ShotReadiness {
   // 导出就绪：只看"这一镜能不能作为提示词交付"，不要求生成过视频，也不要求帧齐全
   const canExport = hasPrompt && hasExportableSource(row.video_prompt_source)
   if (!hasPrompt) exportWarnings.push('缺提示词')
-  else if (!hasExportableSource(row.video_prompt_source)) exportWarnings.push('提示词来源不在可导出白名单内')
+  else if (!hasExportableSource(row.video_prompt_source)) exportWarnings.push('提示词不是正式保存的版本，暂时不可导出')
   if (!imageFiles.length) exportWarnings.push('未绑定图片资产')
   else if (!usableImages.length) exportWarnings.push('绑定图片没有可用文件')
 

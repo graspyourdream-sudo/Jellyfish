@@ -947,11 +947,11 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       const created = res.data as unknown as { id?: string } | undefined
       const fileId = String(created?.id ?? '').trim()
       if (!fileId) {
-        message.error('上传成功但没有拿到 file_id，请刷新后重试')
+        message.error('上传成功但没有拿到文件编号，请刷新后重试')
         return
       }
       await updateImage(assetId, target.id, { file_id: fileId, format: 'png' })
-      message.success(`已上传并写入槽位（file_id=${fileId}）`)
+      message.success('已上传并写入槽位')
       await loadData()
     } catch (error) {
       message.error(error instanceof Error ? error.message : '图片上传失败')
@@ -1314,7 +1314,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                     description={
                       <span className="text-xs">
                         从全局资产库直接打开时拿不到资产所属项目，出图无法定位资产。
-                        请先从「项目工作台 → 第 3 步 图片准备」进入本页，或
+                        请先从「项目工作台 → 第 2 步 资产准备」进入本页，或
                         <Button
                           type="link"
                           size="small"
@@ -1332,7 +1332,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                   />
                 ) : null}
                 <div className="text-xs text-gray-400">
-                  图片提示词保存在资产的 `image_prompts`（按槽位类别合并）；批量出图结果本页不落库，
+                  图片提示词按槽位类别合并保存在该资产上；批量出图结果本页不落库，
                   请在对应角度卡片点「编辑」→ 选择历史生成图片 →「选中并更新当前角度」采纳。
                 </div>
                 <Row gutter={[16, 16]}>
@@ -1499,7 +1499,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
           <div className="space-y-3">
             {/*
               确认弹窗必须写清「这一张会出到哪个项目 / 哪个资产」。
-              收口要求：从全局资产库选完项目再发起单张生成时，用户要能在**这里**
+              收口要求：从全局资产库选完项目再发起单张生成时，用户要能在这里
               看到刚选中的项目作用域，而不是只靠页面顶部那行小字。
             */}
             <Alert
@@ -1667,7 +1667,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             ) : null}
             <div className="text-xs text-gray-500">
               已保存过的类别会用已保存内容预填（下面标了「已保存」）；点「保存到资产」时会按类别合并写入
-              `image_prompts`，不会丢掉未出现在本次结果里的类别。
+              该资产的已保存提示词，不会丢掉未出现在本次结果里的类别。
             </div>
             {imagePromptSavedOnlyCategories.length > 0 ? (
               <div className="text-xs text-gray-500">
@@ -1887,7 +1887,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
           <div className="text-sm text-gray-600">
             当前页面拿不到该资产所属的项目（场景 / 道具 / 服装 / 演员的资产读模型不含 project_id，
             直接从资产库打开时 URL 里也没有项目线索）。出图必须知道项目才能定位资产。
-            推荐做法是从「项目工作台 → 第 3 步 图片准备」进入本页；也可以在这里直接选一个项目。
+            推荐做法是从「项目工作台 → 第 2 步 资产准备」进入本页；也可以在这里直接选一个项目。
           </div>
           <Select
             showSearch

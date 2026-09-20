@@ -57,7 +57,7 @@ export function getChapterPreparationState(chapter: Chapter): ChapterPreparation
     key: 'prepare_shots',
     text: '待准备镜头',
     color: 'blue',
-    hint: '已有分镜，继续后续步骤（资产提取 → 图片准备 → 整集提示词）',
+    hint: '已有分镜，继续后续步骤（资产准备 → 整集视频提示词）',
     primaryAction: '继续项目流程',
     primaryIcon: <FileSearchOutlined />,
   }

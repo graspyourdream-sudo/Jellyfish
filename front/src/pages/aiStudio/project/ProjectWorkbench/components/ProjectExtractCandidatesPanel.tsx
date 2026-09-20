@@ -454,7 +454,7 @@ export function ProjectExtractCandidatesPanel({
       <Card size="small" className="mb-2">
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description={<span className="text-xs text-gray-500">请先选择一集，再进行资产提取</span>}
+          description={<span className="text-xs text-gray-500">请先选择一集，再确认提取候选</span>}
         />
       </Card>
     )
@@ -467,7 +467,7 @@ export function ProjectExtractCandidatesPanel({
       styles={{ body: { paddingTop: 10, paddingBottom: 10 } }}
       title={
         <Space size={8} wrap>
-          <span className="text-sm font-medium">第 2 步 · 提取资产</span>
+          <span className="text-sm font-medium">第 2 步 · 资产准备（先确认提取候选）</span>
           <Tag bordered={false}>{`本集 ${shotCount} 镜`}</Tag>
           {rows.length > 0 ? (
             <Tag color="blue" bordered={false}>{`候选 ${rows.length} 条`}</Tag>
@@ -548,7 +548,7 @@ export function ProjectExtractCandidatesPanel({
           ) : (
             <div className="mt-2 flex items-center gap-1 text-[11px] text-emerald-600">
               <CheckCircleOutlined />
-              本集候选已全部处理，可以继续下一步「图片准备」。
+              本集候选已全部处理；继续在下面把每个资产的提示词、图片与定版补齐。
             </div>
           )}
         </>

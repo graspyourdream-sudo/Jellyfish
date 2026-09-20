@@ -11,14 +11,23 @@
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
 const KEY_VALUE_RE = /\b(?:file_id|storage_key|asset_id|shot_id|chapter_id)=\S+/gi
 const BARE_STORAGE_KEY_RE = /\bkey=[^\s）)]+/gi
+/** 后端提示里常直接写字段名（例如「该帧槽位没有 file_id」）——换成业务说法。 */
+const FIELD_NAME_RE = /\b(?:file_id|storage_key|video_prompt_source|shot_details)\b/gi
+const FIELD_NAME_LABELS: Record<string, string> = {
+  file_id: '文件编号',
+  storage_key: '存储位置',
+  video_prompt_source: '提示词来源',
+  shot_details: '镜头记录',
+}
 
 export const INTERNAL_ID_PLACEHOLDER = '（内部 ID 见「技术详情」）'
 
 export function maskInternalIds(text: string): string {
   return String(text ?? '')
-    .replace(UUID_RE, INTERNAL_ID_PLACEHOLDER)
     .replace(KEY_VALUE_RE, INTERNAL_ID_PLACEHOLDER)
     .replace(BARE_STORAGE_KEY_RE, INTERNAL_ID_PLACEHOLDER)
+    .replace(UUID_RE, INTERNAL_ID_PLACEHOLDER)
+    .replace(FIELD_NAME_RE, (match) => FIELD_NAME_LABELS[match.toLowerCase()] ?? match)
 }
 
 /** 是否含内部标识（用于测试与自检）。 */

@@ -54,7 +54,7 @@ export function ExportScopeModal({ open, onClose, readiness, onConfirm, chapterL
         showIcon
         className="mb-3"
         message="导出条件与生成条件不同"
-        description="有提示词且来源在白名单内即可导出：不要求这一镜已经生成视频，也不要求关键帧齐全；缺绑定文件会照常导出但会标注出来。"
+        description="只要这一镜有正式保存的提示词就能导出：不要求已经生成过视频，也不要求关键帧齐全；缺绑定文件会照常导出，但会在导出内容里标注出来。"
       />
 
       <Space wrap size={12} className="mb-2">

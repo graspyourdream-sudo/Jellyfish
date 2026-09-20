@@ -842,7 +842,7 @@ export function EpisodeVideoPromptBoard({
           {`确认保存（${includedCount} 条）`}
         </Button>
         <Typography.Text type="secondary" className="text-[11px]">
-          保存后即写入各镜的 <span className="font-mono">video_prompt</span>；工作台与交付导出读的就是这一列。
+          保存后即写入各镜的提示词；工作室与交付导出读的就是这份已保存内容。
         </Typography.Text>
       </Space>
 

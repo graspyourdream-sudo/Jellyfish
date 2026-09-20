@@ -58,7 +58,7 @@ const PROMPT_SOURCE_META: Record<string, { label: string; color: string; hint: s
   saved: {
     label: '已保存提示词',
     color: 'green',
-    hint: '第 2 步「资产准备」在资产上保存的 image_prompts —— 这一环确认保存的产物正在被生图实际使用',
+    hint: '第 2 步「资产准备」在资产上保存的提示词 —— 这一环确认保存的产物正在被生图实际使用',
   },
   template: {
     label: '模板拼装',
@@ -489,7 +489,7 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
               )
             case 'image_ready_primary_todo':
               return (
-                <Tooltip title="把该资产已有的一张图片设为定版（is_primary）">
+                <Tooltip title="把该资产已有的一张图片设为定版">
                   <Button size="small" type="primary" loading={busy} onClick={() => void handleSetPrimary(record)}>
                     设为定版
                   </Button>
@@ -539,7 +539,7 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
 
   return (
     <Card
-      title="图片准备"
+      title="资产图片与定版"
       extra={
         <Space>
           {summaryTags}
@@ -574,7 +574,7 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
         {assets.length === 0 ? (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="项目还没有角色/场景/道具资产，请先回到第 2 步「提取资产」"
+            description="项目还没有角色/场景/道具资产：请先在第 2 步「资产准备」里确认提取候选（关联已有资产或新建）"
           >
             <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate(`/projects/${projectId}?step=extract_assets`)}>
               去提取资产
@@ -605,7 +605,7 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
               <div className="text-sm font-medium text-slate-900">生图计划预览（只读）</div>
               <Typography.Text type="secondary" className="text-[11px]">
                 展示「如果现在出图，会用什么提示词、用哪张垫图」。本预览不触网、不建任务、不花钱；
-                <span className="font-medium">提示词来源标记为「已保存提示词」时，说明这一步保存的 image_prompts 正在被生图读取</span>。
+                <span className="font-medium">提示词来源标记为「已保存提示词」时，说明这一步保存的提示词正在被生图读取</span>。
               </Typography.Text>
             </div>
             <Space size={8} wrap>
@@ -698,7 +698,7 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
             type="info"
             showIcon
             message="这是一条不花钱的填写入口"
-            description="保存后写进该资产的 image_prompts，生图计划会立刻把提示词来源标成「已保存提示词」——用它能当场验证第 2 步「资产准备」的保存结果真的被生图读取。留空的槽位不会覆盖原有内容；已保存的槽位会预填，可直接修改。"
+            description="保存后即写进该资产的提示词，生图计划会立刻把提示词来源标成「已保存提示词」——用它能当场验证第 2 步「资产准备」的保存结果真的被生图读取。留空的槽位不会覆盖原有内容；已保存的槽位会预填，可直接修改。"
           />
           <Spin spinning={editorLoading}>
             {editorSlots.length === 0 ? (

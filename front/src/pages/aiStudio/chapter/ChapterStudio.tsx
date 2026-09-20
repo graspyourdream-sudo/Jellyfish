@@ -398,7 +398,7 @@ type StudioStepKey = 'video_prompt' | 'binding' | 'deliver'
 
 type StudioStepMeta = {
   key: StudioStepKey
-  /** 第一步对应项目第 4 步，因此这里只写步骤名，序号由页面拼。 */
+  /** 工作室第一步 = 项目第 3 步，因此这里只写步骤名，序号由页面拼（五步口径）。 */
   label: string
   hint: string
 }
@@ -406,18 +406,18 @@ type StudioStepMeta = {
 const STUDIO_STEPS: StudioStepMeta[] = [
   {
     key: 'video_prompt',
-    label: '视频提示词',
-    hint: '看/改这条分镜的视频提示词（交付导出读的就是它），再确认镜头语言与画面提示词。',
+    label: '单镜提示词补漏',
+    hint: '只看/改这一条镜头的视频提示词：整集生成与批量导入在项目第 3 步完成，这里只补漏与返工。',
   },
   {
     key: 'binding',
-    label: '关联绑定',
-    hint: '把角色 / 场景 / 道具 / 服装 / 声音绑到这条分镜上；建议只做推荐，保存后才写入绑定。',
+    label: '资产与声音绑定',
+    hint: '确认角色 / 场景 / 道具 / 服装与声音的绑定；推荐只做建议，保存后才写入绑定。',
   },
   {
     key: 'deliver',
     label: '生成与交付',
-    hint: '关键帧与参考图、视频生成参数与产出，以及导出交付所需的提示词与绑定清单。',
+    hint: '看这次请求实际用什么（帧 / 声音），补齐缺口后生成视频，并导出交付用的提示词与绑定清单。',
   },
 ]
 
@@ -448,7 +448,7 @@ function resolveStudioStepFromParam(raw: string | null): StudioStepKey {
   return PROJECT_STEP_TO_STUDIO_STEP[value] ?? STUDIO_STEPS[0].key
 }
 
-const STUDIO_STEP_INDEX_OFFSET = 4
+const STUDIO_STEP_INDEX_OFFSET = 3 // 工作室三步 = 项目第 3/4/5 步（五步口径）
 
 /** 没选镜头时的中性状态文案（不伪造就绪度） */
 /** 状态色调 → antd Tag 颜色（唯一映射，列表与工作区头部共用口径） */
@@ -650,8 +650,8 @@ function useLocalStoragePrefs() {
         // 第三部分：左列表 / 中间本镜生产区 / 右侧缩小预览**三栏并排**，
         // 预览默认展开（更窄），不再需要用户先点一下才看得到完整布局。
         return {
-          leftWidth: 320,
-          rightWidth: 380,
+          leftWidth: 300,
+          rightWidth: 340,
           inspectorOpen: true,
           inspectorMode: 'push',
           autoOpenInspector: true,
@@ -660,8 +660,8 @@ function useLocalStoragePrefs() {
       }
       const parsed = JSON.parse(raw) as Partial<LayoutPrefs>
       return {
-        leftWidth: typeof parsed.leftWidth === 'number' ? parsed.leftWidth : 320,
-        rightWidth: typeof parsed.rightWidth === 'number' ? parsed.rightWidth : 380,
+        leftWidth: typeof parsed.leftWidth === 'number' ? parsed.leftWidth : 300,
+        rightWidth: typeof parsed.rightWidth === 'number' ? parsed.rightWidth : 340,
         inspectorOpen: typeof parsed.inspectorOpen === 'boolean' ? parsed.inspectorOpen : true,
         inspectorMode: parsed.inspectorMode === 'overlay' ? 'overlay' : 'push',
         autoOpenInspector: typeof parsed.autoOpenInspector === 'boolean' ? parsed.autoOpenInspector : true,
@@ -669,8 +669,8 @@ function useLocalStoragePrefs() {
       }
     } catch {
       return {
-        leftWidth: 320,
-        rightWidth: 380,
+        leftWidth: 300,
+        rightWidth: 340,
         inspectorOpen: true,
         inspectorMode: 'push',
         autoOpenInspector: true,
@@ -1498,7 +1498,7 @@ const ChapterStudio: React.FC = () => {
         message.info('演练模式：未真实出图（DRY_RUN 开着）。')
       } else if (result.status === 'succeeded' && result.file_id) {
         await refreshShotFrameImages()
-        message.success(`帧图已生成并落库（${target.frame_type}，file_id=${result.file_id}）`)
+        message.success('帧图已生成并保存到本镜（内部 ID 见「技术详情」）')
       } else {
         message.error(result.error || `生成未成功（status=${result.status || 'unknown'}）`)
       }
@@ -3779,7 +3779,7 @@ function Inspector(props: {
     if (!selectedShot) return '请先选择一个分镜。'
     if (selectedShot.skip_extraction) return '当前分镜已明确标记为无需提取，系统会直接按“提取确认已完成”处理。'
     if (!shotAssetsOverview) return '当前还没有拿到这条分镜的资产总览，暂时无法展示候选确认状态。'
-    return '这里作为生成前的诊断面板，优先依据后端 assets-overview 展示当前镜头的信息确认状态；提取、刷新与精细确认统一在分镜编辑页处理。'
+    return '这里作为生成前的诊断：先看当前镜头的信息确认状态；需要提取、刷新或精细确认，请到分镜编辑页处理。'
   }, [selectedShot, shotAssetsOverview])
 
   const shotExtractStatusText = useMemo(() => {
@@ -4903,7 +4903,7 @@ function Inspector(props: {
     try {
       await onPatchShotDetailImmediate({ [field]: prompt } as Partial<ShotDetailRead>)
       keyframePromptDraft.setState('submitted')
-      message.success(`已保存到镜头（shot_details.${field}，${prompt.length} 字）`)
+      message.success(`已保存到本镜（${frameLabel[frameType]}提示词，${prompt.length} 字）`)
       await loadKeyframePlanPreview(frameType)
     } catch (error) {
       message.error(`保存失败：${error instanceof Error ? error.message : String(error)}`)
@@ -5095,7 +5095,7 @@ function Inspector(props: {
       }
       if (result.status === 'succeeded' && result.file_id) {
         const seconds = ((result.elapsed_ms ?? 0) / 1000).toFixed(1)
-        message.success(`${frameLabel[frameType]}已生成并落库（${seconds}s，file_id=${result.file_id}）`)
+        message.success(`${frameLabel[frameType]}已生成并保存（${seconds}s，内部 ID 见「技术详情」）`)
         // 帧图列表由上层（ChapterStudio）持有：用它的刷新入口，避免本地 state 与库里脱节
         await onRefreshShotFrameImages?.()
         await loadCardThumbs(frameType, result.image_slot_id ?? null, 3)
@@ -5140,7 +5140,7 @@ function Inspector(props: {
       })
       const fileId = String((uploaded.data as unknown as { id?: string } | undefined)?.id ?? '').trim()
       if (!fileId) {
-        message.error('上传成功但没有拿到 file_id，请刷新后重试')
+        message.error('上传成功但没有拿到文件编号，请刷新后重试')
         return
       }
       const slot = frameImages.find((x) => x.frame_type === frameType)
@@ -5159,7 +5159,7 @@ function Inspector(props: {
         })
       }
       await onRefreshShotFrameImages?.()
-      message.success(`${frameLabel[frameType]}已上传并写入槽位（file_id=${fileId}）`)
+      message.success(`${frameLabel[frameType]}已上传并写入槽位`)
     } catch (error) {
       message.error(error instanceof Error ? error.message : `${frameLabel[frameType]}上传失败`)
     } finally {
@@ -5325,9 +5325,9 @@ function Inspector(props: {
                           ) : null}
                         </div>
                         <div className="mt-1">
-                          交付导出读的就是这一列 <span className="font-mono">shot_details.video_prompt</span>；
-                          来源必须是 大模型生成 / 巨日禄导入 / 人工编辑 / 一键技能生成，模板拼装不算来源。
-                          这里保存的固定记为「人工编辑」。
+                          交付导出读的就是这里保存的这份提示词：必须是正式保存过的版本
+                          （大模型生成 / 外部导入 / 人工编辑 / 一键技能生成都算；临时拼装的模板不算）。
+                          在这里手工修改后保存，来源固定记为「人工编辑」。
                         </div>
                       </div>
 
@@ -5380,7 +5380,7 @@ function Inspector(props: {
                           description={
                             <div className="space-y-1 text-[11px]">
                               <div>
-                                点「填入本次生成结果」会把下面这段填进编辑器（**仍需要你确认后再保存**）：
+                                点「填入本次生成结果」会把下面这段填进编辑器（仍需要你确认后再保存）：
                               </div>
                               <div className="max-h-28 overflow-auto rounded bg-white/60 p-2 whitespace-pre-wrap font-mono">
                                 {videoLlmDerivedPrompt}
@@ -6474,7 +6474,9 @@ function Inspector(props: {
                                   ) : null}
                                   <span className="text-[11px] text-gray-500">{frame.usable ? '本次请求会使用' : '本次请求用不了'}</span>
                                   {frame.reason ? (
-                                    <div className="mt-0.5 max-w-[520px] text-[10px] leading-4 text-orange-600">{frame.reason}</div>
+                                    <div className="mt-0.5 max-w-[520px] text-[10px] leading-4 text-orange-600">
+                                      {maskInternalIds(frame.reason)}
+                                    </div>
                                   ) : null}
                                 </div>
                               </div>
@@ -6611,7 +6613,7 @@ function Inspector(props: {
                           导出绑定提示词（TXT）
                         </Button>
                         <Typography.Text type="secondary" className="text-[11px]">
-                          导出弹窗只列出**可导出**的镜头（与「可生成」分开判断）。
+                          导出弹窗只列出可导出的镜头（与「可生成」分开判断）。
                         </Typography.Text>
                       </Space>
                     </div>
@@ -6922,7 +6924,7 @@ function Inspector(props: {
                   </div>
                   <Space size="small">
                     <Tag color={hasBasePrompt ? 'blue' : 'default'}>{hasBasePrompt ? '可编辑' : '未生成'}</Tag>
-                    <Tooltip title={`保存到 shot_details.${framePromptField(keyframePromptPreviewFrameType)}：之后不填提示词直接点「生成」时，读的就是这条已保存内容`}>
+                    <Tooltip title="保存到本镜：之后不填提示词直接点「生成」时，读的就是这条已保存内容">
                       <Button
                         size="small"
                         loading={keyframePromptActionLoading}
@@ -7489,7 +7491,7 @@ function Inspector(props: {
                       {savedVideoPromptDiffers ? <Tag color="orange">与当前编辑内容不一致</Tag> : null}
                     </>
                   ) : (
-                    <Tag>交付导出读取 shot_details.video_prompt</Tag>
+                    <Tag>交付导出读取这里保存的提示词</Tag>
                   )}
                 </div>
                 <div className="mt-1">
@@ -7525,7 +7527,7 @@ function Inspector(props: {
                     <Tag>{`分辨率：${videoPinnedPlan.resolution || '未知'}`}</Tag>
                     <Tag>{`最短时长：${videoPinnedPlan.seconds || 0}s`}</Tag>
                     {videoPinnedPlan.provider ? <Tag>{`供应商：${videoPinnedPlan.provider}`}</Tag> : null}
-                    {videoPinnedPlan.providerSupported ? null : <Tag color="red">供应商不在适配器白名单</Tag>}
+                    {videoPinnedPlan.providerSupported ? null : <Tag color="red">当前视频方案不支持这个参考方式</Tag>}
                   </div>
                 ) : (
                   <div className="mt-2">固定模型直提计划预览不可用（参考图数量或镜头数据暂不满足直提契约）。</div>

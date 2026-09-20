@@ -1127,5 +1127,16 @@ def test_service_relative_local_path_is_made_absolute() -> None:
     # 的 /tmp/a.png 就是这种，必须保持原样）
     import pathlib as _p
 
-    src = _p.Path("app/services/studio/image_pipeline/external_image_client.py").read_text()
+    # 路径必须相对**测试文件**解析：此前写成相对 cwd 的 "app/..."，于是从仓库根目录
+    # 跑 `pytest -q` 时这里必然 FileNotFoundError —— 这是与业务无关的假失败，会让
+    # 「既有失败基线」随执行目录变成 13 或 14 条。同文件
+    # `test_image_pipeline_modules_contain_no_db_writes` 用的就是这条口径。
+    src = (
+        _p.Path(__file__).resolve().parent.parent
+        / "app"
+        / "services"
+        / "studio"
+        / "image_pipeline"
+        / "external_image_client.py"
+    ).read_text()
     assert "if local_path.startswith(SERVICE_STATIC_PREFIX):" in src
