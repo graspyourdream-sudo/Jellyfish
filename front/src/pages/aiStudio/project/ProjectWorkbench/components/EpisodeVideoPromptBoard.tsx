@@ -44,7 +44,7 @@ import {
   savePromptBoard,
   type PromptBoardMode,
   type PromptBoardOrigin,
-  type PromptBoardShot,
+  type PromptBoardShot,  extractJuriluDiagnostics,
 } from '../../../../../services/llmPipelineApi'
 import { StudioShotsService } from '../../../../../services/generated'
 import { classifyGenerationFailure, failureText } from '../../../components/generationGate'
@@ -129,6 +129,8 @@ export function EpisodeVideoPromptBoard({
   const [juriluCookie, setJuriluCookie] = useState('')
   const [juriluAuthorization, setJuriluAuthorization] = useState('')
   const [juriluAuthMode, setJuriluAuthMode] = useState('auto')
+  /** 完整 Cookie 自带 Authorization= 项时，HTTP 头只发 Cookie（自动切到「不发送」）。 */
+  const [juriluAuthModeTouched, setJuriluAuthModeTouched] = useState(false)
   const [juriluReferer, setJuriluReferer] = useState('')
 
   /** Cookie / Authorization 只在本次抓取内存里存活：抓取结束、关抽屉、取消、离开页面立即清空。 */
@@ -475,6 +477,19 @@ export function EpisodeVideoPromptBoard({
       message.warning('请填写巨日禄页面 URL')
       return
     }
+    // 凭证填写引导（这三个校验是真实踩过的坑，别让用户猜）：
+    // 1) Authorization 框收到的是**整串 Cookie**（含 Authorization= 或分号）→ 拦住，让他放进 Cookie 框；
+    // 2) Cookie 框里没有 Authorization= 项 → 多半只粘了分析 Cookie，给出提示但允许继续；
+    // 3) 巨日禄要求整串 Cookie 走 Cookie 请求头，Authorization 框留空、授权方式选「不发送」。
+    const authRaw = juriluAuthorization.trim()
+    if (authRaw.includes('Authorization=') || authRaw.includes(';')) {
+      message.error('Authorization 框收到的是整串 Cookie：请把它放进上面的 Cookie 框，Authorization 框留空')
+      return
+    }
+    const cookieRaw = juriluCookie.trim()
+    if (cookieRaw && !cookieRaw.includes('Authorization=')) {
+      message.warning('Cookie 里没有 Authorization= 项，可能不是完整 Cookie（浏览器里请用「复制全部 Cookie」）', 6)
+    }
     setJuriluFetching(true)
     try {
       const preview = await previewJuriluImport(projectId, {
@@ -483,7 +498,8 @@ export function EpisodeVideoPromptBoard({
         cookie: juriluCookie,
         authorization: juriluAuthorization,
         auth_mode: juriluAuthMode,
-        referer: juriluReferer,
+        // Referer 留空时用页面 URL 兜底：巨日禄会按 Referer 判来源
+        referer: juriluReferer.trim() || juriluUrl.trim(),
         create_missing: false,
         overwrite: false,
       })
@@ -502,8 +518,16 @@ export function EpisodeVideoPromptBoard({
       message.success(`已抓取 ${entries.length} 条巨日禄提示词，请在预览表中校对后确认保存`)
       setImportOpen(false)
     } catch (error) {
-      // 错误信息只透出后端的文案，绝不回显 Cookie / Authorization
-      message.error(error instanceof Error ? error.message : '巨日禄抓取失败（Cookie 是否有效？）')
+      // 错误信息只透出后端的文案，绝不回显 Cookie / Authorization；
+      // 401/403 时把**脱敏诊断**（接口阶段 / HTTP 状态 / 是否带 Cookie / 是否额外带 Authorization / 授权模式）显式给出来。
+      const text = error instanceof Error ? error.message : '巨日禄抓取失败（Cookie 是否有效？）'
+      const diag = extractJuriluDiagnostics(error)
+      if (diag) {
+        setIssues([diag])
+        message.error(`${text}｜${diag}`, 8)
+      } else {
+        message.error(text)
+      }
     } finally {
       setJuriluFetching(false)
       clearJuriluCredentials()
@@ -873,24 +897,38 @@ export function EpisodeVideoPromptBoard({
               type="info"
               showIcon
               message="Cookie 只用于本次抓取：不保存、不回显、不写日志"
-              description="抓取结果不会直接落库，会先进入统一预览确认表，由你核对匹配关系后确认保存。"
+              description="抓取结果不会直接落库，会先进入统一预览确认表，由你核对匹配关系后确认保存。正确填法：把浏览器「复制全部 Cookie」的整串（含开头的 Authorization= 项）放进 Cookie 框，Authorization 框留空，授权方式选「不发送（仅 Cookie）」，Referer 留空会默认用页面 URL。"
             />
             <Input placeholder="巨日禄页面 URL（含 projectId / clipId）" value={juriluUrl} onChange={(e) => setJuriluUrl(e.target.value)} />
             <Input.Password
-              placeholder="粘贴巨日禄「复制全部 Cookie」（掩码显示，仅本次抓取使用）"
+              placeholder="粘贴巨日禄「复制全部 Cookie」（含 Authorization= 项，掩码显示，仅本次抓取使用）"
               value={juriluCookie}
-              onChange={(e) => setJuriluCookie(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value
+                setJuriluCookie(next)
+                // 完整 Cookie 里已经带了 Authorization= 项 → 默认「不发送，仅 Cookie」（用户手动改过就不覆盖）
+                if (!juriluAuthModeTouched && next.includes('Authorization=')) {
+                  setJuriluAuthMode('none')
+                }
+              }}
             />
             <Space>
-              <Input.Password placeholder="Authorization（可留空，掩码显示）" value={juriluAuthorization} onChange={(e) => setJuriluAuthorization(e.target.value)} />
+              <Input.Password
+                placeholder="Authorization（整串 Cookie 时留空，掩码显示）"
+                value={juriluAuthorization}
+                onChange={(e) => setJuriluAuthorization(e.target.value)}
+              />
               <Select
                 size="middle"
                 value={juriluAuthMode}
-                style={{ width: 140 }}
-                onChange={setJuriluAuthMode}
+                style={{ width: 170 }}
+                onChange={(value) => {
+                  setJuriluAuthModeTouched(true)
+                  setJuriluAuthMode(value)
+                }}
                 options={[
                   { value: 'auto', label: '自动' },
-                  { value: 'none', label: '不发送' },
+                  { value: 'none', label: '不发送（仅 Cookie）' },
                   { value: 'raw', label: '原样发送' },
                   { value: 'bearer', label: 'Bearer' },
                 ]}

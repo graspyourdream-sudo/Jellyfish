@@ -268,6 +268,8 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
   const [cookie, setCookie] = useState('')
   const [authorization, setAuthorization] = useState('')
   const [authMode, setAuthMode] = useState('auto')
+  // 完整 Cookie 自带 Authorization= 项时，只看 Cookie 头（与工作台导入抽屉同一口径）
+  const [authModeTouched, setAuthModeTouched] = useState(false)
   const [referer, setReferer] = useState('')
   const [apiOverride, setApiOverride] = useState('')
   const [createMissing, setCreateMissing] = useState(true)
@@ -386,6 +388,20 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
   }, [projectId])
 
   const canSubmit = Boolean(projectId && chapterId && url.trim())
+
+  /** 提交前的凭证填写护栏：Authorization 框只接**单个** Authorization 值，整串 Cookie 属于 Cookie 框。 */
+  const juriluCredentialBlocked = useCallback(() => {
+    const raw = authorization.trim()
+    if (raw.includes('Authorization=') || raw.includes(';')) {
+      message.error('Authorization 框收到的是整串 Cookie：请把它放进上面的 Cookie 框，Authorization 框留空（模式选「不发送（仅 Cookie）」）')
+      return true
+    }
+    if (!referer.trim()) {
+      // Referer 留空也能跑（后端会用页面 URL 兜底），这里只提示更稳的填法
+      message.info('Referer 留空将默认使用上面的页面 URL（后端兜底）')
+    }
+    return false
+  }, [authorization, referer])
 
   const buildRequest = () => ({
     projectId: projectId as string,
@@ -566,9 +582,16 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         <Input.TextArea
           style={{ marginTop: 4 }}
           rows={3}
-          placeholder="粘贴整段 Cookie 字符串"
+          placeholder="粘贴整段 Cookie 字符串（应包含开头的 Authorization= 项）"
           value={cookie}
-          onChange={(e) => setCookie(e.target.value)}
+          onChange={(e) => {
+            const next = e.target.value
+            setCookie(next)
+            if (!authModeTouched && next.includes('Authorization=')) setAuthMode('none')
+            if (next && !next.includes('Authorization=')) {
+              message.warning('Cookie 里没有 Authorization= 项，可能不是完整 Cookie（请用「复制全部 Cookie」）')
+            }
+          }}
           autoComplete="off"
         />
       </div>
@@ -586,7 +609,7 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
                     <Text>Authorization（可留空）</Text>
                     <Input.Password
                       style={{ marginTop: 4 }}
-                      placeholder="单个 Authorization 值"
+                      placeholder="单个 Authorization 值（整串 Cookie 请放 Cookie 框并留空这里）"
                       value={authorization}
                       onChange={(e) => setAuthorization(e.target.value)}
                       autoComplete="off"
@@ -597,7 +620,10 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
                     <Select
                       style={{ width: '100%', marginTop: 4 }}
                       value={authMode}
-                      onChange={setAuthMode}
+                      onChange={(value) => {
+                        setAuthModeTouched(true)
+                        setAuthMode(value)
+                      }}
                       options={[
                         { label: '自动（有值就原样发送）', value: 'auto' },
                         { label: '不发送', value: 'none' },
@@ -668,7 +694,10 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
           icon={<EyeOutlined />}
           loading={loadingPreview}
           disabled={!canSubmit}
-          onClick={() => void handlePreview()}
+          onClick={() => {
+            if (juriluCredentialBlocked()) return
+            void handlePreview()
+          }}
         >
           预览（不写库）
         </Button>
@@ -676,7 +705,10 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
           icon={<CloudUploadOutlined />}
           loading={loadingApply}
           disabled={!canSubmit || !preview || writable === 0}
-          onClick={() => void handleApply()}
+          onClick={() => {
+            if (juriluCredentialBlocked()) return
+            void handleApply()
+          }}
         >
           确认写入
         </Button>

@@ -63,17 +63,57 @@ def resolve_cookie(input_cookie: str = "") -> str:
     return get_configured_cookie()
 
 
+#: 页面上的中文标签 → 内部模式（用户/旧前端可能直接传中文，静默降级成 auto 是最危险的坑）。
+_AUTH_MODE_LABELS: dict[str, str] = {
+    "自动": "auto",
+    "不发送": "none",
+    "不发送（仅 cookie）": "none",
+    "不发送(仅 cookie)": "none",
+    "仅cookie": "none",
+    "仅 cookie": "none",
+    "原样发送": "raw",
+    "bearer": "bearer",
+    "bearer 发送": "bearer",
+}
+
+
+def looks_like_full_cookie(value: str) -> bool:
+    """判断一个值是不是**整串浏览器 Cookie**（而不是单个 Authorization 值）。
+
+    为什么必须拦：用户从浏览器复制的「完整 Cookie」第一项就叫 ``Authorization=<jwt>``，
+    整串里必然带分号分隔的其它 Cookie。把它当 HTTP ``Authorization`` 头发出去，
+    上游只会回 401（真实踩过）。这种情况一律忽略该值，只用 ``Cookie`` 头。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return text.startswith("Authorization=") or ";" in text or "\n" in text
+
+
 def resolve_authorization(input_auth: str = "", mode: str = "auto") -> Tuple[str, str]:
-    mode = str(mode or "auto").strip().lower()
-    if mode not in ("none", "raw", "bearer", "auto"):
-        mode = "auto"
+    """解析本次要发送的 Authorization 值。
+
+    返回 ``(值, 模式说明)``；模式说明会进 diagnostics（``auth_header_mode``），
+    额外情况（整串 Cookie 被忽略、未知模式）用 ``auth_note`` 形式一并返回给调用方记录。
+    """
+    raw_mode = str(mode or "auto").strip()
+    normalized = _AUTH_MODE_LABELS.get(raw_mode.lower(), raw_mode.lower())
+    if normalized not in ("none", "raw", "bearer", "auto"):
+        # 未知取值：**不**静默按 auto 原样发送，退回「不发送」并说明（fail-safe）
+        return "", f"unknown:{raw_mode or 'empty'}"
+    mode = normalized
     if mode == "none":
         return "", "none"
     auth = (input_auth or "").strip()
     if not auth:
-        auth = get_configured_authorization()
-    if not auth:
-        return "", "none"
+        # auto 不再读环境兜底（那颗雷会凭空加一个 Authorization 头）；只有显式 raw/bearer 才读
+        if mode in ("raw", "bearer"):
+            auth = get_configured_authorization()
+        if not auth:
+            return "", "none"
+    if looks_like_full_cookie(auth):
+        # 整串 Cookie：忽略 Authorization 头，只用 Cookie 头（用户口径）
+        return "", "ignored_full_cookie"
     if mode == "bearer":
         if not auth.lower().startswith("bearer "):
             auth = f"Bearer {auth}"

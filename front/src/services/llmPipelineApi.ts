@@ -24,11 +24,14 @@ export type AnyRecord = Record<string, any>
  */
 export class GenerationRequestError extends Error {
   status: number
+  /** 后端信封 `meta.diagnostics`（脱敏，不含任何凭证）：错误排查用 */
+  diagnostics?: Record<string, unknown>
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, diagnostics?: Record<string, unknown>) {
     super(message)
     this.name = 'GenerationRequestError'
     this.status = status
+    this.diagnostics = diagnostics
   }
 }
 
@@ -53,6 +56,7 @@ async function callApi<T = AnyRecord>(path: string, body?: AnyRecord): Promise<T
     throw new GenerationRequestError(
       String(error.message ?? payload?.message ?? text ?? `HTTP ${response.status}`) + suffix,
       response.status,
+      (meta.diagnostics as Record<string, unknown> | undefined) ?? undefined,
     )
   }
   return (payload?.data ?? null) as T
@@ -981,6 +985,29 @@ export interface JuriluPreviewResult {
  * 巨日禄 Cookie 导入**预览**（抓取 + 配对，**不写库**）。
  * Cookie 只用于本次抓取：不保存、不回显、不写日志（后端已保证）。
  */
+/**
+ * 从巨日禄抓取失败里提取**脱敏诊断**（接口阶段 / HTTP 状态 / 是否带 Cookie / 是否额外带 Authorization / 授权模式）。
+ *
+ * 后端把诊断放在统一信封的 `meta.diagnostics` 里（不含任何凭证），但 `callApi` 抛错时只保留 message，
+ * 所以这里再读一次 Response 级信息：优先用 `GenerationRequestError.diagnostics`（由 callApi 附带），
+ * 否则回退到 message 里的片段。**绝不回显 Cookie / Authorization 内容。**
+ */
+export function extractJuriluDiagnostics(error: unknown): string {
+  const diag = (error as { diagnostics?: Record<string, unknown> } | undefined)?.diagnostics
+  if (!diag || typeof diag !== 'object') return ''
+  const parts: string[] = []
+  const stage = String(diag.getScriptPage_url ? 'getScriptPage' : diag.stage ?? '').trim()
+  if (stage) parts.push(`接口阶段 ${stage}`)
+  const httpStatus = diag.script_status ?? diag.http_status ?? diag.status
+  if (httpStatus !== undefined && httpStatus !== null && `${httpStatus}`.trim()) parts.push(`HTTP ${httpStatus}`)
+  parts.push(`带 Cookie：${diag.has_cookie ? '是' : '否'}`)
+  parts.push(`额外带 Authorization：${diag.has_auth ? '是' : '否'}`)
+  const mode = String(diag.auth_header_mode ?? '').trim()
+  if (mode) parts.push(`授权模式 ${mode}`)
+  return parts.join('｜')
+}
+
+/** 巨日禄导入预览（抓取 + 配对，不写库）。 */
 export function previewJuriluImport(
   projectId: string,
   body: {

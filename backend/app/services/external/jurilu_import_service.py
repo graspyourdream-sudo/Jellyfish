@@ -71,7 +71,8 @@ def fetch_entries(
         source_url=source_url,
         cookie_text=resolved_cookie,
         authorization=resolved_auth,
-        referer=referer,
+        # 巨日禄按 Referer 判来源：留空时用页面 URL 兜底（原中控台同口径 app.py:18478）
+        referer=(referer or source_url),
         api_url_override=api_url_override,
     )
     diagnostics = dict(result.get("diagnostics") or {})
@@ -141,7 +142,8 @@ async def build_preview(
         cookie=cookie,
         authorization=authorization,
         auth_mode=auth_mode,
-        referer=referer,
+        # 巨日禄按 Referer 判来源：留空时用页面 URL 兜底（原中控台同口径 app.py:18478）
+        referer=(referer or source_url),
         api_url_override=api_url_override,
     )
     shots = await load_chapter_shots(db, chapter_id)
