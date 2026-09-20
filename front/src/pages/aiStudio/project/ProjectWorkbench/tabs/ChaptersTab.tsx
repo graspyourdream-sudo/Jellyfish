@@ -21,6 +21,7 @@ import { getChapterPreparationState } from '../chapterPreparation'
 import { loadChapterFlowStats, type ChapterFlowStats } from '../projectFlowStats'
 import { executeTaskCancel } from '../../../components/taskActionHelpers'
 import { TASK_COPY } from '../../../components/taskCopy'
+import { nextChapterIndex } from '../../../chapter/chapterIndexing'
 import { useTaskPageContext } from '../../../components/taskPageContext'
 import { useTaskUiStore } from '../../../components/taskUiStore'
 import {
@@ -188,7 +189,8 @@ export function ChaptersTab() {
     }
     if (!projectId) return
     try {
-      const nextIndex = Math.max(0, ...chapters.map((c) => c.index)) + 1
+      // 序号口径统一走 nextChapterIndex：现有最大 index + 1（不是数量 + 1）
+      const nextIndex = nextChapterIndex(chapters.map((c) => c.index))
       const createdId = newId('c')
       const title = createTitle.trim()
       const rawText = createContent

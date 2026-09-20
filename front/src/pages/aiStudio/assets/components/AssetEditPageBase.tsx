@@ -268,9 +268,12 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       if (!supportsImageServiceAssetType(assetNavigateRelationType)) {
         throw new Error('出图服务只支持角色/场景/道具；演员/服装请用别的通道（本页已禁用该按钮）')
       }
-      const projectId = resolvedProjectId.trim()
+      // 优先用「本次动作显式选定的项目」，其次用页面解析出来的作用域。
+      // 为什么不能只读 state：用户在选择项目弹窗里选完立刻恢复出图时，React 的
+      // resolvedProjectId 可能还没重新渲染，读旧值会再次弹出选择框。
+      const projectId = (activeGenerateProjectIdRef.current || resolvedProjectId).trim()
       if (!projectId) {
-        throw new Error('缺少项目 ID：请从项目工作台进入本页，或先填写一次项目 ID')
+        throw new Error('缺少项目作用域：请从项目工作台进入本页，或先选择项目')
       }
       // 为什么改走 P3 直提端点：老的 `/studio/image-tasks/...` 只建一条 Celery 任务行，
       // 本机没有 broker/worker（且 DRY_RUN 下建行前就被守卫拦住），表现为"点了生成没反应"。
@@ -646,16 +649,19 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     onCancel: smartDetectTask ? () => void handleCancelSmartDetectTask() : null,
     onNavigate: () => onNavigate(location.pathname),
   })
-  const openPromptPreview = async (image: TImage) => {
-    // 缺项目作用域时，先让用户选项目；不要等提交后才抛「缺少项目 ID」。
+  const openPromptPreview = async (image: TImage, projectIdOverride?: string) => {
+    // 缺项目作用域时，先让用户选项目；选中后带着**显式 id** 回到这里继续，
+    // 不会因为 state 还没刷新而重复弹选择框。
     if (
       !requireProjectScope(
-        () => openPromptPreview(image),
+        (picked) => openPromptPreview(image, picked),
         '出图需要项目作用域：请先在弹窗里选择项目',
       )
     ) {
       return
     }
+    // 明确记住本次出图使用的项目：单张生成必须显式使用它。
+    activeGenerateProjectIdRef.current = (projectIdOverride || resolvedProjectId).trim()
     if (!assetId) return
 
     try {
@@ -1008,12 +1014,25 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   const [projectOptions, setProjectOptions] = useState<{ label: string; value: string }[]>([])
   const [projectOptionsLoading, setProjectOptionsLoading] = useState(false)
 
+  /**
+   * 拉取可选项目（**分页取全量**：后端单页上限 100，旧项目可能在第 2 页之后）。
+   * 只取第一页会让「比第一页更旧的项目」根本选不到。
+   */
   const loadProjectOptions = useCallback(async () => {
     setProjectOptionsLoading(true)
     try {
-      const res = await StudioProjectsService.listProjectsApiV1StudioProjectsGet({ page: 1, pageSize: 100 })
-      const items = res.data?.items ?? []
-      setProjectOptions(items.map((item) => ({ label: item.name, value: item.id })))
+      const options: { label: string; value: string }[] = []
+      let page = 1
+      let maxPage = 1
+      do {
+        const res = await StudioProjectsService.listProjectsApiV1StudioProjectsGet({ page, pageSize: 100 })
+        const items = res.data?.items ?? []
+        options.push(...items.map((item) => ({ label: item.name, value: item.id })))
+        const reported = res.data?.pagination?.max_page
+        maxPage = typeof reported === 'number' && reported > 0 ? reported : 1
+        page += 1
+      } while (page <= maxPage && options.length < 1000)
+      setProjectOptions(options)
     } catch {
       setProjectOptions([])
     } finally {
@@ -1025,8 +1044,17 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     if (projectIdModalOpen && projectOptions.length === 0) void loadProjectOptions()
   }, [projectIdModalOpen, loadProjectOptions, projectOptions.length])
 
-  /** 记住用户选的项目，选中后立刻继续原来的动作（出图 / 批量出图）。 */
+  /**
+   * 记住「是哪个动作触发了选项目」。
+   *
+   * 只有在用户从某个具体生成动作（单张生成 / 批量出图）触发时才会被赋值；
+   * 从页面顶部条主动选择项目时它是 null —— 那种情况下选中项目只应该
+   * 「设置作用域并让生成按钮可用」，**不允许顺手发起一次批量出图**。
+   */
   const pendingProjectActionRef = useRef<((projectId: string) => Promise<void> | void) | null>(null)
+
+  /** 本次单张生成显式使用的项目作用域（提交时优先读它）。 */
+  const activeGenerateProjectIdRef = useRef('')
 
   const handleConfirmProjectId = async () => {
     const next = projectIdDraft.trim()
@@ -1034,26 +1062,36 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       message.warning('请先选择项目')
       return
     }
+    // 同步更新：不依赖 React state 刷新，紧接着恢复的动作也能拿到正确的项目
+    activeGenerateProjectIdRef.current = next
     setManualProjectId(next)
     setProjectIdModalOpen(false)
+
     const action = pendingProjectActionRef.current
     pendingProjectActionRef.current = null
     if (action) {
+      // 从具体生成动作触发：只恢复那一个动作
       await action(next)
       return
     }
-    await runReferenceBatch(next)
+    message.success('已设置项目作用域，出图按钮现在可用')
   }
 
-  /** 缺项目作用域时统一入口：先让用户选项目，再继续原动作。 */
+  /**
+   * 缺项目作用域时的统一入口。
+   *
+   * `action` 是「选中项目后要继续的那个动作」，只会被恢复一次；
+   * 不传 action 表示用户只是要设置作用域（例如点页面顶部的「在这里选择项目」），
+   * 这种情况选中后不触发任何生成。
+   */
   const requireProjectScope = (
-    action: (projectId: string) => Promise<void> | void,
+    action: ((projectId: string) => Promise<void> | void) | null,
     reason: string,
   ): boolean => {
-    const current = resolvedProjectId.trim()
+    const current = (activeGenerateProjectIdRef.current || resolvedProjectId).trim()
     if (current) return true
     pendingProjectActionRef.current = action
-    setProjectIdDraft('')
+    setProjectIdDraft(activeGenerateProjectIdRef.current || '')
     setProjectIdModalOpen(true)
     message.warning(reason)
     return false
@@ -1282,9 +1320,8 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                           size="small"
                           className="!px-1"
                           onClick={() => {
-                            pendingProjectActionRef.current = null
-                            setProjectIdDraft('')
-                            setProjectIdModalOpen(true)
+                            // 只设置作用域，不发起任何生成
+                            requireProjectScope(null, '请选择项目以启用出图')
                           }}
                         >
                           在这里选择项目
@@ -1460,6 +1497,24 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
           </div>
         ) : (
           <div className="space-y-3">
+            {/*
+              确认弹窗必须写清「这一张会出到哪个项目 / 哪个资产」。
+              收口要求：从全局资产库选完项目再发起单张生成时，用户要能在**这里**
+              看到刚选中的项目作用域，而不是只靠页面顶部那行小字。
+            */}
+            <Alert
+              type={resolvedProjectId || activeGenerateProjectIdRef.current ? 'info' : 'warning'}
+              showIcon
+              message={
+                <span className="text-xs">
+                  出图目标：项目作用域{' '}
+                  <Typography.Text code>
+                    {activeGenerateProjectIdRef.current || resolvedProjectId || '（未设置，提交前必须先选择项目）'}
+                  </Typography.Text>
+                  {assetNavigateRelationType ? ` · 资产 ${assetNavigateRelationType} ${assetId ?? ''}` : ''}
+                </span>
+              }
+            />
             <div>
               <div className="text-xs text-gray-500 mb-2">关联图片（参考图）</div>
               {promptPreviewRefFileIds.length === 0 ? (

@@ -40,6 +40,7 @@ import {
   StudioQuickSkillService,
   StudioShotsService,
 } from '../../../services/generated'
+import { nextChapterIndex } from '../chapter/chapterIndexing'
 import type {
   JuriluPlanRowRead,
   JuriluPreviewRead,
@@ -277,6 +278,8 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
 
   /** 内联新建章节：本页要求在既有章节上写提示词，缺章节时必须能就地补出来，不能只给一句灰按钮。 */
   const [createChapterOpen, setCreateChapterOpen] = useState(false)
+  /** 章节原始行（含 index）：新建章节的序号要用 max(index)+1，不能只存 label/value。 */
+  const [chapterRows, setChapterRows] = useState<{ id: string; title: string; index: number }[]>([])
   const [createChapterTitle, setCreateChapterTitle] = useState('')
   const [createChapterText, setCreateChapterText] = useState('')
   const [creatingChapter, setCreatingChapter] = useState(false)
@@ -285,6 +288,7 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
     async (autoSelectId?: string) => {
       if (!projectId) {
         setChapters([])
+        setChapterRows([])
         return
       }
       const items = await loadAll(async (page, pageSize) => {
@@ -299,6 +303,13 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         }
       })
       const options = items.map((c) => ({ label: c.title || c.id, value: c.id }))
+      setChapterRows(
+        items.map((c) => ({
+          id: c.id,
+          title: c.title || c.id,
+          index: typeof c.index === 'number' && Number.isFinite(c.index) ? c.index : 0,
+        })),
+      )
       setChapters(options)
       if (autoSelectId && options.some((option) => option.value === autoSelectId)) {
         setChapterId(autoSelectId)
@@ -320,7 +331,8 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
     try {
       // id 是 ChapterCreate 的必填字段（与工作台建章节用的是同一套字段）
       const createdId = `c_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`
-      const nextIndex = chapters.length + 1
+      // 序号口径：现有章节最大 index + 1（不是章节数量 + 1）
+      const nextIndex = nextChapterIndex(chapterRows.map((row) => row.index))
       const created = await StudioChaptersService.createChapterApiV1StudioChaptersPost({
         requestBody: {
           id: createdId,
@@ -344,7 +356,7 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
     } finally {
       setCreatingChapter(false)
     }
-  }, [chapters.length, createChapterText, createChapterTitle, projectId, reloadChapters])
+  }, [chapterRows, createChapterText, createChapterTitle, projectId, reloadChapters])
 
   useEffect(() => {
     setChapterId(undefined)
