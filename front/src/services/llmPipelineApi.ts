@@ -1070,21 +1070,24 @@ export interface PromptBoardSaveResult {
 export function savePromptBoard(
   chapterId: string,
   body: {
-    entries: Array<{ shot_id: string; prompt: string; draft_token?: string }>
+    entries: Array<{ shot_id: string; prompt: string; draft_token?: string; script_id?: string }>
     mode: PromptBoardMode
     origin: PromptBoardOrigin
     selected_shot_ids?: string[]
     allow_partial?: boolean
     /**
-     * 巨日禄路径带上当前选中的脚本组。
+     * 巨日禄路径带上**当前选中的那一个**脚本组（**单数**）。
      *
-     * 口径：默认不跨 scriptId 合并 —— 保存的必须是用户**明确选过**的那一组。
-     * 服务端 `/jurilu-import/{pid}/apply` 对未选组的请求直接 400；
-     * 页面在点「确认保存」前也自己拦一道（`matchedScriptId` 为空就不发请求）。
-     * 本字段对当前 `/save` 端点是无害的附加信息（pydantic 默认忽略未知字段），
-     * 后端把闸门补到 `/save` 时不需要再改前端。
+     * 口径（2026-09-20 修正）：页面保存走的是本端点 `/prompt-board/{chapter_id}/save`，
+     * 后端在这里**正式**校验脚本组范围 ——
+     * - `origin=jurilu_import` 时缺 `script_id` / 格式不合法（像多个）/ 与条目不一致 → 400；
+     * - 用复数 `script_ids` 传参会被**明确拒绝**（400 `script_ids_deprecated`），
+     *   不是静默忽略 —— 静默忽略会让人误以为"后端已经按恰好一组校验过了"；
+     * - 其它来源（`manual` / `external_import` / `llm_draft`）不传即可，照常保存。
+     *
+     * 表单构造统一走 `buildPromptBoardSaveBody`（纯函数 + 单测），不要在页面里手拼请求体。
      */
-    script_ids?: string[]
+    script_id?: string
   },
 ): Promise<PromptBoardSaveResult> {
   return callApi(`/api/v1/studio/prompt-board/${encodeURIComponent(chapterId)}/save`, body as AnyRecord)

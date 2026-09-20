@@ -107,6 +107,7 @@ import {
   type DraftPhase,
   type ShotDraftStatus,
 } from './promptBoardDrafts'
+import { buildPromptBoardSaveBody, juriluScriptScopeError } from './promptBoardSaveBody'
 
 type RowStatus = 'ok' | 'draft' | 'dry_run' | 'failed' | 'interrupted' | 'busy' | 'skipped' | 'unmatched' | 'duplicate'
 
@@ -1347,6 +1348,18 @@ export function EpisodeVideoPromptBoard({
         message.error('巨日禄分镜必须先选择一组脚本组并点「用这一组匹配镜头」才能保存（默认不跨 scriptId 合并）')
         return
       }
+      // 脚本组范围自检（与后端同一句判定）：本批巨日禄条目必须**逐条**属于当前那一组。
+      // 后端 `/save` 会 400（那是最终保证）；这里先把"第几条不属于这一组"讲清楚再拦下。
+      const scopeError = juriluIncluded.length
+        ? juriluScriptScopeError(
+            juriluIncluded.map((row) => ({ shotId: row.shotId, prompt: row.prompt, scriptId: row.scriptId })),
+            matchedScriptId,
+          )
+        : null
+      if (scopeError) {
+        message.error(scopeError)
+        return
+      }
       const partialAllowed = opts.partialOverride ?? allowPartial
       if (countMismatch && !partialAllowed) {
         message.error('数量不一致：默认不允许保存，请先确认「仅保存已匹配项」')
@@ -1370,20 +1383,24 @@ export function EpisodeVideoPromptBoard({
       let cleared = 0
       const failures: string[] = []
       for (const [origin, groupRows] of groups) {
-        // eslint-disable-next-line no-await-in-loop
-        const result = await savePromptBoard(chapterId, {
-          entries: groupRows.map((row) => ({
-            shot_id: row.shotId,
-            prompt: row.prompt.trim(),
-            draft_token: origin === 'llm_draft' ? row.draftToken : undefined,
+        // 请求体统一由纯函数构造（单测钉住形状）：巨日禄只出现**单数** script_id，
+        // 且每条 entry 带上同一个脚本组；其它来源两个字段都不出现。
+        // 注意：这里**绝不**传复数 script_ids —— 后端收到它会明确 400（不是静默忽略）。
+        const body = buildPromptBoardSaveBody({
+          rows: groupRows.map((row) => ({
+            shotId: row.shotId,
+            prompt: row.prompt,
+            scriptId: row.scriptId,
+            draftToken: row.draftToken,
           })),
           mode,
           origin,
-          selected_shot_ids: selectedShotIds,
-          allow_partial: countMismatch ? partialAllowed : true,
-          // 巨日禄路径带上**当前选中的那一个脚本组**（整组保存；后端会拒绝未选/多选）
-          script_ids: origin === 'jurilu_import' && matchedScriptId ? [matchedScriptId] : undefined,
+          matchedScriptId,
+          selectedShotIds,
+          allowPartial: countMismatch ? partialAllowed : true,
         })
+        // eslint-disable-next-line no-await-in-loop
+        const result = await savePromptBoard(chapterId, body)
         applied += result.applied_count ?? 0
         cleared += result.cleared_draft_count ?? 0
         for (const item of result.results ?? []) {

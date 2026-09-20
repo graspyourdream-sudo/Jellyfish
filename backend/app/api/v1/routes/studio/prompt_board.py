@@ -10,7 +10,9 @@
   失败项单独重试。
 - ``POST /{chapter_id}/import-parse`` 解析 + 匹配（**不落库**，返回逐条匹配状态与冲突）
 - ``POST /{chapter_id}/save``   确认后批量保存（覆盖模式三选一，默认只补空白）；
-  **只有它**会写正式列 ``shot_details.video_prompt``，成功后清掉被写入镜头的草稿
+  **只有它**会写正式列 ``shot_details.video_prompt``，成功后清掉被写入镜头的草稿。
+  ``origin=jurilu_import`` 时强制**单数** ``script_id``（恰好一个脚本组，逐条一致），
+  校验发生在**任何数据库写入之前**，见 ``_validate_jurilu_script_scope``
 
 草稿持久化（修「整集视频提示词草稿丢失」，2026-09-19）——四个端点，全部只碰草稿表：
 - ``GET    /{chapter_id}/drafts``          逐镜草稿状态（刷新/中断后恢复队列）
@@ -21,9 +23,11 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,17 +41,41 @@ router = APIRouter()
 
 _BLOCKED = (dry_run.DryRunBlocked, dry_run.RealCallNotConfirmed)
 
+#: 巨日禄脚本组 ID 的**写死**格式口径：只允许 ``[A-Za-z0-9_-]``，长度 1–64。
+#: 逗号 / 分号 / 空格 / 方括号 / 引号 等任何其它字符一律拒绝 —— 它们正是
+#: "把多个 scriptId 塞进一个字段"（``"2933350,2933351"`` / ``'["2933350"]'``）的形态。
+_SCRIPT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+#: 格式口径的中文说明（错误响应里逐字给出，前端可直接展示）
+_SCRIPT_ID_RULE = "只允许 [A-Za-z0-9_-]、长度 1–64 的**单个**脚本组 ID"
+
+
+def _error_envelope(*, message: str, error_code: str, extra: dict[str, Any] | None = None) -> JSONResponse:
+    """400 统一信封（``ApiResponse`` + ``meta.error``，与同项目其它 400 同一姿势）。
+
+    ``message`` 只讲"用户该怎么做"；结构化原因放 ``meta.error``。
+    **不含任何凭证**：这里出现的 id 只有调用方自己传进来的脚本组 ID 与镜头位置。
+    """
+    error: dict[str, Any] = {"code": error_code, "message": message}
+    if extra:
+        error.update(extra)
+    body = ApiResponse[None](code=400, message=message, data=None, meta={"error": error}).model_dump()
+    return JSONResponse(status_code=400, content=body)
+
 
 class BoardEntryWrite(BaseModel):
     """一条要写入镜头的提示词。
 
     **不接受调用方指定 source**：来源由请求级 ``origin``（流程）决定，见 `ORIGIN_TO_SOURCE`。
     ``draft_token`` 仅在 ``origin=llm_draft`` 时需要，必须是后端签发的草稿令牌。
+    ``script_id`` 是这一条属于哪个巨日禄脚本组：只有 ``origin=jurilu_import`` 时参与校验
+    （必须与请求级 ``script_id`` **逐条一致**），其它来源不传即可。
     """
 
     shot_id: str = Field(..., min_length=1)
     prompt: str = Field(..., min_length=1)
     draft_token: str = Field("", description="大模型草稿令牌（origin=llm_draft 时必填）")
+    script_id: str = Field("", description="本条所属的巨日禄脚本组 ID（origin=jurilu_import 时必填且逐条一致）")
 
 
 class BoardDraftRequest(BaseModel):
@@ -123,6 +151,96 @@ class BoardSaveRequest(BaseModel):
             "用户在预览页显式切换为「仅保存已匹配项」后前端才传 true。"
         ),
     )
+    script_id: str = Field("", description="巨日禄脚本组 ID（**单数**；origin=jurilu_import 时必填）")
+    script_ids: Any = Field(None, description="已废弃的复数写法：传它一律 400，请改用单数 script_id")
+
+
+def _validate_jurilu_script_scope(body: BoardSaveRequest) -> JSONResponse | None:
+    """``/save`` 的**前置**校验：巨日禄导入必须"恰好一个脚本组"，否则整批 400。
+
+    为什么必须在路由里做（而不是只靠 ``/jurilu-import/{pid}/apply``）：
+    页面最终保存走的就是这个端点，它会**先**于任何服务层逻辑被执行；把闸门放在这里，
+    才不存在"某个保存入口没有被校验"的缺口。函数是纯函数（不碰 db、不调 svc），可直接单测。
+
+    规则（写死口径）：
+    1. ``script_ids``（复数，已废弃）只要不是 ``None`` → 400，**所有 origin 都拒绝**。
+       为什么连非巨日禄来源也拒：静默忽略会让前端以为"后端已经按恰好一组校验过了"，
+       正是这次要堵的那个错觉。
+    2. ``origin=jurilu_import`` 时继续校验：
+       - 请求级 ``script_id`` 去空白后为空 → 400（缺脚本组 ID 时服务端无法保证不跨组混写）；
+       - 格式不合法 / 像多个 → 400（``_SCRIPT_ID_PATTERN`` 之外的一律拒）；
+       - ``entries`` **每一条**的 ``script_id`` 都必须等于请求级 ``script_id``：
+         为空 → 400；不一致 → 400 并在 message 里写清是第几条与两边的 id。
+    3. 其它 origin（llm_draft / external_import / manual）**一律不受影响**，不传 ``script_id`` 照常保存。
+
+    返回 ``None`` 表示通过；返回 ``JSONResponse`` 即 400（调用方直接 return，不写库）。
+    """
+    # ① 复数写法：明确拒绝，不静默忽略（避免"以为后端校验过了"）
+    if body.script_ids is not None:
+        return _error_envelope(
+            error_code="script_ids_deprecated",
+            message=(
+                "请求体里的 script_ids（复数）已废弃：请改用**单数** script_id；"
+                "服务端按「恰好一个脚本组」校验，复数写法一律拒绝（本次未写入任何数据）。"
+            ),
+            extra={"deprecated_field": "script_ids", "use_instead": "script_id"},
+        )
+
+    # ② 只有巨日禄导入这条路强制脚本组范围；其它来源照旧
+    if body.origin != "jurilu_import":
+        return None
+
+    script_id = str(body.script_id or "").strip()
+    if not script_id:
+        return _error_envelope(
+            error_code="missing_script_id",
+            message=(
+                "巨日禄导入必须带 script_id（单数）：缺少脚本组 ID 时服务端无法保证不跨组混写；"
+                "本次未写入任何数据。"
+            ),
+        )
+    if not _SCRIPT_ID_PATTERN.match(script_id):
+        seen = script_id if len(script_id) <= 80 else f"{script_id[:80]}…（共 {len(script_id)} 字符）"
+        return _error_envelope(
+            error_code="invalid_script_id",
+            message=(
+                f"script_id 格式不合法：{_SCRIPT_ID_RULE}；"
+                "看起来像多个脚本组（含逗号/分号/空格/括号/引号等）时请先选定一个组再保存。"
+                "本次未写入任何数据。"
+            ),
+            extra={"received_script_id": seen, "rule": _SCRIPT_ID_RULE},
+        )
+
+    for position, entry in enumerate(body.entries or [], start=1):
+        entry_script_id = str(getattr(entry, "script_id", "") or "").strip()
+        if entry_script_id == script_id:
+            continue
+        if not entry_script_id:
+            problem = {
+                "code": "entry_missing_script_id",
+                "message": (
+                    f"第 {position} 条缺 script_id：无法证明这一条属于所选的脚本组 {script_id}；"
+                    "本次未写入任何数据。"
+                ),
+                "extra": {"position": position, "script_id": script_id},
+            }
+        else:
+            problem = {
+                "code": "entry_script_mismatch",
+                "message": (
+                    f"第 {position} 条属于脚本组 {entry_script_id}，与本次请求的脚本组 {script_id} 不一致："
+                    "默认不跨脚本组混写；本次未写入任何数据。"
+                ),
+                "extra": {
+                    "position": position,
+                    "entry_script_id": entry_script_id,
+                    "script_id": script_id,
+                },
+            }
+        return _error_envelope(
+            error_code=problem["code"], message=problem["message"], extra=problem["extra"]
+        )
+    return None
 
 
 @router.get("/{chapter_id}", response_model=ApiResponse[dict[str, Any]], summary="集级提示词看板（只读）")
@@ -272,6 +390,11 @@ async def parse_board_import(chapter_id: str, body: BoardImportParseRequest, db:
 
 @router.post("/{chapter_id}/save", response_model=ApiResponse[dict[str, Any]], summary="确认后批量保存（覆盖模式三选一）")
 async def save_board(chapter_id: str, body: BoardSaveRequest, db: AsyncSession = Depends(get_db)) -> Any:
+    # **第一行**：任何 DB 访问、任何 ``svc.`` 调用之前先把巨日禄脚本组范围校验掉。
+    # 校验不通过就整批拒绝 —— 一个字节都不写（也不会"写一半才发现跨组"）。
+    rejected = _validate_jurilu_script_scope(body)
+    if rejected is not None:
+        return rejected
     data = await svc.save_entries(
         db,
         chapter_id=chapter_id,
@@ -281,4 +404,7 @@ async def save_board(chapter_id: str, body: BoardSaveRequest, db: AsyncSession =
         selected_shot_ids=body.selected_shot_ids,
         allow_partial=body.allow_partial,
     )
+    # 审计回显：本次是按**哪一个**脚本组保存的（其它来源回显空串）
+    if isinstance(data, dict):
+        data["script_id"] = str(body.script_id or "").strip()
     return success_response(data)
