@@ -41,6 +41,12 @@ import {
   StudioShotsService,
 } from '../../../services/generated'
 import { nextChapterIndex } from '../chapter/chapterIndexing'
+import {
+  deleteShotDrafts,
+  fetchPromptBoardDrafts,
+  saveShotDraft,
+  type PromptBoardDraft,
+} from '../../../services/llmPipelineApi'
 import type {
   JuriluPlanRowRead,
   JuriluPreviewRead,
@@ -1208,6 +1214,21 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
   const [saving, setSaving] = useState(false)
   const [downloading, setDownloading] = useState(false)
 
+  /**
+   * 服务端草稿（修「一键技能生成后只在浏览器内存里」）。
+   *
+   * 这里生成的是**真实付费**的文字模型产出，此前刷新/切标签页就没了。
+   * 现在：生成成功且已选镜头 → 立刻 `POST /drafts` 暂存服务端（source=skill，**不写正式列**）；
+   * 换镜头/重进页面 → `GET /drafts` 自动恢复"上次生成到哪了"；
+   * 只有点「写入镜头」确认后，才清掉对应草稿（草稿使命完成）。
+   */
+  const [draftInfo, setDraftInfo] = useState<PromptBoardDraft | null>(null)
+  /** 本次会话是否已经把这份草稿写进正式列（页面据此区分"草稿 vs 已保存"） */
+  const [writtenToShot, setWrittenToShot] = useState(false)
+  const [draftBusy, setDraftBusy] = useState(false)
+  /** 自动恢复只在"输入框还是空的"时做，绝不能覆盖用户正在编辑的正文 */
+  const promptDraftRef = React.useRef('')
+
   useEffect(() => {
     void (async () => {
       try {
@@ -1279,6 +1300,98 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
     })()
   }, [chapterId])
 
+  /** 输入框正文镜像：自动恢复时用它判断"用户是不是已经在编辑了"。 */
+  useEffect(() => {
+    promptDraftRef.current = promptDraft
+  }, [promptDraft])
+
+  /** 读这一镜的服务端草稿（只读、不花钱）；读不到返回 null，不影响生成。 */
+  const loadShotDraft = useCallback(
+    async (chapter: string, shot: string): Promise<PromptBoardDraft | null> => {
+      const state = await fetchPromptBoardDrafts(chapter)
+      return (state.shots ?? []).find((item) => String(item.shot_id) === String(shot)) ?? null
+    },
+    [],
+  )
+
+  /**
+   * 换镜头 / 重进页面时恢复草稿。
+   *
+   * 自动恢复只在**输入框为空**时发生：用户在编辑的正文一旦被覆盖，
+   * 就变成"修一个丢数据的问题、引入另一个丢数据的问题"了。
+   */
+  useEffect(() => {
+    let cancelled = false
+    if (!chapterId || !shotId) {
+      setDraftInfo(null)
+      setWrittenToShot(false)
+      return () => {
+        cancelled = true
+      }
+    }
+    void (async () => {
+      try {
+        const found = await loadShotDraft(chapterId, shotId)
+        if (cancelled) return
+        setDraftInfo(found)
+        setWrittenToShot(false)
+        const body = String(found?.prompt ?? '').trim()
+        if (body && !promptDraftRef.current.trim()) {
+          setPromptDraft(found?.prompt ?? '')
+          message.info(`已恢复该镜头上次生成的服务端草稿（${body.length} 字，刷新/中断都不丢）`, 5)
+        } else if (body) {
+          message.warning('该镜头在服务端还有一份草稿：点「恢复该镜草稿」可载入（不会覆盖你正在编辑的正文）', 6)
+        }
+      } catch {
+        if (!cancelled) setDraftInfo(null)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [chapterId, loadShotDraft, shotId])
+
+  /** 把当前正文暂存到服务端草稿（幂等 upsert；**绝不写正式列**）。 */
+  const persistDraft = async (prompt: string, model = ''): Promise<PromptBoardDraft | null> => {
+    if (!chapterId || !shotId || !prompt.trim()) return null
+    const saved = await saveShotDraft(chapterId, {
+      shot_id: shotId,
+      status: 'ok',
+      prompt,
+      source: 'skill',
+      // 模型名要由调用方显式传进来：setResult 是异步的，读 result 会拿到上一次的值
+      model: model || result?.model_used || '',
+    })
+    const draft = saved.draft ?? null
+    setDraftInfo(draft)
+    return draft
+  }
+
+  const handleRestoreDraft = () => {
+    if (!draftInfo?.prompt?.trim()) {
+      message.warning('这一镜在服务端没有草稿')
+      return
+    }
+    setPromptDraft(draftInfo.prompt)
+    message.success('已载入该镜头的服务端草稿（还没有写入正式列）')
+  }
+
+  const handleStashDraft = async () => {
+    if (!promptDraft.trim()) {
+      message.warning('提示词为空，没什么可暂存')
+      return
+    }
+    setDraftBusy(true)
+    try {
+      await persistDraft(promptDraft)
+      message.success('已暂存到服务端草稿（刷新/中断都不丢；正式列仍未被修改）')
+    } catch (error) {
+      message.error(`暂存失败：${describeError(error)}`, 8)
+    } finally {
+      setDraftBusy(false)
+    }
+  }
+
   const selectedSkill = skills.find((s) => s.skill_id === skillId)
   const canGenerate = Boolean(skillId && request.trim())
 
@@ -1325,7 +1438,23 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
       setResult(data)
       setPromptDraft(data?.prompt ?? '')
       setContextText(data?.context ?? '')
-      message.success(`生成完成（模型：${data?.model_used || '默认文字模型'}）`)
+      const body = String(data?.prompt ?? '')
+      if (!chapterId || !shotId) {
+        // 没有镜头就无处可放草稿：必须说清楚，别让用户以为已经存好了
+        message.warning(
+          `生成完成（模型：${data?.model_used || '默认文字模型'}）。未选镜头：这次结果只在本页内存里，刷新会丢 —— 选中镜头后生成会自动暂存到服务端。`,
+          8,
+        )
+        return
+      }
+      try {
+        // 生成成功立刻落服务端草稿（不写正式列）：这是"刷新不丢"的关键一步
+        await persistDraft(body, data?.model_used ?? '')
+        setWrittenToShot(false)
+        message.success(`生成完成（模型：${data?.model_used || '默认文字模型'}）· 草稿已暂存服务端（未写正式列）`)
+      } catch (error) {
+        message.warning(`生成完成，但草稿暂存服务端失败（刷新会丢）：${describeError(error)}`, 10)
+      }
     } catch (error) {
       message.error(describeError(error), 10)
     } finally {
@@ -1418,6 +1547,19 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
       const data = res.data
       if (data?.saved) {
         message.success('已写入镜头视频提示词（来源标记 skill）')
+        setWrittenToShot(true)
+        // **只有确认写入正式列之后**才清对应草稿：草稿的使命到此结束
+        if (chapterId) {
+          try {
+            const cleared = await deleteShotDrafts(chapterId, [shotId])
+            setDraftInfo(null)
+            if (cleared.cleared) {
+              message.info(`已清掉该镜头 ${cleared.cleared} 份服务端草稿（已保存的正式提示词不受影响）`)
+            }
+          } catch {
+            // 清理失败不影响写入结果：草稿还留着，下次进来最多是"多恢复一次"
+          }
+        }
       } else {
         message.warning(data?.message || '未写入', 8)
       }
@@ -1548,7 +1690,33 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
             模型：{result.model_used || '默认文字模型'} · 结果 {promptDraft.length} 字
           </Text>
         )}
+        {/* 草稿 vs 已保存：两件事分开显示，不让人误以为"生成了就等于写进镜头了" */}
+        {writtenToShot ? (
+          <Tag color="green" data-testid="quick-skill-written">已写入镜头（正式列）</Tag>
+        ) : draftInfo?.has_draft ? (
+          <Tag color="blue" data-testid="quick-skill-draft">服务端草稿（未保存到镜头）</Tag>
+        ) : promptDraft ? (
+          <Tag color="orange" data-testid="quick-skill-draft">仅本页内存（未暂存服务端）</Tag>
+        ) : null}
       </Space>
+
+      {shotId && draftInfo?.has_draft && draftInfo.prompt.trim() !== promptDraft.trim() ? (
+        <Alert
+          type="info"
+          showIcon
+          message="这一镜在服务端还有一份草稿"
+          description={
+            <Space wrap>
+              <Text type="secondary">
+                {`${draftInfo.prompt.trim().length} 字 · 更新于 ${draftInfo.updated_at ? new Date(draftInfo.updated_at).toLocaleString('zh-CN') : '未知'}`}
+              </Text>
+              <Button size="small" icon={<ReloadOutlined />} onClick={handleRestoreDraft}>
+                恢复该镜草稿（覆盖当前输入框）
+              </Button>
+            </Space>
+          }
+        />
+      ) : null}
 
       {result?.warnings && result.warnings.length > 0 && (
         <Alert
@@ -1588,7 +1756,15 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
               disabled={!shotId}
               onClick={() => void handleSaveToShot()}
             >
-              写入镜头
+              写入镜头（写正式列）
+            </Button>
+            <Button
+              loading={draftBusy}
+              disabled={!shotId || !promptDraft.trim()}
+              data-testid="quick-skill-stash-draft"
+              onClick={() => void handleStashDraft()}
+            >
+              暂存到服务端草稿
             </Button>
             <Space>
               <span>镜头已有提示词时</span>
@@ -1603,7 +1779,7 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
                 ]}
               />
             </Space>
-            {!shotId && <Text type="secondary">选中镜头后才能写回</Text>}
+            {!shotId && <Text type="secondary">选中镜头后才能写回；没选镜头时生成结果不会暂存服务端（刷新会丢）</Text>}
           </Space>
         </>
       ) : (

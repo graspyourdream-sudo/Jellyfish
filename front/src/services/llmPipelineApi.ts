@@ -62,6 +62,34 @@ async function callApi<T = AnyRecord>(path: string, body?: AnyRecord): Promise<T
   return (payload?.data ?? null) as T
 }
 
+/**
+ * DELETE 版本（草稿清理等端点用；POST 版本见 callApi）。
+ *
+ * 单独写一个而不是给 callApi 加 method 参数：callApi 的"body 有无决定 GET/POST"
+ * 已被十多个调用点依赖，改它等于同时动到所有既有端点。
+ */
+async function callApiDelete<T = AnyRecord>(path: string): Promise<T> {
+  const response = await fetch(`${OpenAPI.BASE}${path}`, { method: 'DELETE' })
+  const text = await response.text()
+  let payload: AnyRecord | undefined
+  try {
+    payload = text ? (JSON.parse(text) as AnyRecord) : undefined
+  } catch {
+    payload = undefined
+  }
+  if (!response.ok) {
+    const meta = (payload?.meta ?? {}) as AnyRecord
+    const error = (meta.error ?? {}) as AnyRecord
+    const detail = payload?.detail
+    const suffix = detail ? `（${typeof detail === 'string' ? detail : JSON.stringify(detail)}）` : ''
+    throw new GenerationRequestError(
+      String(error.message ?? payload?.message ?? text ?? `HTTP ${response.status}`) + suffix,
+      response.status,
+    )
+  }
+  return (payload?.data ?? null) as T
+}
+
 /** PATCH 版本（保存类端点用；POST 版本见 callApi）。 */
 async function callApiPatch<T = AnyRecord>(path: string, body: AnyRecord): Promise<T> {
   const response = await fetch(`${OpenAPI.BASE}${path}`, {
@@ -840,20 +868,161 @@ export function fetchBoardReadiness(
 export interface PromptDraftResult {
   shot_id: string
   code?: string
-  status: 'draft' | 'dry_run' | 'failed' | 'skipped' | 'error'
+  /** busy = 该镜已有进行中的生成（服务端租约未过期），**未发起付费调用** */
+  status: 'draft' | 'dry_run' | 'failed' | 'skipped' | 'error' | 'busy'
   prompt?: string
   draft_token?: string
   reason?: string
   latency_ms?: number
   warnings?: string[]
+  /**
+   * 草稿是否已落到**服务端**（`shot_video_prompt_drafts`）。
+   * 只有 `status="draft"`（真实生成成功）才会是 true —— 演练 / 失败 / 跳过都没有正文可存。
+   */
+  persisted?: boolean
+  /** 生成结束时该镜的服务端草稿状态（与 GET /drafts 的单项同形状） */
+  draft?: PromptBoardDraft | null
+  claim_expires_at?: string | null
 }
 
-/** 单镜生成草稿（真 LLM，不落库）：页面据此逐镜排队，可随时停止。 */
+/**
+ * 单镜生成草稿（真 LLM，只在草稿表落库、**不写正式提示词列**）。
+ *
+ * `claim_token` 是页面先调 `/drafts/claim` 占到的租约令牌：带上它服务端认出是自己的租约
+ * 并直接续租，避免"页面刚占位又被服务端自己判成 busy"。
+ */
 export function draftVideoPrompt(
   chapterId: string,
-  body: { shot_id: string; mode?: PromptBoardMode },
+  body: { shot_id: string; mode?: PromptBoardMode; claim_token?: string },
 ): Promise<PromptDraftResult> {
   return callApi(`/api/v1/studio/prompt-board/${encodeURIComponent(chapterId)}/draft`, body as AnyRecord)
+}
+
+/* ------------------ 服务端草稿（刷新/中断不丢；绝不写正式提示词列） ------------------ */
+
+/** 逐镜草稿状态：`pending`（未开始，服务端不落行）/ `running` / `ok` / `failed`。 */
+export type PromptBoardDraftStatus = 'pending' | 'running' | 'ok' | 'failed'
+
+export interface PromptBoardDraft {
+  shot_id: string
+  code: string
+  index: number
+  title: string
+  /** 读层状态：没有草稿行=pending；running 但租约失效=pending 且 interrupted=true */
+  status: PromptBoardDraftStatus
+  /** 库里存的原始状态（pending 时为空串 = 服务端没有这一行） */
+  stored_status: string
+  /** 上次生成被中断（进程被杀 / 页面关掉），租约已过期 → 可重试 */
+  interrupted: boolean
+  has_draft: boolean
+  prompt: string
+  source: string
+  error: string
+  model: string
+  meta: AnyRecord
+  /** 服务端签发的大模型草稿令牌；**只有服务端真实生成的正文才有** */
+  draft_token: string
+  /** 能否按 `llm_draft` 保存（= 有没有令牌） */
+  saveable: boolean
+  claim_expires_at: string | null
+  updated_at: string | null
+}
+
+export interface PromptBoardDraftState {
+  chapter_id: string
+  shots: PromptBoardDraft[]
+  summary: { total: number; ok?: number; failed?: number; running?: number; pending?: number }
+  note?: string
+}
+
+/** 逐镜草稿状态（只读、不触网）：刷新/重新进页面时用它恢复队列。 */
+export function fetchPromptBoardDrafts(chapterId: string): Promise<PromptBoardDraftState> {
+  return callApi(`/api/v1/studio/prompt-board/${encodeURIComponent(chapterId)}/drafts`)
+}
+
+export interface PromptBoardDraftSaveResult {
+  chapter_id: string
+  created: boolean
+  draft: PromptBoardDraft | null
+  error?: string
+  note?: string
+}
+
+/**
+ * 保存**一镜**草稿（幂等 upsert；只碰草稿表，**不写正式列**）。
+ *
+ * `status="failed"` 且不带 `prompt` 时**保留**原有正文 —— 重试失败不会抹掉上一版真金白银的结果。
+ */
+export function saveShotDraft(
+  chapterId: string,
+  body: {
+    shot_id: string
+    status: 'ok' | 'failed'
+    prompt?: string
+    error?: string
+    source?: string
+    model?: string
+    meta?: AnyRecord
+    claim_token?: string
+  },
+): Promise<PromptBoardDraftSaveResult> {
+  return callApi(`/api/v1/studio/prompt-board/${encodeURIComponent(chapterId)}/drafts`, body as AnyRecord)
+}
+
+export interface PromptBoardDraftDeleteResult {
+  chapter_id: string
+  cleared: number
+  shot_ids: string[]
+}
+
+/** 清草稿（`shot_ids` 为空 = 清整集）。正式列一个字节都不动。 */
+export function deleteShotDrafts(chapterId: string, shotIds: string[] = []): Promise<PromptBoardDraftDeleteResult> {
+  const ids = shotIds.filter(Boolean)
+  const query = ids.length ? `?shot_ids=${encodeURIComponent(ids.join(','))}` : ''
+  return callApiDelete(`/api/v1/studio/prompt-board/${encodeURIComponent(chapterId)}/drafts${query}`)
+}
+
+export interface PromptBoardClaimResult {
+  chapter_id: string
+  shot_id: string
+  code: string
+  /** false = 该镜正在生成中（或刚被别人抢到）→ 页面**不要**发起付费调用 */
+  claimed: boolean
+  claim_token: string
+  lease_seconds?: number
+  claim_expires_at?: string | null
+  reason: string
+  blocking_status?: string
+  draft?: PromptBoardDraft | null
+}
+
+/** 抢占一镜「生成中」租约（服务端闸门：同一镜在租约内只能有一次生成）。 */
+export function claimShotDraft(
+  chapterId: string,
+  body: { shot_id: string; lease_seconds?: number; claim_token?: string },
+): Promise<PromptBoardClaimResult> {
+  return callApi(`/api/v1/studio/prompt-board/${encodeURIComponent(chapterId)}/drafts/claim`, body as AnyRecord)
+}
+
+export interface PromptBoardReleaseResult {
+  chapter_id: string
+  shot_id: string
+  code: string
+  released: boolean
+  reason: string
+  draft?: PromptBoardDraft | null
+}
+
+/**
+ * 释放租约（不生成这一镜时用）。
+ *
+ * `error` 留空 = 只放锁、**不动正文也不改状态**：请求被中断时不该把已生成的草稿误标成失败。
+ */
+export function releaseShotDraft(
+  chapterId: string,
+  body: { shot_id: string; claim_token?: string; error?: string },
+): Promise<PromptBoardReleaseResult> {
+  return callApi(`/api/v1/studio/prompt-board/${encodeURIComponent(chapterId)}/drafts/release`, body as AnyRecord)
 }
 
 export interface PromptImportEntry {
@@ -886,6 +1055,8 @@ export interface PromptBoardSaveResult {
   results: Array<{ shot_id: string; code?: string; applied: boolean; reason: string }>
   error?: string
   source?: string
+  /** 保存成功后服务端**自动清掉的草稿数**（草稿使命已完成，留着会让页面显示"还有未保存草稿"） */
+  cleared_draft_count?: number
 }
 
 /**

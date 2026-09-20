@@ -9,8 +9,16 @@
  * 关键设计（都有对应的后端约束兜住）：
  * - 逐镜队列：一次只请求一镜（`/prompt-board/{cid}/draft`），点「停止」就不再发下一镜，
  *   已完成草稿保留，失败项可单独重试 —— 不做异步任务系统。
- * - 来源由流程决定：大模型草稿=llm（必须带服务端 HMAC 签名令牌）、巨日禄=jurilu、
- *   其它外部导入=external_import、工作台人工修改=manual；本页只按流程分组，不自由指定 source。
+ * - **草稿落服务端**（2026-09-19 修「整集提示词草稿丢失」）：进页面先 `GET /drafts` 把
+ *   上次生成到哪一步恢复到表里；每镜生成结束服务端已经存好了，刷新/关页面/中断都不再丢。
+ * - **只重试失败/缺失**：`retryTargets()` 只挑 `failed / 已中断 / 未开始`，
+ *   已完成（有草稿）与生成中的**绝不重发**（钱的问题，纯逻辑在 `promptBoardDrafts.ts`，有测试）。
+ * - **防重复付费是服务端保证**：发起前先 `POST /drafts/claim` 占租约，抢不到就跳过并给中文提示
+ *   （按钮 disabled 只是 UI，真正的闸门在服务端；租约过期后可继续，中断不会永久锁死）。
+ * - **只有「确认保存」写正式列**：草稿永远不自动写 `shot_details.video_prompt`；
+ *   保存成功后服务端才会清掉对应草稿（响应里的 `cleared_draft_count`）。
+ * - 来源由流程决定：大模型草稿=llm（必须带服务端 HMAC 签名令牌，**没有令牌就只能按人工内容保存**）、
+ *   巨日禄=jurilu、其它外部导入=external_import、工作台人工修改=manual；本页只按流程分组。
  * - 演练草稿（`status=dry_run`）在表里明确标注且**不可保存**。
  * - 数量不一致 / 编号重复 / 无法匹配 → 默认阻止保存，必须显式打开「仅保存已匹配项」。
  * - 页面上**不显示"已确认数量"**（系统当前没有可靠的确认状态）。
@@ -25,6 +33,7 @@ import {
   Drawer,
   Empty,
   Input,
+  Popconfirm,
   Radio,
   Select,
   Space,
@@ -35,21 +44,49 @@ import {
   Upload,
   message,
 } from 'antd'
-import { ImportOutlined, ReloadOutlined, StopOutlined, ThunderboltOutlined } from '@ant-design/icons'
+import { DeleteOutlined, ImportOutlined, ReloadOutlined, StopOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import {
+  claimShotDraft,
+  deleteShotDrafts,
   draftVideoPrompt,
   fetchPromptBoard,
+  fetchPromptBoardDrafts,
   parsePromptImport,
   previewJuriluImport,
+  releaseShotDraft,
   savePromptBoard,
+  saveShotDraft,
+  type PromptBoardDraft,
+  type PromptBoardDraftState,
   type PromptBoardMode,
   type PromptBoardOrigin,
-  type PromptBoardShot,  extractJuriluDiagnostics,
+  type PromptBoardShot,
+  extractJuriluDiagnostics,
 } from '../../../../../services/llmPipelineApi'
 import { StudioShotsService } from '../../../../../services/generated'
 import { classifyGenerationFailure, failureText } from '../../../components/generationGate'
+import {
+  PHASE_META,
+  SAVED_META,
+  buildShotDraftStatuses,
+  draftRestoreNotice,
+  formatBusyNotice,
+  hadDraftRow,
+  includedShotConflicts,
+  needsGeneration,
+  orphanPlaceholderShotIds,
+  resolveSaveOrigin,
+  restorePlanFor,
+  restoredRowsFromDrafts,
+  retryTargets,
+  selectGenerationTargets,
+  shouldDropClaimPlaceholder,
+  sourceLabel,
+  type DraftPhase,
+  type ShotDraftStatus,
+} from './promptBoardDrafts'
 
-type RowStatus = 'ok' | 'draft' | 'dry_run' | 'failed' | 'skipped' | 'unmatched' | 'duplicate'
+type RowStatus = 'ok' | 'draft' | 'dry_run' | 'failed' | 'interrupted' | 'busy' | 'skipped' | 'unmatched' | 'duplicate'
 
 type PreviewRow = {
   key: string
@@ -59,7 +96,7 @@ type PreviewRow = {
   shotText: string
   prompt: string
   origin: PromptBoardOrigin
-  /** 匹配方式：number（编号）/ order（顺序）/ manual（人工调整）/ cookie（巨日禄编号） */
+  /** 匹配方式：number（编号）/ order（顺序）/ manual（人工调整）/ cookie（巨日禄编号）/ restore（服务端草稿恢复） */
   matchBy: string
   status: RowStatus
   message: string
@@ -68,6 +105,10 @@ type PreviewRow = {
   edited: boolean
   include: boolean
   regenerating?: boolean
+  /** 服务端草稿阶段（恢复来的行才有；用于状态提示） */
+  phase?: DraftPhase
+  /** 正文能不能按大模型草稿保存（没有服务端令牌就不行） */
+  saveable?: boolean
 }
 
 const ORIGIN_META: Record<PromptBoardOrigin, { label: string; color: string }> = {
@@ -82,9 +123,22 @@ const STATUS_META: Record<RowStatus, { label: string; color: string }> = {
   draft: { label: '草稿（未保存）', color: 'blue' },
   dry_run: { label: '演练草稿（不可保存）', color: 'gold' },
   failed: { label: '失败', color: 'red' },
+  interrupted: { label: '已中断（可重试）', color: 'orange' },
+  busy: { label: '正在生成中（已跳过）', color: 'orange' },
   skipped: { label: '已跳过', color: 'default' },
   unmatched: { label: '无法匹配', color: 'red' },
   duplicate: { label: '编号重复', color: 'red' },
+}
+
+/** 单镜生成的结果（页面内部口径；不直接等于后端返回，已归一）。 */
+type GenerateOutcome = {
+  shotId: string
+  code: string
+  status: 'draft' | 'dry_run' | 'failed' | 'skipped' | 'busy' | 'error'
+  prompt: string
+  draftToken: string
+  message: string
+  persisted: boolean
 }
 
 type EpisodeVideoPromptBoardProps = {
@@ -120,7 +174,16 @@ export function EpisodeVideoPromptBoard({
   const [countMismatch, setCountMismatch] = useState(false)
   const [running, setRunning] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [purging, setPurging] = useState(false)
   const stopRef = useRef(false)
+
+  // 服务端草稿（刷新/中断不丢的那一份）
+  const [drafts, setDrafts] = useState<PromptBoardDraft[]>([])
+  const [draftNote, setDraftNote] = useState('')
+  const [restoring, setRestoring] = useState(false)
+  const [runningShotIds, setRunningShotIds] = useState<string[]>([])
+  /** 本次页面持有的租约令牌：收尾时释放用（**离开页面不解锁**，见 generateOne 的注释） */
+  const claimTokensRef = useRef<Map<string, string>>(new Map())
 
   // 导入抽屉（巨日禄 Cookie 主入口 + 其它外部平台粘贴/上传）
   const [importOpen, setImportOpen] = useState(false)
@@ -145,19 +208,112 @@ export function EpisodeVideoPromptBoard({
 
   const shotById = useMemo(() => new Map(shots.map((shot) => [shot.shot_id, shot])), [shots])
 
+  /** 逐镜状态（每一镜都有一行，含"未开始"）：状态表与"重试谁"都以它为准。 */
+  const statuses = useMemo(() => buildShotDraftStatuses({ shots, drafts }), [shots, drafts])
+  const statusById = useMemo(() => new Map(statuses.map((item) => [item.shotId, item])), [statuses])
+
+  /** 把服务端草稿状态并进预览表（**服务端是草稿的唯一真相**）。 */
+  const mergeRestoredDraftRows = useCallback(
+    (nextStatuses: ShotDraftStatus[], boardShots: PromptBoardShot[]) => {
+      const restored = restoredRowsFromDrafts(nextStatuses)
+      if (!restored.length) return
+      const shotMap = new Map(boardShots.map((shot) => [shot.shot_id, shot]))
+      setRows((prev) => {
+        const restoredIds = new Set(restored.map((item) => item.shotId))
+        // 用户改过的行不覆盖（正文是用户正在编辑的），只保留
+        const editedIds = new Set(prev.filter((row) => row.edited).map((row) => row.shotId))
+        const kept = prev.filter((row) => !(row.origin === 'llm_draft' && restoredIds.has(row.shotId) && !editedIds.has(row.shotId)))
+        const next = [...kept]
+        for (const item of restored) {
+          if (editedIds.has(item.shotId)) continue
+          const shot = shotMap.get(item.shotId)
+          const existing = next.find((row) => row.key === `llm_draft:${item.shotId}`)
+          const row: PreviewRow = {
+            key: `llm_draft:${item.shotId}`,
+            shotId: item.shotId,
+            code: shot?.code ?? existing?.code ?? '',
+            shotText: shot ? `${shot.title}${shot.script_excerpt ? `｜${shot.script_excerpt.slice(0, 40)}` : ''}` : (existing?.shotText ?? ''),
+            prompt: item.prompt,
+            origin: item.origin,
+            matchBy: 'restore',
+            status: item.status,
+            message: item.message,
+            draftToken: item.draftToken || undefined,
+            edited: false,
+            include: item.include,
+            phase: item.phase,
+            saveable: item.saveable,
+          }
+          if (existing) Object.assign(existing, row)
+          else next.push(row)
+        }
+        // 同一镜头被两条记录指向 → 恢复来的草稿行让位，避免"确认保存"时才撞唯一性
+        const conflicts = includedShotConflicts(next)
+        const ordered = next.map((row) =>
+          conflicts.has(row.shotId) && row.matchBy === 'restore'
+            ? { ...row, include: false, message: '同一镜头还有另一条记录：已取消勾选，请先决定保留哪一条。' }
+            : row,
+        )
+        // 按集内镜头顺序排（sort 在 V8 里是稳定的）：恢复来的行与本地行不再交错，
+        // 否则"第一行"可能是一天前的演练占位，而真正要确认的草稿沉在下面
+        const orderOf = (shotId: string) => boardShots.findIndex((shot) => shot.shot_id === shotId)
+        return ordered.slice().sort((a, b) => {
+          const left = orderOf(a.shotId)
+          const right = orderOf(b.shotId)
+          return (left < 0 ? Number.MAX_SAFE_INTEGER : left) - (right < 0 ? Number.MAX_SAFE_INTEGER : right)
+        })
+      })
+    },
+    [],
+  )
+
+  const applyDraftState = useCallback(
+    (state: PromptBoardDraftState, boardShots: PromptBoardShot[]) => {
+      const list = state.shots ?? []
+      setDrafts(list)
+      const nextStatuses = buildShotDraftStatuses({ shots: boardShots, drafts: list })
+      setDraftNote(draftRestoreNotice(nextStatuses))
+      mergeRestoredDraftRows(nextStatuses, boardShots)
+    },
+    [mergeRestoredDraftRows],
+  )
+
+  /** 只刷新服务端草稿状态（只读、不触网模型）：状态表与"重试谁"立刻跟上。 */
+  const refreshDraftState = useCallback(async (): Promise<PromptBoardDraft[]> => {
+    if (!chapterId) return []
+    try {
+      const state = await fetchPromptBoardDrafts(chapterId)
+      const list = state.shots ?? []
+      setDrafts(list)
+      return list
+    } catch (error) {
+      message.warning(`读取服务端草稿状态失败：${error instanceof Error ? error.message : '未知原因'}`, 6)
+      return []
+    }
+  }, [chapterId])
+
   const loadBoard = useCallback(async () => {
     if (!chapterId) return
     setLoading(true)
     try {
       const data = await fetchPromptBoard(chapterId)
-      setShots(data.shots ?? [])
-      setSelectedShotIds((data.shots ?? []).map((shot) => shot.shot_id))
+      const list = data.shots ?? []
+      setShots(list)
+      setSelectedShotIds(list.map((shot) => shot.shot_id))
+      // 进页面就恢复服务端草稿：用户一眼看到"上次生成到哪了"
+      try {
+        const state = await fetchPromptBoardDrafts(chapterId)
+        applyDraftState(state, list)
+      } catch (error) {
+        setDraftNote('服务端草稿状态读取失败：本页只显示内存里的内容，刷新可能丢。')
+        message.warning(`读取服务端草稿失败（刷新可能丢草稿）：${error instanceof Error ? error.message : '未知原因'}`, 8)
+      }
     } catch (error) {
       message.error(error instanceof Error ? error.message : '读取本集镜头失败')
     } finally {
       setLoading(false)
     }
-  }, [chapterId])
+  }, [applyDraftState, chapterId])
 
   useEffect(() => {
     void loadBoard()
@@ -165,6 +321,12 @@ export function EpisodeVideoPromptBoard({
 
   // 离开页面（含切换步骤/关闭标签）时清空敏感输入
   useEffect(() => () => clearJuriluCredentials(), [clearJuriluCredentials])
+
+  /**
+   * **刻意不在离开页面时释放租约**：此刻可能有一次真实调用正在飞，
+   * 提前放锁会让另一个请求抢到同一镜 → 重复付费。
+   * 租约自带过期时间（服务端 300 秒，中断后读层渲染成"已中断"），到点自然可继续。
+   */
 
   /** 整表唯一性：被勾选的行里，同一个镜头只能被一条记录占用。 */
   const findConflictingRow = useCallback(
@@ -217,81 +379,229 @@ export function EpisodeVideoPromptBoard({
         message: input.message ?? '',
         draftToken: input.draftToken,
         edited: Boolean(input.edited),
-        include: input.status !== 'unmatched' && input.status !== 'duplicate' && input.status !== 'dry_run',
+        include: input.status !== 'unmatched' && input.status !== 'duplicate' && input.status !== 'dry_run' && input.status !== 'busy',
       }
     },
     [shotById],
   )
 
-  /** 逐镜队列：一次只请求一镜；停止后不再发下一镜，已完成草稿保留。 */
+  /**
+   * 把一次生成结果落进预览表。
+   *
+   * 关键取舍：**空正文的结果不清空已有草稿正文**（busy/skipped/中断都不是"内容没了"），
+   * 否则用户点一次"停止"就会看到草稿变成空白 —— 那正是这次要修的问题。
+   */
+  const applyOutcomeToRows = useCallback(
+    (outcome: GenerateOutcome) => {
+      setRows((prev) => {
+        const stableKey = `llm_draft:${outcome.shotId}`
+        const existing =
+          prev.find((row) => row.key === stableKey) ??
+          prev.find((row) => row.shotId === outcome.shotId && row.origin === 'llm_draft' && row.matchBy === 'generate')
+        const rowStatus: RowStatus =
+          outcome.status === 'draft'
+            ? 'draft'
+            : outcome.status === 'dry_run'
+              ? 'dry_run'
+              : outcome.status === 'busy'
+                ? 'busy'
+                : outcome.status === 'skipped'
+                  ? 'skipped'
+                  : 'failed'
+        const shot = shotById.get(outcome.shotId)
+        const nextRow: PreviewRow = {
+          key: existing?.key ?? stableKey,
+          shotId: outcome.shotId,
+          code: outcome.code || shot?.code || existing?.code || '',
+          shotText: shot
+            ? `${shot.title}${shot.script_excerpt ? `｜${shot.script_excerpt.slice(0, 40)}` : ''}`
+            : (existing?.shotText ?? ''),
+          // 没有新正文就保留旧正文：中断/跳过/失败都不该把已付费的草稿抹成空白
+          prompt: outcome.prompt.trim() ? outcome.prompt : (existing?.prompt ?? ''),
+          origin: 'llm_draft',
+          matchBy: 'generate',
+          status: rowStatus,
+          message: outcome.message || existing?.message || '',
+          draftToken: outcome.draftToken || existing?.draftToken,
+          edited: outcome.status === 'draft' ? false : Boolean(existing?.edited),
+          include: outcome.status === 'draft',
+          saveable: outcome.status === 'draft' ? true : Boolean(existing?.saveable),
+        }
+        return existing ? prev.map((row) => (row.key === existing.key ? nextRow : row)) : [...prev, nextRow]
+      })
+    },
+    [shotById],
+  )
+
+  /**
+   * **生成一镜**（页面唯一的付费入口，所有按钮最终都走这里）。
+   *
+   * 顺序刻意如此：
+   * 1. 先 `POST /drafts/claim` 占服务端租约 —— 抢不到就**跳过并给中文提示**，绝不发起付费调用。
+   *    这是"防重复付费"的硬闸门（按钮 disabled 挡不住并发与多标签页）。
+   * 2. 再 `POST /draft`，并把租约令牌带回去（服务端认出自己的租约直接续租）。
+   * 3. 收尾：非成功路径释放租约；若这一行**完全是这次占位新建的空行**（演练/跳过），整行清掉，
+   *    免得它永远显示成"已中断"。已有草稿行绝不动（那是付过费的）。
+   * 4. 中断/网络失败：**释放租约但不动正文**（把已生成的草稿误标成失败就是丢钱）。
+   */
+  const generateOne = useCallback(
+    async (shotId: string, opts: { mode?: PromptBoardMode } = {}): Promise<GenerateOutcome> => {
+      const status = statusById.get(shotId)
+      const code = status?.code ?? shotById.get(shotId)?.code ?? shotId
+      const modeToUse = opts.mode ?? mode
+      if (!chapterId) {
+        return { shotId, code, status: 'error', prompt: '', draftToken: '', message: '未选择集', persisted: false }
+      }
+      const preHadRow = hadDraftRow(status)
+      let claimToken = ''
+      try {
+        const claim = await claimShotDraft(chapterId, { shot_id: shotId })
+        if (!claim.claimed) {
+          // 「该镜头正在生成中，已跳过」——并发/重复提交时的中文提示，不静默失败
+          message.warning(formatBusyNotice(claim.code || code, claim.reason), 6)
+          await refreshDraftState()
+          return {
+            shotId,
+            code: claim.code || code,
+            status: 'busy',
+            prompt: '',
+            draftToken: '',
+            message: claim.reason || '该镜头正在生成中',
+            persisted: false,
+          }
+        }
+        claimToken = String(claim.claim_token || '')
+      } catch (error) {
+        const text = error instanceof Error ? error.message : '申请生成租约失败'
+        message.error(`镜头 ${code} 申请生成租约失败：${text}`)
+        return { shotId, code, status: 'error', prompt: '', draftToken: '', message: text, persisted: false }
+      }
+      claimTokensRef.current.set(shotId, claimToken)
+      setRunningShotIds((prev) => (prev.includes(shotId) ? prev : [...prev, shotId]))
+      try {
+        const result = await draftVideoPrompt(chapterId, { shot_id: shotId, mode: modeToUse, claim_token: claimToken })
+        const prompt = String(result.prompt ?? '')
+        const persisted = Boolean(result.persisted)
+        const statusOut = result.status
+        if (statusOut === 'busy') {
+          message.warning(formatBusyNotice(result.code || code, result.reason ?? ''), 6)
+        }
+        if (statusOut === 'draft' && !persisted) {
+          // 真有正文却没说"已落库"：宁可吵一声，也不能让草稿悄悄只活在内存里
+          message.warning(`镜头 ${code} 的草稿未确认写入服务端（刷新可能丢）：请重试这一镜`, 8)
+        }
+        if (statusOut !== 'draft') {
+          await releaseShotDraft(chapterId, { shot_id: shotId, claim_token: claimToken }).catch(() => undefined)
+          // 注意：演练模式回的正文是**占位**，后端一个字节都没落库 → 不算"有草稿"
+          if (shouldDropClaimPlaceholder({ preHadRow, status: statusOut, persisted })) {
+            // 这一行完全是这次占位新建的空行（演练/跳过）→ 整行清掉，别留下假的"已中断"
+            await deleteShotDrafts(chapterId, [shotId]).catch(() => undefined)
+          } else {
+            // 原来就有草稿（失败原因 / 已完成正文）→ 把状态写回去，claim 不改动它的观感
+            const plan = restorePlanFor(status)
+            if (plan.action !== 'none') {
+              await saveShotDraft(chapterId, {
+                shot_id: shotId,
+                status: plan.action === 'ok' ? 'ok' : 'failed',
+                prompt: plan.prompt,
+                error: plan.error,
+                source: plan.source || undefined,
+                model: plan.model || undefined,
+                meta: plan.meta,
+              }).catch(() => undefined)
+            }
+          }
+        }
+        return {
+          shotId,
+          code: result.code || code,
+          status: statusOut,
+          prompt,
+          draftToken: String(result.draft_token ?? ''),
+          message: result.reason ?? '',
+          persisted,
+        }
+      } catch (error) {
+        await releaseShotDraft(chapterId, { shot_id: shotId, claim_token: claimToken }).catch(() => undefined)
+        const failure = classifyGenerationFailure(error, 'llm')
+        const text = failureText(failure)
+        // 被演练门禁/未确认拦下 = 根本没有付费调用：不记失败，把占位行也收干净
+        if (failure.state === 'dry_run') {
+          if (shouldDropClaimPlaceholder({ preHadRow, status: 'skipped', persisted: false })) {
+            await deleteShotDrafts(chapterId, [shotId]).catch(() => undefined)
+          }
+          return { shotId, code, status: 'skipped', prompt: '', draftToken: '', message: text, persisted: false }
+        }
+        return { shotId, code, status: 'failed', prompt: '', draftToken: '', message: text, persisted: false }
+      } finally {
+        claimTokensRef.current.delete(shotId)
+        setRunningShotIds((prev) => prev.filter((id) => id !== shotId))
+      }
+    },
+    [chapterId, mode, refreshDraftState, shotById, statusById],
+  )
+
+  /** 逐镜队列：一次只请求一镜；点停止后不再发下一镜，已完成的草稿留在服务端。 */
   const runGenerate = useCallback(
     async (targetShotIds: string[]) => {
       if (!chapterId || !targetShotIds.length) return
       stopRef.current = false
       setRunning(true)
+      const tally = { done: 0, dryRun: 0, failed: 0, skipped: 0, busy: 0 }
+      const outcomes: GenerateOutcome[] = []
+      message.info(`开始逐镜生成（本次 ${targetShotIds.length} 镜，一次一镜；已有草稿的不重发）`, 5)
       for (const shotId of targetShotIds) {
         if (stopRef.current) {
-          message.info('已停止：后续镜头不再请求，已完成草稿保留在表里')
+          message.info(
+            '已停止：后续镜头不再请求。已完成的草稿都保存在服务端（刷新/重开页面都在），失败与未开始的镜头可点「重试失败 / 未开始」继续。',
+            8,
+          )
           break
         }
-        const shot = shotById.get(shotId)
-        const pendingRow = toRow({
-          shotId,
-          prompt: '',
-          origin: 'llm_draft',
-          matchBy: 'generate',
-          status: 'skipped',
-          message: '生成中…',
-        })
-        setRows((prev) => [...prev.filter((row) => row.shotId !== shotId || row.origin !== 'llm_draft'), pendingRow])
-        try {
-          // 一次一镜：请求之间就是用户可中断的边界
-          // eslint-disable-next-line no-await-in-loop
-          const result = await draftVideoPrompt(chapterId, { shot_id: shotId, mode })
-          const status: RowStatus =
-            result.status === 'draft'
-              ? 'draft'
-              : result.status === 'dry_run'
-                ? 'dry_run'
-                : result.status === 'skipped'
-                  ? 'skipped'
-                  : 'failed'
-          setRows((prev) => [
-            ...prev.filter((row) => row.key !== pendingRow.key),
-            toRow({
-              shotId,
-              prompt: String(result.prompt ?? ''),
-              origin: 'llm_draft',
-              matchBy: 'generate',
-              status,
-              message: result.reason ?? '',
-              draftToken: result.draft_token,
-            }),
-          ])
-        } catch (error) {
-          setRows((prev) => [
-            ...prev.filter((row) => row.key !== pendingRow.key),
-            toRow({
-              shotId,
-              prompt: '',
-              origin: 'llm_draft',
-              matchBy: 'generate',
-              status: 'failed',
-              message: error instanceof Error ? error.message : '生成失败',
-            }),
-          ])
-        }
-        void shot
+        // eslint-disable-next-line no-await-in-loop
+        const outcome = await generateOne(shotId)
+        outcomes.push(outcome)
+        if (outcome.status === 'draft') tally.done += 1
+        else if (outcome.status === 'dry_run') tally.dryRun += 1
+        else if (outcome.status === 'busy') tally.busy += 1
+        else if (outcome.status === 'failed' || outcome.status === 'error') tally.failed += 1
+        else tally.skipped += 1
+        applyOutcomeToRows(outcome)
       }
       setRunning(false)
+      let list = await refreshDraftState()
+      // 兜底清扫：这一轮"什么都没产出"却在服务端留下空 running 行的镜头（逐镜收尾漏网的那些）
+      const orphans = orphanPlaceholderShotIds({ outcomes, drafts: list })
+      if (orphans.length && chapterId) {
+        await deleteShotDrafts(chapterId, orphans).catch(() => undefined)
+        list = await refreshDraftState()
+      }
+      mergeRestoredDraftRows(buildShotDraftStatuses({ shots, drafts: list }), shots)
+      message.success(
+        `本轮结束：草稿成功 ${tally.done} 镜 · 失败 ${tally.failed} 镜 · 跳过 ${tally.skipped + tally.busy} 镜` +
+          (tally.dryRun ? ` · 演练 ${tally.dryRun} 镜（未落库）` : ''),
+        6,
+      )
     },
-    [chapterId, mode, shotById, toRow],
+    [applyOutcomeToRows, chapterId, generateOne, mergeRestoredDraftRows, refreshDraftState, shots],
   )
 
-  const generateTargets = useMemo(() => {
-    if (mode === 'overwrite_selected') return selectedShotIds
-    return selectedShotIds.filter((shotId) => !(shotById.get(shotId)?.has_prompt ?? false))
-  }, [mode, selectedShotIds, shotById])
+  /** 本次会生成哪些镜头：**失败 / 已中断 / 未开始**；已完成与生成中的不重发。 */
+  const generateTargets = useMemo(
+    () => selectGenerationTargets({ statuses, mode, selectedShotIds }),
+    [mode, selectedShotIds, statuses],
+  )
+
+  /** 「重试失败 / 未开始」的候选（与批量同一口径：已完成与生成中的绝不在内）。 */
+  const retryShotIds = useMemo(() => retryTargets({ statuses, mode, selectedShotIds }), [mode, selectedShotIds, statuses])
+
+  /**
+   * 单镜显式操作（某一行/状态表里点"生成这一镜"）：用 `overwrite_selected` 口径。
+   *
+   * 为什么不用当前模式：显式点单镜就是"我就要这一镜的草稿"，而 `/draft` **从不写正式列**，
+   * 「只填充空白」那道门是给批量操作防静默覆盖用的；否则点了没反应（后端 skip）更让人误解。
+   */
+  const perShotMode: PromptBoardMode = 'overwrite_selected'
 
   /**
    * 对某一行"重新生成"：**替换这一行**（key 不变），来源变为 `llm_draft`。
@@ -303,40 +613,50 @@ export function EpisodeVideoPromptBoard({
     async (row: PreviewRow) => {
       if (!chapterId || !row.shotId) return
       updateRow(row.key, { regenerating: true })
-      try {
-        const result = await draftVideoPrompt(chapterId, { shot_id: row.shotId, mode })
-        const status: RowStatus =
-          result.status === 'draft' ? 'draft' : result.status === 'dry_run' ? 'dry_run' : result.status === 'skipped' ? 'skipped' : 'failed'
-        updateRow(row.key, {
-          prompt: String(result.prompt ?? ''),
-          origin: 'llm_draft',
-          matchBy: 'generate',
-          status,
-          message: result.reason ?? '已用新的大模型草稿替换本行',
-          draftToken: result.draft_token,
-          edited: false,
-          include: status === 'draft',
-          regenerating: false,
-        })
-      } catch (error) {
-        updateRow(row.key, {
-          regenerating: false,
-          status: 'failed',
-          message: error instanceof Error ? error.message : '重新生成失败',
-        })
-      }
+      const outcome = await generateOne(row.shotId, { mode: perShotMode })
+      const status: RowStatus =
+        outcome.status === 'draft'
+          ? 'draft'
+          : outcome.status === 'dry_run'
+            ? 'dry_run'
+            : outcome.status === 'busy'
+              ? 'busy'
+              : outcome.status === 'skipped'
+                ? 'skipped'
+                : 'failed'
+      updateRow(row.key, {
+        // 没有新正文就保留旧正文（中断/跳过不该把草稿变空白）
+        prompt: outcome.prompt.trim() ? outcome.prompt : row.prompt,
+        origin: 'llm_draft',
+        matchBy: 'generate',
+        status,
+        message: outcome.message || (outcome.status === 'draft' ? '已用新的大模型草稿替换本行' : row.message),
+        draftToken: outcome.draftToken || row.draftToken,
+        edited: false,
+        include: status === 'draft',
+        saveable: status === 'draft' ? true : row.saveable,
+        regenerating: false,
+      })
+      await refreshDraftState()
     },
-    [chapterId, mode, updateRow],
+    [chapterId, generateOne, perShotMode, refreshDraftState, updateRow],
   )
 
-  const retryFailed = useCallback(() => {
-    const failed = rows.filter((row) => row.status === 'failed').map((row) => row.shotId)
-    if (!failed.length) {
-      message.warning('没有失败项')
-      return
+  /** 从服务端把草稿重新铺进预览表（刷新按钮 / 恢复按钮 / 保存后都用它）。 */
+  const restoreFromServer = useCallback(async () => {
+    if (!chapterId) return
+    setRestoring(true)
+    try {
+      const list = await refreshDraftState()
+      const nextStatuses = buildShotDraftStatuses({ shots, drafts: list })
+      setDraftNote(draftRestoreNotice(nextStatuses))
+      mergeRestoredDraftRows(nextStatuses, shots)
+      const done = nextStatuses.filter((item) => item.phase === 'draft_ok').length
+      message.success(`已从服务端恢复草稿：已完成 ${done} 镜（未开始的不在表里，状态表里有全部 ${nextStatuses.length} 镜）`)
+    } finally {
+      setRestoring(false)
     }
-    void runGenerate(failed)
-  }, [rows, runGenerate])
+  }, [chapterId, mergeRestoredDraftRows, refreshDraftState, shots])
 
   const applyImportPreview = useCallback(
     (
@@ -556,11 +876,12 @@ export function EpisodeVideoPromptBoard({
     try {
       const groups = new Map<PromptBoardOrigin, PreviewRow[]>()
       for (const row of included) {
-        // 用户改过大模型草稿 → 按人工修改记录（令牌失配，不能再算 llm）
-        const origin: PromptBoardOrigin = row.origin === 'llm_draft' && row.edited ? 'manual' : row.origin
+        // 大模型草稿只有在"没改过 + 带服务端令牌"时才是 llm；否则按人工内容记录（后端还会用 HMAC 再验一次）
+        const origin = resolveSaveOrigin(row)
         groups.set(origin, [...(groups.get(origin) ?? []), row])
       }
       let applied = 0
+      let cleared = 0
       const failures: string[] = []
       for (const [origin, groupRows] of groups) {
         // eslint-disable-next-line no-await-in-loop
@@ -576,23 +897,45 @@ export function EpisodeVideoPromptBoard({
           allow_partial: countMismatch ? allowPartial : true,
         })
         applied += result.applied_count ?? 0
+        cleared += result.cleared_draft_count ?? 0
         for (const item of result.results ?? []) {
           if (!item.applied) failures.push(`${item.code || item.shot_id}：${item.reason}`)
         }
         if (result.error) failures.push(result.error)
       }
-      if (applied) message.success(`已保存 ${applied} 条到镜头`)
-      if (failures.length) message.warning(`有 ${failures.length} 条未写入：${failures.slice(0, 3).join('；')}`)
+      if (applied) {
+        message.success(`已保存 ${applied} 条到镜头（正式提示词）${cleared ? `；服务端已清掉 ${cleared} 份对应草稿` : ''}`, 8)
+      }
+      if (failures.length) message.warning(`有 ${failures.length} 条未写入：${failures.slice(0, 3).join('；')}`, 8)
       await loadBoard()
       setRows([])
+      // 保存后草稿可能已被服务端清掉，但其它镜头（失败/未保存）的草稿要在表里继续可见
+      await restoreFromServer()
     } catch (error) {
       message.error(error instanceof Error ? error.message : '保存失败')
     } finally {
       setSaving(false)
     }
-  }, [allowPartial, chapterId, countMismatch, loadBoard, mode, rows, selectedShotIds, validateTableUnique])
+  }, [allowPartial, chapterId, countMismatch, loadBoard, mode, restoreFromServer, rows, selectedShotIds, validateTableUnique])
+
+  /** 清空本集服务端草稿（危险动作：草稿是真金白银生成的，必须二次确认）。 */
+  const doClearDrafts = useCallback(async () => {
+    if (!chapterId) return
+    setPurging(true)
+    try {
+      const result = await deleteShotDrafts(chapterId)
+      message.success(`已清空本集服务端草稿 ${result.cleared} 份（正式提示词未改动）`)
+      setRows((prev) => prev.filter((row) => row.origin !== 'llm_draft'))
+      await restoreFromServer()
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '清空草稿失败')
+    } finally {
+      setPurging(false)
+    }
+  }, [chapterId, restoreFromServer])
 
   const includedCount = rows.filter((row) => row.include && row.prompt.trim()).length
+  const draftDoneCount = statuses.filter((item) => item.phase === 'draft_ok').length
 
   if (!chapterId) {
     return <Card title="集级视频提示词"><Empty description="请先在顶部选择一集" /></Card>
@@ -630,8 +973,142 @@ export function EpisodeVideoPromptBoard({
         showIcon
         className="mb-3"
         message="整集提示词在这里一次做完再进工作台"
-        description="批量生成或批量导入都会先进入下面这张预览确认表；只有点「确认保存」才会写入镜头（未确认前不写库）。工作台只用于逐镜检查与补漏。"
+        description="批量生成或批量导入都会先进入下面这张预览确认表；只有点「确认保存」才会写入镜头（未确认前不写库）。生成的草稿存在服务端，刷新/中断都不会丢。工作台只用于逐镜检查与补漏。"
       />
+
+      {/* 逐镜状态：只读服务端草稿，刷新/中断后进页面第一眼就看它 */}
+      <Card
+        size="small"
+        className="mb-3"
+        title="逐镜状态（服务端草稿 · 刷新/中断都不丢）"
+        data-testid="prompt-draft-status-card"
+        extra={
+          <Space size={8}>
+            <Button
+              size="small"
+              icon={<ReloadOutlined />}
+              loading={restoring}
+              data-testid="prompt-draft-restore"
+              onClick={() => void restoreFromServer()}
+            >
+              从服务端恢复草稿
+            </Button>
+            <Popconfirm
+              title="清空本集服务端草稿？"
+              description="草稿是真金白银生成的，清掉后无法恢复；正式提示词（已保存内容）不受影响。"
+              okText="确认清空"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => void doClearDrafts()}
+            >
+              <Button size="small" danger icon={<DeleteOutlined />} loading={purging} disabled={!drafts.length}>
+                清空草稿
+              </Button>
+            </Popconfirm>
+          </Space>
+        }
+      >
+        <Typography.Text type="secondary" className="text-[11px] block mb-2" data-testid="prompt-draft-note">
+          {draftNote ||
+            '本集还没有读出服务端草稿状态：点右上「从服务端恢复草稿」重试；未开始（没有草稿）的镜头也在这张表里。'}
+        </Typography.Text>
+        <Table<ShotDraftStatus>
+          size="small"
+          rowKey="shotId"
+          loading={loading}
+          dataSource={statuses}
+          pagination={false}
+          scroll={{ y: 220 }}
+          data-testid="prompt-draft-status-table"
+          locale={{ emptyText: '本集还没有镜头' }}
+          columns={[
+            { title: '编号', dataIndex: 'code', width: 80 },
+            { title: '镜头', dataIndex: 'title', ellipsis: true },
+            {
+              title: '草稿状态',
+              dataIndex: 'phase',
+              width: 150,
+              render: (_value, row) => (
+                <Tooltip title={PHASE_META[row.phase].hint}>
+                  <Tag color={PHASE_META[row.phase].color} data-testid={`prompt-draft-phase-${row.shotId}`}>
+                    {PHASE_META[row.phase].label}
+                  </Tag>
+                </Tooltip>
+              ),
+            },
+            {
+              title: '正式提示词（已保存列）',
+              dataIndex: 'saved',
+              width: 170,
+              render: (_value, row) =>
+                row.saved ? (
+                  <Tag color={SAVED_META.color} data-testid={`prompt-saved-${row.shotId}`}>
+                    {`${SAVED_META.label} · ${sourceLabel(row.savedSource)}`}
+                  </Tag>
+                ) : (
+                  <Tag data-testid={`prompt-saved-${row.shotId}`}>{SAVED_META.emptyLabel}</Tag>
+                ),
+            },
+            {
+              title: '草稿正文',
+              dataIndex: 'draftPrompt',
+              width: 110,
+              render: (_value, row) =>
+                row.hasDraft ? <Tag color="blue">{`有草稿 ${row.draftPrompt.trim().length} 字`}</Tag> : <Tag>无</Tag>,
+            },
+            {
+              title: '草稿更新时间',
+              dataIndex: 'updatedAt',
+              width: 160,
+              render: (value: string | null) => (value ? new Date(value).toLocaleString('zh-CN') : '—'),
+            },
+            {
+              title: '说明 / 失败原因',
+              dataIndex: 'error',
+              render: (_value, row) => (
+                <div className="text-[11px] text-gray-600">
+                  {row.phase === 'failed' && row.error ? row.error : PHASE_META[row.phase].hint}
+                  {row.phase === 'draft_ok' && row.saveable ? '（带服务端大模型令牌，可按大模型草稿保存）' : ''}
+                  {row.phase === 'draft_ok' && !row.saveable ? '（没有大模型令牌：只能按人工内容保存）' : ''}
+                </div>
+              ),
+            },
+            {
+              title: '操作',
+              key: 'draft-actions',
+              width: 120,
+              render: (_value, row) => {
+                const busy = row.phase === 'running' || runningShotIds.includes(row.shotId) || running
+                const button = (
+                  <Button
+                    size="small"
+                    loading={runningShotIds.includes(row.shotId)}
+                    disabled={busy}
+                    data-testid={`prompt-draft-generate-${row.shotId}`}
+                    onClick={() => void runGenerate([row.shotId])}
+                  >
+                    {needsGeneration(row) ? '生成这一镜' : '重新生成'}
+                  </Button>
+                )
+                if (busy) {
+                  return <Tooltip title="该镜头正在生成中（服务端租约未过期），不会重复发起">{button}</Tooltip>
+                }
+                if (needsGeneration(row)) return button
+                return (
+                  <Popconfirm
+                    title="这一镜已经有草稿，重新生成会再调用一次大模型（会再次付费）。确认重发？"
+                    okText="重新生成"
+                    cancelText="取消"
+                    onConfirm={() => void runGenerate([row.shotId])}
+                  >
+                    {button}
+                  </Popconfirm>
+                )
+              },
+            },
+          ]}
+        />
+      </Card>
 
       <Space wrap size={12} className="mb-3">
         <Radio.Group
@@ -655,21 +1132,22 @@ export function EpisodeVideoPromptBoard({
           清空选择
         </Button>
         <Typography.Text type="secondary" className="text-[11px]">
-          {`本集 ${shots.length} 镜 · 已选 ${selectedShotIds.length} 镜 · 本次将生成 ${generateTargets.length} 镜`}
+          {`本集 ${shots.length} 镜 · 已选 ${selectedShotIds.length} 镜 · 待生成 ${generateTargets.length} 镜 · 已完成草稿 ${draftDoneCount} 镜`}
         </Typography.Text>
       </Space>
 
       <Space wrap size={8} className="mb-3">
-        <Tooltip title="逐镜请求，一次一镜；点停止后不再请求下一镜">
+        <Tooltip title="逐镜请求，一次一镜；点停止后不再请求下一镜。已有草稿的镜头不会被重发（不重复付费）">
           <Button
             type="primary"
             size="small"
             icon={<ThunderboltOutlined />}
             loading={running}
             disabled={!generateTargets.length}
+            data-testid="prompt-draft-batch-generate"
             onClick={() => void runGenerate(generateTargets)}
           >
-            {`批量生成草稿（${generateTargets.length} 镜）`}
+            {`生成失败/未开始（${generateTargets.length} 镜）`}
           </Button>
         </Tooltip>
         <Button
@@ -677,14 +1155,20 @@ export function EpisodeVideoPromptBoard({
           danger
           icon={<StopOutlined />}
           disabled={!running}
+          data-testid="prompt-draft-stop"
           onClick={() => {
             stopRef.current = true
           }}
         >
           停止
         </Button>
-        <Button size="small" disabled={!rows.some((row) => row.status === 'failed')} onClick={retryFailed}>
-          {`重试失败项（${rows.filter((row) => row.status === 'failed').length}）`}
+        <Button
+          size="small"
+          disabled={!retryShotIds.length || running}
+          data-testid="prompt-draft-retry"
+          onClick={() => void runGenerate(retryShotIds)}
+        >
+          {`重试失败 / 未开始（${retryShotIds.length}）`}
         </Button>
         <Button size="small" icon={<ImportOutlined />} onClick={() => setImportOpen(true)}>
           批量导入（巨日禄 Cookie / 其他平台）
@@ -696,10 +1180,11 @@ export function EpisodeVideoPromptBoard({
             setIssues([])
             setCountMismatch(false)
             clearJuriluCredentials()
+            message.info('已清空预览表（服务端草稿仍保留，点「从服务端恢复草稿」可找回）')
           }}
           disabled={!rows.length}
         >
-          取消本次操作
+          清空预览表
         </Button>
       </Space>
 
@@ -742,20 +1227,20 @@ export function EpisodeVideoPromptBoard({
         loading={loading}
         dataSource={rows}
         pagination={false}
-        locale={{ emptyText: '还没有草稿：点「批量生成草稿」或「批量导入」开始' }}
+        locale={{ emptyText: '还没有草稿：点「生成失败/未开始」或「批量导入」开始；刷新后这里会从服务端恢复上次的草稿' }}
         rowSelection={{
           selectedRowKeys: rows.filter((row) => row.include).map((row) => row.key),
           onChange: (keys) => {
             const wanted = new Set(keys.map(String))
             setRows((prev) => prev.map((row) => ({ ...row, include: wanted.has(row.key) })))
           },
-          getCheckboxProps: (row) => ({ disabled: row.status === 'dry_run' }),
+          getCheckboxProps: (row) => ({ disabled: row.status === 'dry_run' || row.status === 'busy' }),
         }}
         columns={[
           { title: '编号', dataIndex: 'code', width: 70 },
           { title: '镜头内容', dataIndex: 'shotText', width: 220, ellipsis: true },
           {
-            title: '提示词',
+            title: '提示词（草稿，未写正式列）',
             dataIndex: 'prompt',
             render: (value: string, row) => (
               <Input.TextArea
@@ -765,7 +1250,8 @@ export function EpisodeVideoPromptBoard({
                 onChange={(event) =>
                   updateRow(row.key, {
                     prompt: event.target.value,
-                    edited: row.origin === 'llm_draft' ? event.target.value.trim() !== '' : row.edited,
+                    // 改过正文就不算大模型原样草稿：保存时来源降级为人工（令牌也会失配）
+                    edited: event.target.value.trim() !== '' ? true : row.edited,
                   })
                 }
               />
@@ -776,15 +1262,15 @@ export function EpisodeVideoPromptBoard({
             dataIndex: 'origin',
             width: 110,
             render: (_value, row) => {
-              const meta = ORIGIN_META[row.origin === 'llm_draft' && row.edited ? 'manual' : row.origin]
+              const meta = ORIGIN_META[resolveSaveOrigin(row) === 'manual' && row.origin === 'llm_draft' ? 'manual' : row.origin]
               return <Tag color={meta.color}>{meta.label}</Tag>
             },
           },
           { title: '匹配方式', dataIndex: 'matchBy', width: 90 },
           {
-            title: '匹配状态 / 原因',
+            title: '状态 / 原因',
             dataIndex: 'status',
-            width: 190,
+            width: 200,
             render: (_value, row) => (
               <div>
                 <Tag color={STATUS_META[row.status].color}>{STATUS_META[row.status].label}</Tag>
@@ -829,7 +1315,7 @@ export function EpisodeVideoPromptBoard({
                 <Button
                   size="small"
                   loading={row.regenerating}
-                  disabled={!row.shotId || !chapterId}
+                  disabled={!row.shotId || !chapterId || running}
                   onClick={() => void regenerateRow(row)}
                 >
                   重新生成
@@ -866,7 +1352,7 @@ export function EpisodeVideoPromptBoard({
           {`确认保存（${includedCount} 条）`}
         </Button>
         <Typography.Text type="secondary" className="text-[11px]">
-          保存后即写入各镜的提示词；工作室与交付导出读的就是这份已保存内容。
+          保存后即写入各镜的提示词（正式列）；工作室与交付导出读的就是这份已保存内容。草稿不会被自动保存。
         </Typography.Text>
       </Space>
 
