@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_db
 from app.schemas.common import ApiResponse, PaginatedData, created_response, empty_response, paginated_response, success_response
-from app.schemas.studio import FileDetailRead, FileRead, FileUpdate
+from app.schemas.studio import FileDetailRead, FileRead, FileUpdate, FileUploadRead
 from app.services.studio.file_usages import list_files_by_scope_paginated
 from app.services.studio.files import (
     build_download_response,
@@ -118,9 +118,15 @@ async def register_external_file_api(
 
 @router.post(
     "/upload",
-    response_model=ApiResponse[FileRead],
+    response_model=ApiResponse[FileUploadRead],
     status_code=status.HTTP_201_CREATED,
-    summary="上传文件并创建 FileItem 记录",
+    summary="上传文件并创建 FileItem 记录（响应附带地址匿名可达性）",
+    description=(
+        "上传文件到对象存储并落库。响应在原有文件字段之外，**新增** "
+        "``url`` / ``url_reachable`` / ``url_probe`` / ``warnings``：说明这个地址"
+        "**上游能不能匿名取到**（真实故障 A：本机可读、公网 404 的地址交给上游 → 上游任务失败）。"
+        "不可达**不阻断上传**（文件已落库），但会如实告警并给出修法。"
+    ),
 )
 async def upload_file_api(
     file: UploadFile = File(..., description="要上传的二进制文件"),
@@ -131,8 +137,8 @@ async def upload_file_api(
     shot_id: str | None = Form(None),
     usage_kind: str | None = Form(None, description="与 project_id 同时提供时写入 file_usages"),
     source_ref: str | None = Form(None),
-) -> ApiResponse[FileRead]:
-    obj = await upload_file(
+) -> ApiResponse[FileUploadRead]:
+    outcome = await upload_file(
         db,
         file=file,
         name=name,
@@ -142,7 +148,7 @@ async def upload_file_api(
         usage_kind=usage_kind,
         source_ref=source_ref,
     )
-    return created_response(FileRead.model_validate(obj))
+    return created_response(FileUploadRead(**outcome.to_read()))
 
 
 @router.get(

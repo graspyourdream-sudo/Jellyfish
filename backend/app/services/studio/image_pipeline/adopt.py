@@ -29,8 +29,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.types import FileType
 from app.services.studio.entity_specs import entity_spec, normalize_entity_type
-from app.services.studio.llm_orchestration import dry_run
+from app.services.studio.image_pipeline.reference_preflight import (
+    verify_uploaded_url_reachable as _verify_uploaded_url_reachable,
+)
 from app.utils.files import create_file_from_url_or_b64
+
+# 「上传/落库之后的匿名可达性验证」**只有一份实现**，在
+# ``image_pipeline/reference_preflight.py``（提交前预检与它共用同一个探活实现）。
+# 这里保留同名导出只为兼容既有调用方/测试，**不要再在这里写第二份探测逻辑**。
+verify_uploaded_url_reachable = _verify_uploaded_url_reachable
 
 # DRY_RUN 占位地址使用的不可达域名（见 llm_orchestration/dry_run.py）
 PLACEHOLDER_URL_MARKERS: tuple[str, ...] = ("dry-run.invalid",)
@@ -87,55 +94,6 @@ def reject_placeholder_url(url: str) -> None:
                     "请在关闭守卫并确认真实调用后，用真实生成的图片地址采纳。"
                 ),
             )
-
-
-async def verify_uploaded_url_reachable(
-    url: str,
-    *,
-    label: str,
-    probe: Any = None,
-) -> tuple[bool | None, dict[str, Any], list[str]]:
-    """**上传/落库之后**再匿名验证一次这个地址上游取不取得到（故障 A 的收尾动作）。
-
-    为什么必须有这一步：对象存储写入成功 ≠ 这个对象**匿名可读**。2026-09-19 真实验收里，
-    本机可读、匿名访问 404 的地址被当成公网地址交给了上游 → 上游任务失败
-    （原文「无法获取输入媒体 URL（404/410）」）。把验证放在**上传之后**，
-    用户当场就能看到「已入库，但这个地址匿名取不到」以及怎么修，而不是等下一次提交才炸。
-
-    返回 ``(reachable, probe_read, warnings)``：
-
-    - ``reachable=None`` 表示**未验证**（演练模式 / 没有可验证地址），不是失败；
-    - 演练模式（DRY_RUN）下**一个字节都不出站**，与守卫同口径；
-    - 验证永远不阻断采纳本身：图已经存下来了，这里只如实报告 + 给修法。
-    """
-    from app.services.studio.image_pipeline import reference_preflight
-
-    clean = str(url or "").strip()
-    if not clean:
-        return None, {}, []
-
-    if dry_run.dry_run_enabled():
-        return (
-            None,
-            {
-                "result": "skipped",
-                "reason": "[DRY_RUN] 演练模式未做匿名可达性验证。",
-            },
-            [],
-        )
-
-    runner = probe or reference_preflight.probe_reference_url
-    outcome = await runner(clean, label=label)
-    probe_read = outcome.to_read()
-    warnings: list[str] = []
-    if not outcome.reachable:
-        warnings.append(
-            f"已入库，但「{label}」的地址**匿名公网访问不可达**"
-            + (f"（HTTP {outcome.http_status}）" if outcome.http_status else "")
-            + f"：{outcome.reason} {outcome.how_to_fix}"
-            + "（这条地址当垫图/参考图交给上游时会被上游 404 拒绝。）"
-        )
-    return bool(outcome.reachable), probe_read, warnings
 
 
 async def adopt_generated_image(
@@ -219,7 +177,8 @@ async def adopt_generated_image(
     stored_url = str(getattr(file_item, "thumbnail", "") or "")
     # 4) 上传之后**真的验证一次**：这个地址匿名（上游）取不取得到。
     #    只报告、不阻断（图已经存好了），但必须让用户当场看到问题与修法。
-    reachable, probe_read, verify_warnings = await verify_uploaded_url_reachable(
+    #    实现只有一份：``reference_preflight.verify_uploaded_url_reachable``。
+    reachability = await verify_uploaded_url_reachable(
         stored_url,
         label=f"{getattr(parent, 'name', entity_id)} 的采纳图片",
         probe=probe,
@@ -235,9 +194,9 @@ async def adopt_generated_image(
         source_url=str(url),
         is_primary=bool(getattr(target, "is_primary", False)),
         name=str(name or ""),
-        url_reachable=reachable,
-        url_probe=probe_read,
-        warnings=verify_warnings,
+        url_reachable=reachability.reachable,
+        url_probe=dict(reachability.probe),
+        warnings=list(reachability.warnings),
     )
 
 

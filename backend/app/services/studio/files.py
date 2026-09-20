@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -23,6 +24,41 @@ from app.services.common import create_and_refresh, entity_not_found, flush_and_
 from app.services.studio.file_usages import upsert_file_usage
 
 FILE_ORDER_FIELDS = {"name", "created_at", "updated_at"}
+
+
+@dataclass(slots=True)
+class UploadFileOutcome:
+    """上传接口的结果：文件记录 + **上传后地址的匿名可达性**。
+
+    为什么要把可达性一起返回：对象存储写入成功 ≠ 这个对象匿名可读（真实故障 A：
+    本机可读、公网 404 的地址被交给上游 → 上游任务 failed）。把验证结果放进响应，
+    调用方当场就知道"这个地址上游能不能取到"，不用等下一次提交才炸。
+
+    边界：验证**只报告、不阻断** —— 文件已经落库了，抛错会把已经成功的上传变成失败。
+    """
+
+    file: FileItem
+    #: 落库后的对象地址（``storage.public_url_for_key`` 的唯一口径；没配公网基址时为空串）
+    url: str = ""
+    #: True=匿名公网可达；False=不可达（已告警）；None=未验证（演练模式 / 没有拿到地址）
+    url_reachable: bool | None = None
+    #: 探活明细：result / http_status / method（= probe_method）/ reason / how_to_fix
+    url_probe: dict[str, Any] = field(default_factory=dict)
+    #: 给用户看的中文告警（含修法；不阻断上传）
+    warnings: list[str] = field(default_factory=list)
+
+    def to_read(self) -> dict[str, Any]:
+        """文件字段 + 可达性字段（**只增不删**；不含本机绝对路径，标签用文件名）。"""
+        payload = FileRead.model_validate(self.file).model_dump()
+        payload.update(
+            {
+                "url": self.url,
+                "url_reachable": self.url_reachable,
+                "url_probe": dict(self.url_probe),
+                "warnings": list(self.warnings),
+            }
+        )
+        return payload
 
 
 # 后缀白名单。音频之前完全不在白名单里，导致「声音绑定」（shot_details.audio_file_id
@@ -230,8 +266,13 @@ async def upload_file(
     shot_id: str | None = None,
     usage_kind: str | None = None,
     source_ref: str | None = None,
-) -> FileItem:
-    """上传文件到对象存储，并创建 FileItem 记录。"""
+) -> UploadFileOutcome:
+    """上传文件到对象存储，并创建 FileItem 记录。
+
+    上传成功后**追加一次**匿名可达性验证（``reference_preflight.verify_uploaded_url_reachable``
+    —— 全项目唯一实现）：对象写成功 ≠ 匿名可读，真实故障 A 就是把这个地址交给上游后 404。
+    **不可达不阻断上传**（文件已落库），但会如实告警并给出修法。
+    """
     if not file.filename:
         raise HTTPException(status_code=400, detail="上传文件缺少文件名")
 
@@ -270,7 +311,23 @@ async def upload_file(
             source_ref=source_ref,
         )
 
-    return file_item
+    # 上传之后验证一次「这个地址上游匿名取不取得到」。label 用显示名（不是 file_id）。
+    # 延迟导入：``image_pipeline`` 包在 import 期会拉 ``services.film``，
+    # 而 ``services.studio`` 的包 __init__ 又会 import 本模块 —— 顶层导入会形成循环。
+    from app.services.studio.image_pipeline import reference_preflight
+
+    reachability = await reference_preflight.verify_uploaded_url_reachable(
+        info.url,
+        label=display_name,
+    )
+
+    return UploadFileOutcome(
+        file=file_item,
+        url=info.url,
+        url_reachable=reachability.reachable,
+        url_probe=dict(reachability.probe),
+        warnings=list(reachability.warnings),
+    )
 
 
 async def build_download_response(

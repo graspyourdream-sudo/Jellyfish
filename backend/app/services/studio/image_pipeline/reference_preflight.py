@@ -25,6 +25,15 @@ OSS 对象），匿名访问公网返回 404；而上游是**匿名抓取**这�
   （http(s) / asset:// / data URL / 本地路径）；
 - 本模块回答「这个 http(s) 地址**现在**匿名取得到吗」（真实 HTTP 状态码）。
 - 两者都通过才算可用：形态不对的直接判不可达（不发请求），形态对的再做探活。
+
+**出口只有两个，探活实现只有一份**：
+
+- 提交前：:func:`preflight_references` / :func:`preflight_or_raise`（形态判定 + 探活，
+  不通过就不提交）；
+- 上传/落库后：:func:`verify_uploaded_url_reachable`（同一个 :func:`probe_reference_url`，
+  只报告不阻断）。
+
+也就是说：**探活只有一个实现**，别再在别处写第二份 HEAD/GET 探测。
 """
 
 from __future__ import annotations
@@ -35,6 +44,7 @@ from typing import Any, Awaitable, Callable, Iterable, Sequence
 import httpx
 from fastapi import HTTPException
 
+from app.core import storage
 from app.services.studio.llm_orchestration import dry_run
 
 # 提交前预检被拦下时用的 HTTP 状态码：不是参数错误，而是"当前状态不支持这次提交"
@@ -79,8 +89,15 @@ _HOW_TO_FIX_CODE: dict[str, str] = {
         "参考图是内嵌的 base64 data URL，多数上游只接受 http(s):// 图片地址，取不到这张图。"
         "请先把该图片上传到公网（OSS）再提交。"
     ),
-    "not_found": "该地址匿名访问返回「对象不存在」。请重新上传以生成公网可读地址，或刷新该资产的 OSS 地址后重试。",
-    "denied": "该地址匿名访问被拒绝：对象不是公开可读的。请为该对象设置公开读（ACL public-read），或改用公网 bucket 前缀后重试。",
+    "not_found": (
+        "该地址匿名访问返回「对象不存在」。请重新上传以生成公网可读地址，或刷新该资产的 OSS 地址后重试；"
+        "若确认对象已上传，请检查 bucket 的公共读策略（ACL public-read）以及 s3_public_base_url 是否指向该 bucket。"
+    ),
+    "denied": (
+        "该地址匿名访问被拒绝：对象不是公开可读的。"
+        "请为该对象设置公开读（ACL public-read）或给 bucket 配置公共读策略，"
+        "并确认 s3_public_base_url 指向的是这个 bucket 的公网域名后重试。"
+    ),
     "server_error": "对象存储/图床返回服务端错误，当前取不到这张图。请稍后重试；持续失败请检查存储服务状态。",
     "unverified": "匿名探活没有完成，无法确认上游能否取到这张图。请确认该地址在公网可访问后重试。",
 }
@@ -132,6 +149,9 @@ class ReferenceProbeResult:
             "result": "reachable" if self.reachable else "unreachable",
             "http_status": self.http_status,
             "probe_method": self.method,
+            # 与 probe_method 同值：``method`` 是上传/adopt 响应里的字段名，
+            # ``probe_method`` 是既有预检报告沿用的名字，两个都留着免得破坏既有消费方。
+            "method": self.method,
             "reason": self.reason,
             "how_to_fix": self.how_to_fix,
             "how_to_fix_code": self.how_to_fix_code,
@@ -459,6 +479,112 @@ async def preflight_or_raise(
     return report
 
 
+# ---------------------------------------------------------------------------
+# 上传 / 落库 **之后**的匿名可达性验证（全项目唯一实现）
+# ---------------------------------------------------------------------------
+
+#: 没有拿到可验证的地址时 ``probe["result"]`` 的取值（不是"不可达"，是"没有地址"）。
+PROBE_RESULT_NO_URL = "no_url"
+
+
+@dataclass(slots=True)
+class UploadReachability:
+    """一个**已经上传/落库完成**的地址的匿名可达性结论（只报告，不阻断）。"""
+
+    url: str = ""
+    #: True=匿名公网可达；False=不可达（已如实告警）；None=未验证（演练模式 / 没有地址）
+    reachable: bool | None = None
+    #: 探活明细（``ReferenceProbeResult.to_read()`` 的同结构）：
+    #: result / http_status / method（= probe_method）/ kind / reason / how_to_fix / how_to_fix_code
+    probe: dict[str, Any] = field(default_factory=dict)
+    #: 给用户看的中文告警（含修法；不可达时为一条，可用时为空）
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def skipped(self) -> bool:
+        return self.reachable is None
+
+    def to_read(self) -> dict[str, Any]:
+        """给接口/日志用的结构（**不含** file_id 与本机绝对路径）。"""
+        return {
+            "url": self.url,
+            "url_reachable": self.reachable,
+            "probe": dict(self.probe),
+            "warnings": list(self.warnings),
+        }
+
+
+def _unreachable_warning(outcome: ReferenceProbeResult, label: str) -> str:
+    """不可达时给用户看的一句话：结论 + 真实状态码 + 原因 + 修法（可操作）。"""
+    return (
+        f"已入库，但「{label}」的地址**匿名公网访问不可达**"
+        + (f"（HTTP {outcome.http_status}）" if outcome.http_status else "")
+        + f"：{outcome.reason} {outcome.how_to_fix}"
+        + "（这条地址当垫图/参考图交给上游时会被上游拒绝。）"
+    )
+
+
+async def verify_uploaded_url_reachable(
+    url: str,
+    *,
+    label: str,
+    probe: Callable[..., Awaitable[ReferenceProbeResult]] | None = None,
+    timeout: float = PROBE_TIMEOUT_SECONDS,
+) -> UploadReachability:
+    """**上传/落库之后**再匿名验证一次这个地址上游取不取得到（故障 A 的收尾动作）。
+
+    为什么必须有这一步：对象存储写入成功 ≠ 这个对象**匿名可读**。2026-09-19 真实验收里，
+    本机可读、匿名访问 404 的地址被当成公网地址交给了上游 → 上游任务失败
+    （原文「无法获取输入媒体 URL（404/410）」）。把验证放在**上传之后**，
+    用户当场就能看到「已入库，但这个地址匿名取不到」以及怎么修，而不是等下一次提交才炸。
+
+    这是**唯一**的「上传后验证」出口（``adopt`` 与 ``POST /studio/files/upload`` 都走它），
+    探活实现复用 :func:`probe_reference_url`，不在别处再写一份 HEAD/GET 探测。
+
+    返回 :class:`UploadReachability`：
+
+    - ``reachable=True/False``：真的探过，结论是可达 / 不可达；
+    - ``reachable=None``：**未验证** —— 演练模式（一个字节都不出站）或压根没拿到地址
+      （此时 ``probe["result"] == PROBE_RESULT_NO_URL``，并给出"公网基址缺失"的修法）；
+    - 验证永远**不阻断**上传/采纳本身：图已经存下来了，这里只如实报告 + 给修法；
+    - ``label`` 必须是**可读名**（文件名 / 资产名），不要传 ``file_id``：它会进入用户可见文案。
+    """
+    clean = _normalize_text(url)
+
+    if dry_run.dry_run_enabled():
+        return UploadReachability(
+            url=clean,
+            reachable=None,
+            probe={
+                "result": "skipped",
+                "reason": "[DRY_RUN] 演练模式未做匿名可达性验证。",
+            },
+            warnings=[],
+        )
+
+    if not clean:
+        # 上传之后连一个地址都没有（典型：S3 驱动没配 s3_public_base_url，见 storage）。
+        # 这不是"探活失败"，但上游一定取不到，必须如实说清楚 + 给修法。
+        return UploadReachability(
+            url="",
+            reachable=None,
+            probe={"result": PROBE_RESULT_NO_URL, "reason": storage.PUBLIC_BASE_MISSING_REASON},
+            warnings=[storage.PUBLIC_BASE_MISSING_REASON],
+        )
+
+    runner = probe or probe_reference_url
+    outcome = await runner(clean, label=label, timeout=timeout)
+    warnings: list[str] = []
+    if not outcome.reachable:
+        warnings.append(_unreachable_warning(outcome, label))
+    return UploadReachability(
+        url=clean,
+        reachable=bool(outcome.reachable),
+        probe=outcome.to_read(),
+        warnings=warnings,
+    )
+
+
 __all__ = [
     "BLOCKED_STATUS_CODE",
     "KIND_DATA_URL",
@@ -470,15 +596,18 @@ __all__ = [
     "KIND_PUBLIC",
     "KIND_REACHABLE",
     "KIND_UNREACHABLE",
+    "PROBE_RESULT_NO_URL",
     "PROBE_TIMEOUT_SECONDS",
     "UNREACHABLE_ERROR_CODE",
     "PreflightReport",
     "ReferenceCandidate",
     "ReferencePreflightBlocked",
     "ReferenceProbeResult",
+    "UploadReachability",
     "build_blocked_detail",
     "is_loopback_or_private_url",
     "preflight_or_raise",
     "preflight_references",
     "probe_reference_url",
+    "verify_uploaded_url_reachable",
 ]

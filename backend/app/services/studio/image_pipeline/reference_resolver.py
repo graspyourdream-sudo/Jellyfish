@@ -88,10 +88,10 @@ async def _resolve_url_for_file(db: AsyncSession, *, file_id: str) -> tuple[str,
        也正是垫图需要的形态（AGENTS.md V0 #10：长期资产优先用 OSS URL）。
     2. **相对 key**——先按**唯一正确的公网口径**拼 OSS 地址（``storage.public_url_for_key``，
        即 ``{s3_public_base_url}/{base_path}/{key}``），再照旧向对象存储确认这个对象真的在。
-       为什么不能只信 ``get_file_info().url``：没配 ``s3_public_base_url`` 时它会退回
-       path-style ``{endpoint}/{bucket}/{key}`` —— 在阿里云 OSS 上那是**错误地址**
-       （匿名 404），而 404 的地址发给上游就是「无法获取输入媒体 URL（404/410）」
-       这条真实故障的成因。
+       为什么不能只信 ``get_file_info().url``：没配 ``s3_public_base_url`` 时它**不再**退回
+       path-style ``{endpoint}/{bucket}/{key}``（那在阿里云 OSS 上是**错误地址**，匿名 404，
+       而 404 的地址发给上游就是「无法获取输入媒体 URL（404/410）」这条真实故障的成因），
+       而是返回空串 → 这里给出"没有公网地址"的中文修法。
     3. **本地驱动**——没有公网基址时退回 ``get_file_info().url``（``/files/{key}`` 形式）。
        这种地址上游**取不到**，由提交前的可达性预检（``reference_preflight``）拦下并给出修法。
     """
@@ -105,19 +105,20 @@ async def _resolve_url_for_file(db: AsyncSession, *, file_id: str) -> tuple[str,
     if _is_absolute_url(storage_key):
         return storage_key, ""
 
-    # 相对 key：先按**唯一正确的公网口径**拼 OSS 地址（``public_url_for_key``），
-    # 再照旧向对象存储确认这个对象真的在（拿不到就降级成 warning，不给假地址）。
-    # 为什么不能只信 get_file_info 的 url：没配 ``s3_public_base_url`` 时它会退回
-    # path-style ``{endpoint}/{bucket}/{key}`` —— 在阿里云 OSS 上那是**错地址**（匿名 404），
-    # 而 404 的地址发给上游就是「无法获取输入媒体 URL（404/410）」这条真实故障的成因。
-    public_url = str(storage.public_url_for_key(storage_key) or "").strip()
+    # 相对 key：先按**唯一**的地址口径拼（``public_url_for_key``），只有拿到**公网**
+    # 地址才用它；本地驱动的 /files/... 回放地址不算公网地址（上游取不到）。
+    public_url = storage.public_url_for_key(storage_key)
+    if not storage.is_public_url(public_url):
+        public_url = ""
     try:
         info = await storage.get_file_info(key=storage_key)
     except Exception as exc:  # noqa: BLE001 - 对象缺失/权限/后端异常都降级
         return "", f"对象存储读取失败（key={storage_key}）：{exc}"
     url = public_url or str(info.url or "")
     if not url:
-        return "", f"对象存储没有返回可访问地址（key={storage_key}）。"
+        # 连一个地址都拿不到（典型：S3 驱动没配 s3_public_base_url）：直接用存储层
+        # 那份可操作说明，避免这个配置缺口在几处写出几种说法。
+        return "", storage.PUBLIC_BASE_MISSING_REASON
     return url, ""
 
 

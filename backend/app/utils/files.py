@@ -321,9 +321,10 @@ async def resolve_vendor_image_ref(  # pylint: disable=too-many-return-statement
 
     # S3 驱动下，逻辑 key 的对象其实已经公网可读（``{public_base}/{base_path}/{key}``）。
     # 这类 key 以前会被当成本机文件转 data URL → 明明公网可读却被判"供应商无法访问"。
-    # 只有**显式**配置了 s3_public_base_url 才走这条（不使用 path-style 回退地址）。
+    # 地址只有 ``storage.public_url_for_key`` 一个口径，且必须是**公网**地址才算数
+    # （本地驱动的 ``/files/{key}`` 只是本机回放地址，供应商取不到）。
     s3_public_url = storage.public_url_for_key(storage_key)
-    if s3_public_url:
+    if storage.is_public_url(s3_public_url):
         return VendorImageRef(
             file_id=clean_id,
             storage_key=storage_key,
