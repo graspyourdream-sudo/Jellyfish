@@ -1,39 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import {
-  Alert,
-  Button,
-  Card,
-  Dropdown,
-  Empty,
-  Input,
-  Modal,
-  Segmented,
-  Space,
-  Spin,
-  Table,
-  Tag,
-  Tooltip,
-  Typography,
-  message,
-} from 'antd'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Alert, Button, Card, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd'
 import type { TableColumnsType } from 'antd'
-import {
-  ArrowRightOutlined,
-  MoreOutlined,
-  PictureOutlined,
-  PlusOutlined,
-  ReloadOutlined,
-} from '@ant-design/icons'
+import { ArrowRightOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useNavigate, useParams } from 'react-router-dom'
-import { StudioEntitiesApi } from '../../../../../services/studioEntities'
-import {
-  fetchImagePromptSlots,
-  getAssetImagePrompts,
-  previewImagePlan,
-  saveAssetImagePrompts,
-  type ImagePlanTarget,
-  type ImagePromptSlotSpec,
-} from '../../../../../services/llmPipelineApi'
+import { StudioEntitiesService } from '../../../../../services/generated'
+import { previewImagePlan, type ImagePlanTarget } from '../../../../../services/llmPipelineApi'
 import {
   getProjectSignalAssetTypeLabel,
   type ProjectSignalAsset,
@@ -44,7 +15,6 @@ import { AssetImagePromptLlmPanel } from './AssetImagePromptLlmPanel'
 import { GenerationGateBanner } from '../../../components/GenerationGateBanner'
 import { useGenerationGate } from '../../../components/generationGate'
 import { classifyGenerationFailure, failureText } from '../../../components/generationGate'
-import { StudioEntitiesService } from '../../../../../services/generated'
 import {
   ASSET_PREP_STATUSES,
   assetPrepInputFromReadiness,
@@ -52,27 +22,7 @@ import {
   resolveAssetPrepStatus,
   summarizeAssetPrep,
 } from '../assetPrepStatus'
-
-/** 提示词来源的展示口径（与后端 `prompt_source` 一一对应）。 */
-const PROMPT_SOURCE_META: Record<string, { label: string; color: string; hint: string }> = {
-  saved: {
-    label: '已保存提示词',
-    color: 'green',
-    hint: '第 2 步「资产准备」在资产上保存的提示词 —— 这一环确认保存的产物正在被生图实际使用',
-  },
-  template: {
-    label: '模板拼装',
-    color: 'gold',
-    hint: '该资产还没有保存过图片提示词，本次用确定性模板 + 资产描述拼装',
-  },
-  request: { label: '本次显式指定', color: 'blue', hint: '调用方传了 prompt_overrides，优先级最高' },
-}
-
-const PLAN_ASSET_TYPES = [
-  { label: '角色', value: 'character' as const },
-  { label: '场景', value: 'scene' as const },
-  { label: '道具', value: 'prop' as const },
-]
+import { AssetProductionArea } from './AssetProductionArea'
 
 const TYPE_COLOR: Record<ProjectSignalAssetType, string> = {
   character: 'purple',
@@ -86,19 +36,26 @@ function assetKey(asset: ProjectSignalAsset): string {
 }
 
 /**
- * 第 3 步「图片准备」的入口页。
+ * 第 2 步「资产准备」的入口页 —— 连续生产流程的主界面。
  *
- * 说明（本轮实现选择）：项目资产的图片与图片提示词是在**已有的资产编辑页**里完成的
- * （角色 → `/projects/:projectId/roles/:id/edit`，场景/道具/服装 → `/assets/.../:id/edit`），
- * 全局资产管理页 `/assets` 只覆盖演员/场景/道具/服装、且不区分项目。
- * 所以这里做成「项目资产图片清单 + 逐个跳到已有编辑页」的就地入口，
- * 而不是简单把人扔到 `/assets`；顶部再给一个「前往资产库」的次要入口。
+ * 流程（同屏连续完成，不再来回跳页面）：
+ *   剧本提取候选 → 审核候选并关联/新建（`ProjectExtractCandidatesPanel`，本页上方）
+ *   → 批量生成/完善图片提示词 → **选择要生成的资产 → 批量出图 → 进度与失败原因
+ *   → 结果卡片 → 采纳 → 设为定版** → 全部必要资产定版后进入下一步。
+ *
+ * 中间那段「生产区」在 `AssetProductionArea` 里（本轮新增），它复用既有的出图管线：
+ *   - 只读计划 `POST /studio/image-pipeline/plan/preview`
+ *   - 同进程内联出图 `POST /studio/image-pipeline/submit`（**不进任何队列**）
+ *   - 任务回读 `GET /studio/image-pipeline/task/{id}`、采纳 `POST /studio/image-pipeline/adopt`
+ *   - 提示词生成/完善 `POST /studio/llm/image-prompt/preview` + 既有保存接口
+ *
+ * 本组件只负责：总体状态（与步骤判定同一数据源）、大模型批量提示词面板、技术详情。
  */
 type ProjectImagePrepPanelProps = {
   assets: ProjectSignalAsset[]
   detail: ProjectStepSignalDetail
   loading: boolean
-  /** 保存图片提示词后重算本步骤信号（摘要条与资产表要跟着变，不能只刷新我自己的预览）。 */
+  /** 保存图片提示词 / 采纳 / 设为定版后重算本步骤信号（摘要条与资产表要跟着变） */
   onReload?: () => void
 }
 
@@ -109,30 +66,30 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
   /**
    * 打开资产编辑页。
    *
-   * `generate=true` 时带上 `?generate=1`：资产编辑页会自动打开该资产的出图确认弹窗，
-   * 这样「生成」入口就不是把用户扔到一个还要再点两下的页面。
+   * `generate=true` 时带上 `?generate=1`：资产编辑页会自动打开该资产的出图确认弹窗。
    * 两条路径都带项目作用域（character 走项目角色路由，其余带 returnTo），
    * 避免出现「从资产库进入 → 缺项目作用域 → 出图静默失败」。
    */
-  const openAssetEditor = (asset: ProjectSignalAsset, options?: { generate?: boolean }) => {
-    if (!projectId) return
-    const assetType = asset.type
-    const generateParam = options?.generate ? '?generate=1' : ''
-    if (assetType === 'character') {
-      navigate(`/projects/${projectId}/roles/${asset.id}/edit${generateParam}`)
-      return
-    }
-    const tabByType: Record<Exclude<ProjectSignalAssetType, 'character'>, 'scenes' | 'props' | 'costumes'> = {
-      scene: 'scenes',
-      prop: 'props',
-      costume: 'costumes',
-    }
-    const segment = assetType === 'scene' ? 'scenes' : assetType === 'prop' ? 'props' : 'costumes'
-    // 回到第 3 步（图片准备），而不是退回旧的资产 Tab 链接。
-    const returnTo = encodeURIComponent(`/projects/${projectId}?step=image_prep&tab=${tabByType[assetType]}`)
-    const separator = '?'
-    navigate(`/assets/${segment}/${asset.id}/edit${separator}returnTo=${returnTo}${options?.generate ? '&generate=1' : ''}`)
-  }
+  const openAssetEditor = useCallback(
+    (asset: ProjectSignalAsset, options?: { generate?: boolean }) => {
+      if (!projectId) return
+      const assetType = asset.type
+      const generateParam = options?.generate ? '?generate=1' : ''
+      if (assetType === 'character') {
+        navigate(`/projects/${projectId}/roles/${asset.id}/edit${generateParam}`)
+        return
+      }
+      const segment = assetType === 'scene' ? 'scenes' : assetType === 'prop' ? 'props' : 'costumes'
+      const tabByType: Record<Exclude<ProjectSignalAssetType, 'character'>, 'scenes' | 'props' | 'costumes'> = {
+        scene: 'scenes',
+        prop: 'props',
+        costume: 'costumes',
+      }
+      const returnTo = encodeURIComponent(`/projects/${projectId}?step=image_prep&tab=${tabByType[assetType]}`)
+      navigate(`/assets/${segment}/${asset.id}/edit?returnTo=${returnTo}${options?.generate ? '&generate=1' : ''}`)
+    },
+    [navigate, projectId],
+  )
 
   /**
    * 每行资产的业务状态与顶部统计**共用同一个映射**
@@ -161,16 +118,9 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
 
   const prepSummary = useMemo(() => summarizeAssetPrep(prepInputs), [prepInputs])
 
-  const pending = useMemo(
-    () => assets.filter((asset) => asset.hasPendingCandidate || !asset.hasImage || !asset.hasImagePrompt),
-    [assets],
-  )
-
-  // ---- 生图计划预览（只读端点，永不触网、不花钱）----
-  // 这一步存在的意义：让「第 3 步保存的图片提示词」在**生产流程里**能当场看到
-  // 被生图计划读取（prompt_source=saved），而不是只能靠接口测试或肉眼看文本。
-  const [planType, setPlanType] = useState<'character' | 'scene' | 'prop'>('character')
-  const [planStage, setPlanStage] = useState<'character_sheet' | 'reference_batch'>('character_sheet')
+  // ---- 出图计划预览（只读端点，永不触网、不花钱）----
+  // 这一步存在的意义：让「保存的图片提示词」在**生产流程里**能当场看到被生图计划读取
+  // （prompt_source=saved），而不是只能靠接口测试或肉眼看文本。
   const [plan, setPlan] = useState<{
     targets: ImagePlanTarget[]
     warnings: string[]
@@ -178,212 +128,98 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
   } | null>(null)
   const [planLoading, setPlanLoading] = useState(false)
   const [planError, setPlanError] = useState('')
-  /** 「查看定版图」预览的资产 */
-  const [previewAsset, setPreviewAsset] = useState<ProjectSignalAsset | null>(null)
-  /** 提取面板锚点：「待确认」状态的主操作把用户送回上面的确认写入区域 */
-  const extractPanelRef = useRef<HTMLDivElement | null>(null)
-  /** 正在设为定版的资产 key */
-  const [settingPrimaryKey, setSettingPrimaryKey] = useState('')
-
-  /**
-   * 「设为定版」：每个资产只有**唯一主操作**——把该资产已有图片里的一张设为 `is_primary`。
-   * 复用既有的实体图片 PATCH 接口，不新建链路、不复制文件。
-   * 目标图片 ID 由统一数据源（`asset-readiness`）给出：它同时是缩略图用的那张。
-   */
-  const handleSetPrimary = async (asset: ProjectSignalAsset) => {
-    const imageId = asset.imageId
-    if (!imageId) {
-      message.warning('该资产还没有图片，请先上传或生成图片')
-      return
-    }
-    setSettingPrimaryKey(assetKey(asset))
-    try {
-      await StudioEntitiesService.updateEntityImageApiV1StudioEntitiesEntityTypeEntityIdImagesImageIdPatch({
-        entityType: asset.type,
-        entityId: asset.id,
-        imageId,
-        requestBody: { is_primary: true } as never,
-      })
-      message.success(`已把「${asset.name}」的这张图设为定版`)
-      onReload?.()
-    } catch (error) {
-      const failure = classifyGenerationFailure(error, 'image')
-      message.error(failureText(failure))
-    } finally {
-      setSettingPrimaryKey('')
-    }
-  }
-  /** 出图门禁/模型状态（点击前显示：被 DRY_RUN 拦住 ≠ 接口没接通） */
-  const gate = useGenerationGate()
+  const [planType, setPlanType] = useState<ProjectSignalAssetType>('character')
 
   const loadPlan = useCallback(async () => {
     if (!projectId) return
+    if (planType === 'costume') {
+      // 出图服务只接受人物/场景/道具，服装没有可预览的出图计划
+      setPlan(null)
+      setPlanError('')
+      return
+    }
     setPlanLoading(true)
     setPlanError('')
     try {
       const data = await previewImagePlan({
         project_id: projectId,
         asset_type: planType,
-        stage: planStage,
+        stage: 'reference_batch',
         use_primary_reference: true,
       })
       setPlan({ targets: data.targets ?? [], warnings: data.warnings ?? [], summary: data.summary ?? {} })
     } catch (e) {
-      setPlanError((e as Error)?.message || '生图计划预览失败')
+      setPlanError((e as Error)?.message || '出图计划读取失败')
       setPlan(null)
     } finally {
       setPlanLoading(false)
     }
-  }, [planStage, planType, projectId])
+  }, [planType, projectId])
 
   useEffect(() => {
     if (assets.length === 0) return
     void loadPlan()
   }, [assets.length, loadPlan])
 
-  const planColumns: TableColumnsType<ImagePlanTarget> = [
+  /** 出图守卫状态（点击前显示：被演练模式拦住 ≠ 接口没接通） */
+  const gate = useGenerationGate()
+
+  /** 兼容旧入口：把某资产的已有图片设为定版（生产区之外的单点入口保留在资产明细表里） */
+  const [settingPrimaryKey, setSettingPrimaryKey] = useState('')
+  const handleSetPrimary = useCallback(
+    async (asset: ProjectSignalAsset) => {
+      const imageId = asset.imageId
+      if (!imageId) {
+        message.warning('该资产还没有图片，请先在生产区生成或上传图片')
+        return
+      }
+      setSettingPrimaryKey(assetKey(asset))
+      try {
+        await StudioEntitiesService.updateEntityImageApiV1StudioEntitiesEntityTypeEntityIdImagesImageIdPatch({
+          entityType: asset.type,
+          entityId: asset.id,
+          imageId,
+          requestBody: { is_primary: true } as never,
+        })
+        message.success(`已把「${asset.name}」的这张图设为定版`)
+        onReload?.()
+      } catch (error) {
+        const failure = classifyGenerationFailure(error, 'image')
+        message.error(failureText(failure))
+      } finally {
+        setSettingPrimaryKey('')
+      }
+    },
+    [onReload],
+  )
+
+  const planSavedCount = (plan?.targets ?? []).filter((target) => target.prompt_source === 'saved').length
+  const planReferenceCount = (plan?.targets ?? []).filter((target) => Boolean(target.reference_image)).length
+
+  const detailColumns: TableColumnsType<ProjectSignalAsset> = [
     {
       title: '资产',
-      dataIndex: 'name',
+      key: 'name',
       ellipsis: true,
-      render: (name: string, row) => (
-        <span className="flex items-center gap-2 min-w-0">
-          <Tag color={TYPE_COLOR[row.asset_type as ProjectSignalAssetType] ?? 'default'} className="mr-0">
-            {getProjectSignalAssetTypeLabel(row.asset_type as ProjectSignalAssetType)}
+      render: (_: unknown, record) => (
+        <span className="flex min-w-0 items-center gap-2">
+          <Tag color={TYPE_COLOR[record.type]} className="mr-0">
+            {getProjectSignalAssetTypeLabel(record.type)}
           </Tag>
-          <span className="truncate" title={name}>
-            {name || row.source_asset_id}
+          <span className="truncate" title={record.name}>
+            {record.name || record.id}
           </span>
         </span>
       ),
     },
     {
-      title: '提示词来源',
-      dataIndex: 'prompt_source',
-      width: 132,
-      render: (source: string) => {
-        const meta = PROMPT_SOURCE_META[String(source ?? '')] ?? PROMPT_SOURCE_META.template
-        return (
-          <Tooltip title={meta.hint}>
-            <Tag color={meta.color} bordered={false}>
-              {meta.label}
-            </Tag>
-          </Tooltip>
-        )
-      },
-    },
-    {
-      title: '本次使用的提示词',
-      dataIndex: 'prompt',
-      ellipsis: true,
-      render: (prompt: string) => (
-        <Tooltip title={<div className="max-w-[420px] whitespace-pre-wrap">{prompt}</div>}>
-          <span className="text-xs text-gray-600">{prompt || '—'}</span>
-        </Tooltip>
-      ),
-    },
-    {
-      title: '垫图（定版主图）',
-      dataIndex: 'reference_image',
-      width: 150,
-      render: (url: string) => {
-        const text = String(url ?? '')
-        if (!text) return <Tag bordered={false} className="text-gray-400">{planStage === 'reference_batch' ? '无可用垫图' : '定妆照不带垫图'}</Tag>
-        const fileId = text.split('/').pop() ?? text
-        return (
-          <Tooltip title={text}>
-            <Tag color="blue" bordered={false}>
-              {fileId.length > 18 ? `${fileId.slice(0, 14)}…` : fileId}
-            </Tag>
-          </Tooltip>
-        )
-      },
-    },
-  ]
-
-  const planSavedCount = (plan?.targets ?? []).filter((t) => t.prompt_source === 'saved').length
-  const planReferenceCount = (plan?.targets ?? []).filter((t) => Boolean(t.reference_image)).length
-
-  // ---- 手工填写图片提示词（DRY_RUN 下也能把"自己的"提示词写进 image_prompts）----
-  const [slotSpecs, setSlotSpecs] = useState<ImagePromptSlotSpec[]>([])
-  const [editorAsset, setEditorAsset] = useState<ProjectSignalAsset | null>(null)
-  const [editorDraft, setEditorDraft] = useState<Record<string, string>>({})
-  const [editorLoading, setEditorLoading] = useState(false)
-  const [editorSaving, setEditorSaving] = useState(false)
-
-  useEffect(() => {
-    void (async () => {
-      try {
-        setSlotSpecs(await fetchImagePromptSlots())
-      } catch {
-        setSlotSpecs([])
-      }
-    })()
-  }, [])
-
-  const editorSlots = useMemo(
-    () => slotSpecs.filter((slot) => slot.entity_type === editorAsset?.type),
-    [editorAsset, slotSpecs],
-  )
-
-  const openPromptEditor = useCallback(async (asset: ProjectSignalAsset) => {
-    setEditorAsset(asset)
-    setEditorDraft({})
-    setEditorLoading(true)
-    try {
-      const res = await StudioEntitiesApi.get(asset.type, asset.id)
-      setEditorDraft(getAssetImagePrompts(res.data as Record<string, unknown> | null))
-    } catch {
-      setEditorDraft({})
-    } finally {
-      setEditorLoading(false)
-    }
-  }, [])
-
-  const savePromptEditor = useCallback(async () => {
-    if (!editorAsset) return
-    const cleaned = Object.fromEntries(
-      Object.entries(editorDraft).filter(([, value]) => String(value ?? '').trim() !== ''),
-    )
-    setEditorSaving(true)
-    try {
-      // 合并写入：只覆盖本次填写的类别，不丢掉其它已保存类别。
-      await saveAssetImagePrompts(
-        editorAsset.type,
-        editorAsset.id,
-        cleaned as Record<string, string>,
-      )
-      message.success(`已保存 ${Object.keys(cleaned).length} 个槽位的图片提示词`)
-      setEditorAsset(null)
-      // 先重算步骤信号（摘要条/资产表的「图片提示词」列），再刷新生图计划
-      onReload?.()
-      await loadPlan()
-    } catch (e) {
-      message.error((e as Error)?.message || '保存图片提示词失败')
-    } finally {
-      setEditorSaving(false)
-    }
-  }, [editorAsset, editorDraft, loadPlan, onReload])
-
-  /**
-   * 表格里的资产名直接来自统一数据源（`asset-readiness`）：
-   * 四类资产都带 `name`，不再需要为场景/道具/服装补抓一次详情。
-   */
-  const displayName = (asset: ProjectSignalAsset) => asset.name || asset.id
-
-  const orderedAssets = useMemo(() => {
-    const rest = assets.filter((asset) => !pending.includes(asset))
-    return [...pending, ...rest]
-  }, [assets, pending])
-
-  const columns: TableColumnsType<ProjectSignalAsset> = [
-    {
       title: '业务状态',
       key: 'prepStatus',
-      width: 190,
+      width: 210,
       render: (_: unknown, record) => {
         const status = statusByAsset.get(assetKey(record)) ?? ASSET_PREP_STATUSES.pending_candidate
-        const color = status.tone === 'green' ? 'green' : status.tone === 'blue' ? 'blue' : status.tone === 'gold' ? 'gold' : 'default'
+        const color =
+          status.tone === 'green' ? 'green' : status.tone === 'blue' ? 'blue' : status.tone === 'gold' ? 'gold' : 'default'
         return (
           <Space size={4} wrap>
             <Tag color={color} bordered={false}>
@@ -395,154 +231,51 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
       },
     },
     {
-      title: '资产',
-      dataIndex: 'name',
-      key: 'name',
-      ellipsis: true,
-      render: (_: string, record) => (
-        <span className="flex items-center gap-2 min-w-0">
-          <Tag color={TYPE_COLOR[record.type]} className="mr-0">
-            {getProjectSignalAssetTypeLabel(record.type)}
-          </Tag>
-          <span className="truncate" title={displayName(record)}>
-            {displayName(record)}
-          </span>
-        </span>
-      ),
-    },
-    {
-      title: '参考图片',
-      key: 'image',
-      width: 110,
-      render: (_, record) =>
-        record.hasImage ? (
-          <Tag color="green" bordered={false}>
-            已有
-          </Tag>
-        ) : (
-          <Tag color="gold" bordered={false}>
-            待准备
-          </Tag>
-        ),
-    },
-    {
-      title: '图片提示词',
-      key: 'prompt',
-      width: 130,
-      render: (_, record) =>
-        record.hasImagePrompt ? (
-          <Tag color="green" bordered={false}>
-            已保存
-          </Tag>
-        ) : (
-          <Tag color="gold" bordered={false}>
-            待生成
-          </Tag>
-        ),
-    },
-    {
-      title: '定版图',
+      title: '定版操作',
       key: 'primary',
-      width: 92,
-      render: (_, record) =>
+      width: 130,
+      render: (_: unknown, record) =>
         record.hasImage ? (
-          <Button size="small" type="link" className="!px-0" onClick={() => setPreviewAsset(record)}>
-            查看
-          </Button>
-        ) : (
-          <Tooltip title="该资产还没有参考图/定版图">
-            <Tag bordered={false} className="text-gray-400">
-              未生成
-            </Tag>
+          <Tooltip title="把该资产当前的首选图设为定版；已有定版时会被替换，请确认后再点">
+            <Button
+              size="small"
+              loading={settingPrimaryKey === assetKey(record)}
+              disabled={record.hasPrimary}
+              onClick={() => void handleSetPrimary(record)}
+            >
+              {record.hasPrimary ? '已是定版' : '设为定版'}
+            </Button>
           </Tooltip>
+        ) : (
+          <Tag bordered={false} className="text-gray-400">
+            未生成
+          </Tag>
         ),
     },
     {
-      title: '下一步（唯一主操作）',
-      key: 'action',
-      width: 260,
-      render: (_: unknown, record) => {
-        const status = statusByAsset.get(assetKey(record)) ?? ASSET_PREP_STATUSES.pending_candidate
-        const busy = settingPrimaryKey === assetKey(record)
-        // 每个状态只给一个主按钮，其余入口退到次要位置（编辑 / 填提示词 / 查看）
-        const primaryButton = (() => {
-          switch (status.key) {
-            case 'pending_candidate':
-              return (
-                <Button size="small" type="primary" onClick={() => extractPanelRef.current?.scrollIntoView({ behavior: 'smooth' })}>
-                  确认写入
-                </Button>
-              )
-            case 'linked_prompt_todo':
-              return (
-                <Button size="small" type="primary" loading={editorLoading} onClick={() => void openPromptEditor(record)}>
-                  填提示词
-                </Button>
-              )
-            case 'prompt_ready_image_todo':
-              return (
-                <Tooltip title="进入资产编辑页并直接打开出图确认（复用既有 image-pipeline）">
-                  <Button size="small" type="primary" icon={<PictureOutlined />} onClick={() => openAssetEditor(record, { generate: true })}>
-                    生成图片
-                  </Button>
-                </Tooltip>
-              )
-            case 'image_ready_primary_todo':
-              return (
-                <Tooltip title="把该资产已有的一张图片设为定版">
-                  <Button size="small" type="primary" loading={busy} onClick={() => void handleSetPrimary(record)}>
-                    设为定版
-                  </Button>
-                </Tooltip>
-              )
-            default:
-              return (
-                <Button size="small" type="primary" onClick={() => setPreviewAsset(record)}>
-                  查看定版图
-                </Button>
-              )
-          }
-        })()
-
-        return (
-          <Space size={4} wrap>
-            {primaryButton}
-            <Dropdown
-              menu={{
-                items: [
-                  { key: 'edit', label: '编辑资产', onClick: () => openAssetEditor(record) },
-                  { key: 'prompt', label: '填/改图片提示词', onClick: () => void openPromptEditor(record) },
-                  { key: 'generate', label: '进入出图确认', onClick: () => openAssetEditor(record, { generate: true }) },
-                  { key: 'primary', label: '设为定版', disabled: !record.imageId, onClick: () => void handleSetPrimary(record) },
-                ],
-              }}
-            >
-              <Button size="small" icon={<MoreOutlined />} />
-            </Dropdown>
-          </Space>
-        )
-      },
+      title: '资产页',
+      key: 'editor',
+      width: 110,
+      render: (_: unknown, record) => (
+        <Button size="small" type="link" className="!px-0" onClick={() => openAssetEditor(record, { generate: true })}>
+          去编辑/出图
+        </Button>
+      ),
     },
   ]
 
-  const summaryTags = (
-    <Space size={4} wrap>
-      <Tag bordered={false}>角色 {detail.assetCounts.characters}</Tag>
-      <Tag bordered={false}>场景 {detail.assetCounts.scenes}</Tag>
-      <Tag bordered={false}>道具 {detail.assetCounts.props}</Tag>
-      <Tag bordered={false}>服装 {detail.assetCounts.costumes}</Tag>
-      <Tag color={detail.assetImageCount > 0 ? 'green' : 'gold'} bordered={false}>
-        已有参考图 {detail.assetImageCount}
-      </Tag>
-    </Space>
-  )
-
   return (
     <Card
-      title="资产图片与定版"
+      title="资产准备 · 生产区"
       extra={
-        <Space>
-          {summaryTags}
+        <Space size={8} wrap>
+          <Tag bordered={false}>角色 {detail.assetCounts.characters}</Tag>
+          <Tag bordered={false}>场景 {detail.assetCounts.scenes}</Tag>
+          <Tag bordered={false}>道具 {detail.assetCounts.props}</Tag>
+          <Tag bordered={false}>服装 {detail.assetCounts.costumes}</Tag>
+          <Tag color={detail.assetImageCount > 0 ? 'green' : 'gold'} bordered={false}>
+            已有参考图 {detail.assetImageCount}
+          </Tag>
           <Button icon={<ArrowRightOutlined />} onClick={() => navigate('/assets')}>
             前往资产库
           </Button>
@@ -550,12 +283,9 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
       }
     >
       <div className="mb-3 text-xs text-gray-500">
-        为角色、场景、道具准备参考图片与图片提示词。每行都可以直接「生成」（进入既有出图链路）、「编辑」
-        或「查看定版图」；参考图直接决定后续镜头画面的统一性。
+        为人物、场景、道具准备图片提示词与定版图：先批量生成/完善提示词，再选择要生成的资产批量出图，
+        看进度与失败原因，最后逐张「采纳」「设为定版」。定版图会作为后续出图与镜头的参考图。
       </div>
-
-      {/* 点击前先讲清楚：模型有没有配置、是否被 DRY_RUN 演练门禁挡住 */}
-      <GenerationGateBanner gate={gate} outlet="image" />
 
       {/* 各状态数量：只有范围内资产全部「已定版」才显示就绪 */}
       <Alert
@@ -568,184 +298,114 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
             : `资产准备未就绪（${prepSummary.done}/${prepSummary.total} 已定版）`
         }
         description={<span className="text-xs">{describeAssetPrepSummary(prepSummary)}</span>}
+        action={
+          prepSummary.allDone ? (
+            <Button size="small" type="primary" onClick={() => navigate(`/projects/${projectId}?step=video_prompt`)}>
+              进入下一步
+            </Button>
+          ) : null
+        }
       />
 
       <Spin spinning={loading}>
-        {assets.length === 0 ? (
-          <Empty
-            image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="项目还没有角色/场景/道具资产：请先在第 2 步「资产准备」里确认提取候选（关联已有资产或新建）"
-          >
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate(`/projects/${projectId}?step=extract_assets`)}>
-              去提取资产
-            </Button>
-          </Empty>
-        ) : (
-          <Table<ProjectSignalAsset>
-            rowKey={assetKey}
-            size="small"
-            columns={columns}
-            dataSource={orderedAssets}
-            pagination={orderedAssets.length > 10 ? { pageSize: 10 } : false}
-          />
-        )}
+        {/* 生产区：选择 → 批量生成 → 进度 → 结果卡片 → 采纳 → 设为定版 */}
+        <AssetProductionArea
+          projectId={projectId}
+          assets={assets}
+          gate={gate}
+          onReload={onReload}
+          onOpenAssetEditor={openAssetEditor}
+          promptPanel={<AssetImagePromptLlmPanel projectId={projectId} assets={assets} onSaved={onReload} />}
+        />
       </Spin>
 
-      {assets.length > 0 ? (
-        <div className="mt-4 border-t border-slate-200 pt-4">
-          {/* 大模型生成图片提示词（单项 / 选中项 / 只补缺失 / 可停止与重试 / 确认后保存） */}
-          <AssetImagePromptLlmPanel projectId={projectId} assets={assets} onSaved={onReload} />
-        </div>
-      ) : null}
-
-      {assets.length > 0 ? (
-        <div className="mt-4 border-t border-slate-200 pt-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-sm font-medium text-slate-900">生图计划预览（只读）</div>
-              <Typography.Text type="secondary" className="text-[11px]">
-                展示「如果现在出图，会用什么提示词、用哪张垫图」。本预览不触网、不建任务、不花钱；
-                <span className="font-medium">提示词来源标记为「已保存提示词」时，说明这一步保存的提示词正在被生图读取</span>。
-              </Typography.Text>
-            </div>
-            <Space size={8} wrap>
-              <Segmented
-                size="small"
-                value={planType}
-                onChange={(value) => setPlanType(value as 'character' | 'scene' | 'prop')}
-                options={PLAN_ASSET_TYPES}
-              />
-              <Segmented
-                size="small"
-                value={planStage}
-                onChange={(value) => setPlanStage(value as 'character_sheet' | 'reference_batch')}
-                options={[
-                  { label: '定妆照（不带垫图）', value: 'character_sheet' },
-                  { label: '垫图批量（带定版垫图）', value: 'reference_batch' },
-                ]}
-              />
-              <Button size="small" icon={<ReloadOutlined />} loading={planLoading} onClick={() => void loadPlan()}>
-                刷新计划
-              </Button>
-            </Space>
-          </div>
-
-          {planError ? (
-            <Alert className="mt-3" type="error" showIcon message="生图计划预览失败" description={planError} />
-          ) : null}
-
-          {plan ? (
+      {/* 技术详情：出图计划、原始字段、资产明细（默认收起） */}
+      <div className="mt-4 border-t border-slate-200 pt-3">
+        <Typography.Text type="secondary" className="text-[11px]">
+          技术详情（默认收起）：出图计划、资产明细与其它内部字段。日常操作不需要看这里。
+        </Typography.Text>
+        <div className="mt-2">
+          <details>
+            <summary className="cursor-pointer text-xs text-gray-500">展开技术详情</summary>
             <div className="mt-3 space-y-3">
+              {/* 生成配置与演练开关的原始状态（模型名 / 演练开关原文）只在这里出现 */}
+              <div>
+                <div className="mb-1 text-[11px] text-gray-500">生成配置与演练开关（原始状态）</div>
+                <GenerationGateBanner gate={gate} outlet="image" />
+              </div>
               <Space size={8} wrap>
-                <Tag color="blue" bordered={false}>{`目标 ${plan.targets.length} 条`}</Tag>
+                <Tag bordered={false}>{`计划目标 ${plan?.targets.length ?? 0} 条`}</Tag>
                 <Tag color={planSavedCount > 0 ? 'green' : 'gold'} bordered={false}>
                   {`用已保存提示词 ${planSavedCount} 条`}
                 </Tag>
                 <Tag color={planReferenceCount > 0 ? 'blue' : 'default'} bordered={false}>
                   {`带垫图 ${planReferenceCount} 条`}
                 </Tag>
-                {planStage === 'reference_batch' && plan.targets.length > planReferenceCount ? (
-                  <Tag color="orange" bordered={false}>
-                    {`${plan.targets.length - planReferenceCount} 条没有可用垫图（会退化为纯文本出图）`}
-                  </Tag>
-                ) : null}
+                {(['character', 'scene', 'prop'] as ProjectSignalAssetType[]).map((type) => (
+                  <Button
+                    key={type}
+                    size="small"
+                    type={planType === type ? 'primary' : 'default'}
+                    onClick={() => setPlanType(type)}
+                  >
+                    {`看${getProjectSignalAssetTypeLabel(type)}计划`}
+                  </Button>
+                ))}
+                <span className="text-[11px] text-gray-400">
+                  服装没有出图计划（出图服务只支持人物 / 场景 / 道具）
+                </span>
+                <Button size="small" icon={<ReloadOutlined />} loading={planLoading} onClick={() => void loadPlan()}>
+                  刷新计划
+                </Button>
               </Space>
-              {plan.warnings.length > 0 ? (
-                <Alert
-                  type="info"
-                  showIcon
-                  message="后端提示"
-                  description={
-                    <ul className="list-disc pl-4 space-y-0.5 text-xs">
-                      {plan.warnings.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ul>
-                  }
-                />
-              ) : null}
-              <Table<ImagePlanTarget>
-                rowKey="source_task_id"
-                size="small"
-                loading={planLoading}
-                columns={planColumns}
-                dataSource={plan.targets}
-                pagination={plan.targets.length > 8 ? { pageSize: 8, size: 'small' } : false}
-              />
-            </div>
-          ) : null}
-        </div>
-      ) : null}
 
-      <Modal
-        title={editorAsset ? `填写图片提示词 · ${displayName(editorAsset)}` : '填写图片提示词'}
-        open={Boolean(editorAsset)}
-        onCancel={() => setEditorAsset(null)}
-        width={860}
-        footer={
-          <Space>
-            <Button disabled={editorSaving} onClick={() => setEditorAsset(null)}>
-              取消
-            </Button>
-            <Button type="primary" loading={editorSaving} disabled={editorLoading} onClick={() => void savePromptEditor()}>
-              保存到资产
-            </Button>
-          </Space>
-        }
-      >
-        <div className="space-y-3">
-          <Alert
-            type="info"
-            showIcon
-            message="这是一条不花钱的填写入口"
-            description="保存后即写进该资产的提示词，生图计划会立刻把提示词来源标成「已保存提示词」——用它能当场验证第 2 步「资产准备」的保存结果真的被生图读取。留空的槽位不会覆盖原有内容；已保存的槽位会预填，可直接修改。"
-          />
-          <Spin spinning={editorLoading}>
-            {editorSlots.length === 0 ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有匹配该资产类型的提示词槽位" />
-            ) : (
-              editorSlots.map((slot) => (
-                <div key={slot.category} className="rounded-md border border-gray-200 p-3 space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Tag color="blue" className="mr-0">
-                      {slot.label || slot.category}
-                    </Tag>
-                    <span className="text-xs text-gray-500">{slot.category}</span>
-                    {slot.view_hint ? <span className="text-xs text-gray-400">{slot.view_hint}</span> : null}
-                  </div>
-                  <Input.TextArea
-                    rows={3}
-                    placeholder="例如：韩虹，35 岁女律师，齐肩黑发，深灰西装，正脸半身，纯白背景"
-                    value={editorDraft[slot.category] ?? ''}
-                    onChange={(e) =>
-                      setEditorDraft((prev) => ({ ...prev, [slot.category]: e.target.value }))
-                    }
+              {planError ? (
+                <Alert type="error" showIcon message="出图计划读取失败" description={planError} />
+              ) : null}
+
+              {plan ? (
+                <div className="space-y-2">
+                  {plan.warnings.length > 0 ? (
+                    <Alert
+                      type="info"
+                      showIcon
+                      message="后端提示"
+                      description={
+                        <ul className="list-disc pl-4 space-y-0.5 text-xs">
+                          {plan.warnings.map((item) => (
+                            <li key={item}>{item}</li>
+                          ))}
+                        </ul>
+                      }
+                    />
+                  ) : null}
+                  <Table<ImagePlanTarget>
+                    rowKey={(row, index) => `${row.source_task_id}-${index ?? 0}`}
+                    size="small"
+                    loading={planLoading}
+                    columns={[
+                      { title: '资产', dataIndex: 'name', ellipsis: true },
+                      { title: '提示词来源', dataIndex: 'prompt_source', width: 130 },
+                      { title: '提示词', dataIndex: 'prompt', ellipsis: true },
+                      { title: '垫图', dataIndex: 'reference_image', width: 160, ellipsis: true },
+                    ]}
+                    dataSource={plan.targets}
+                    pagination={plan.targets.length > 8 ? { pageSize: 8, size: 'small' } : false}
                   />
                 </div>
-              ))
-            )}
-          </Spin>
-        </div>
-      </Modal>
+              ) : null}
 
-      {/* 「查看定版图」：直接看这张定版参考图，不用再进编辑页翻槽位 */}
-      <Modal
-        title={previewAsset ? `定版图 · ${previewAsset.name}` : '定版图'}
-        open={Boolean(previewAsset)}
-        onCancel={() => setPreviewAsset(null)}
-        footer={null}
-        width={560}
-      >
-        {previewAsset?.thumbnail ? (
-          <img
-            src={previewAsset.thumbnail}
-            alt={previewAsset.name}
-            style={{ width: '100%', borderRadius: 8 }}
-          />
-        ) : (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该资产还没有参考图" />
-        )}
-      </Modal>
+              <Table<ProjectSignalAsset>
+                rowKey={assetKey}
+                size="small"
+                columns={detailColumns}
+                dataSource={assets}
+                pagination={assets.length > 10 ? { pageSize: 10 } : false}
+              />
+            </div>
+          </details>
+        </div>
+      </div>
     </Card>
   )
 }

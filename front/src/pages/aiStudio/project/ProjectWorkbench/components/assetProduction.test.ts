@@ -1,0 +1,713 @@
+/**
+ * 「资产生产区」纯逻辑的回归测试。
+ *
+ * 锁定的两条硬边界（用户点名）：
+ *   A. 批量生成默认只处理「未生成项」，不覆盖已有图片/已有定版图；
+ *   B. 对已有图片的资产「重新生成」、或把结果「设为定版」而该资产已有定版时，必须二次确认。
+ *
+ * 其余覆盖：全选 / 清空 / 只选未生成、批量范围与预计张数、在途防重复（含后端幂等键复用）、
+ * 进度数字聚合、停止后已完成结果保留、卡片状态文案不含内部字段。
+ */
+
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+
+import {
+  ASPECT_RATIO_OPTIONS,
+  COST_WARNING_DRY_RUN,
+  COST_WARNING_REAL,
+  DEFAULT_ASPECT_RATIO,
+  IMAGES_PER_ASSET,
+  INTERNAL_TOKEN_BLACKLIST,
+  applySelectionAction,
+  applyStopToQueue,
+  assetKeyOf,
+  buildBatchConfirmation,
+  buildPrimaryReplaceConfirmation,
+  buildAttemptPlan,
+  collectUserFacingTexts,
+  createAssetSubmitGate,
+  defaultGenerationSettings,
+  dedupeResults,
+  describeFailureReason,
+  describeProgressLines,
+  describeSettings,
+  describeStopEffect,
+  describeTaskStatus,
+  findIdempotentReuse,
+  hasUnsettledTasks,
+  isPlaceholderUrl,
+  isPubliclyReachableUrl,
+  isSubmittableAssetType,
+  makeSampleTask,
+  attemptForNextTry,
+  orderCardsForDisplay,
+  pickResultForAsset,
+  planAdoption,
+  requiresPrimaryReplaceConfirmation,
+  requiresRegenerateConfirmation,
+  resolveProductionHeadline,
+  resolveResultStatus,
+  resolveTaskQueryPatch,
+  selectUngenerated,
+  stageForSettings,
+  summarizeSelection,
+  summarizeTaskProgress,
+  toProductionAssets,
+  type ProductionAsset,
+  type ProductionTask,
+  type ProductionTaskStatus,
+} from './assetProduction.ts'
+
+/* ------------------------------------------------------------------ 测试夹具 */
+
+function asset(
+  type: ProductionAsset['type'],
+  id: string,
+  patch: Partial<ProductionAsset> = {},
+): ProductionAsset {
+  return {
+    key: assetKeyOf(type, id),
+    id,
+    type,
+    name: `${type}-${id}`,
+    hasImage: false,
+    hasPrimary: false,
+    hasImagePrompt: false,
+    imageId: null,
+    thumbnail: '',
+    hasPendingCandidate: false,
+    ...patch,
+  }
+}
+
+/** 混合样本：人物(未生成) / 场景(已有图片未定版) / 道具(未生成) / 服装(已有定版)。 */
+const MIXED: ProductionAsset[] = [
+  asset('character', 'c1'),
+  asset('character', 'c2', { hasImage: true, hasPrimary: false, hasImagePrompt: true, imageId: 11 }),
+  asset('scene', 's1'),
+  asset('scene', 's2', { hasImage: true, hasPrimary: true, hasImagePrompt: true, imageId: 12 }),
+  asset('prop', 'p1'),
+  asset('costume', 'k1', { hasImage: true, hasPrimary: true, hasImagePrompt: true, imageId: 13 }),
+]
+
+const ALL_KEYS = MIXED.map((item) => item.key)
+
+/* ------------------------------------------------- 硬边界 A：默认只选未生成 */
+
+test('默认勾选范围只包含没有图片的资产（硬边界 A）', () => {
+  const selected = selectUngenerated(MIXED)
+  assert.deepEqual(selected, [assetKeyOf('character', 'c1'), assetKeyOf('scene', 's1'), assetKeyOf('prop', 'p1')])
+  // 已有图片的资产（含已有定版图）一个都不能被默认选中
+  assert.ok(!selected.includes(assetKeyOf('character', 'c2')))
+  assert.ok(!selected.includes(assetKeyOf('scene', 's2')))
+  assert.ok(!selected.includes(assetKeyOf('costume', 'k1')))
+})
+
+test('默认提交范围同样只含未生成项：预计张数 = 未生成且可出图的项数', () => {
+  const scope = summarizeSelection(MIXED, selectUngenerated(MIXED))
+  assert.equal(scope.total, 3)
+  assert.equal(scope.ungenerated, 3)
+  assert.equal(scope.withExistingImage, 0)
+  assert.equal(scope.withExistingPrimary, 0)
+  assert.equal(scope.estimatedImages, 3 * IMAGES_PER_ASSET)
+})
+
+test('默认范围不会覆盖已有定版图：定版图所在的资产不在预计生成范围内', () => {
+  const scope = summarizeSelection(MIXED, selectUngenerated(MIXED))
+  assert.ok(!scope.assets.some((item) => item.hasPrimary))
+})
+
+/* --------------------------------------------------------- 全选 / 清空 / 只选未生成 */
+
+test('全选只作用在当前分页签，其它分页签的已选项保留', () => {
+  const current = [assetKeyOf('prop', 'p1')]
+  const next = applySelectionAction(MIXED, current, 'all', 'character')
+  assert.ok(next.includes(assetKeyOf('character', 'c1')))
+  assert.ok(next.includes(assetKeyOf('character', 'c2')))
+  assert.ok(next.includes(assetKeyOf('prop', 'p1')))
+  assert.ok(!next.includes(assetKeyOf('scene', 's1')))
+})
+
+test('清空选择清掉全部（含其它分页签）', () => {
+  assert.deepEqual(applySelectionAction(MIXED, ALL_KEYS, 'clear', 'character'), [])
+})
+
+test('只选未生成项：当前分页签内只选中没有图片的资产', () => {
+  const next = applySelectionAction(MIXED, [], 'ungenerated', 'scene')
+  assert.deepEqual(next, [assetKeyOf('scene', 's1')])
+  // 人物页签已有全选，再点"只选未生成"不会把已选中的已有图片项清掉（跨页签累加）
+  const again = applySelectionAction(MIXED, [assetKeyOf('character', 'c1'), assetKeyOf('character', 'c2')], 'ungenerated', 'prop')
+  assert.ok(again.includes(assetKeyOf('character', 'c2')))
+  assert.ok(again.includes(assetKeyOf('prop', 'p1')))
+})
+
+/* -------------------------------------------------------- 批量范围与预计张数 */
+
+test('批量范围：按类型分别计数 + 预计张数排除出图服务不支持的服装', () => {
+  const scope = summarizeSelection(MIXED, ALL_KEYS)
+  assert.equal(scope.total, 6)
+  assert.deepEqual(scope.byType, { character: 2, scene: 2, prop: 1, costume: 1 })
+  assert.equal(scope.submittableCount, 5)
+  assert.equal(scope.unsupportedCount, 1)
+  assert.equal(scope.estimatedImages, 5 * IMAGES_PER_ASSET)
+  assert.equal(scope.withExistingImage, 2)
+  assert.equal(scope.withExistingPrimary, 1)
+  assert.equal(scope.ungenerated, 3)
+})
+
+test('出图服务支持的类型与服装的拦截口径', () => {
+  assert.equal(isSubmittableAssetType('character'), true)
+  assert.equal(isSubmittableAssetType('scene'), true)
+  assert.equal(isSubmittableAssetType('prop'), true)
+  assert.equal(isSubmittableAssetType('costume'), false)
+})
+
+test('选择里只有服装时在提交前被拦住并说明原因（不进任何队列）', () => {
+  const scope = summarizeSelection(MIXED, [assetKeyOf('costume', 'k1')])
+  const confirmation = buildBatchConfirmation({
+    scope,
+    settings: defaultGenerationSettings(),
+    mode: 'real',
+    operation: 'generate',
+    withReference: 0,
+  })
+  assert.equal(confirmation.blocked, true)
+  assert.equal(confirmation.required, false)
+  assert.match(confirmation.blockedReason, /服装/)
+  assert.match(confirmation.blockedReason, /手工上传或生成/)
+})
+
+/* --------------------------------------------- 硬边界 B：二次确认触发条件 */
+
+test('已有图片的资产做重新生成 → 必须二次确认，且写清不会自动替换现有图片/定版', () => {
+  const regenerateTargets = MIXED.filter((item) => item.hasImage)
+  assert.equal(requiresRegenerateConfirmation(regenerateTargets), true)
+  const scope = summarizeSelection(MIXED, [assetKeyOf('character', 'c2'), assetKeyOf('scene', 's2')])
+  const confirmation = buildBatchConfirmation({
+    scope,
+    settings: defaultGenerationSettings(),
+    mode: 'dry_run',
+    operation: 'regenerate',
+    withReference: 1,
+  })
+  assert.equal(confirmation.required, true)
+  assert.equal(confirmation.blocked, false)
+  assert.match(confirmation.lines.join('\n'), /不会自动替换现有图片，也不会动现有定版图/)
+  assert.match(confirmation.lines.join('\n'), /已有定版图的资产 1 项/)
+})
+
+test('演练模式下单个未生成项的「生成」不弹二次确认（不花钱、不覆盖任何东西）', () => {
+  const scope = summarizeSelection(MIXED, [assetKeyOf('character', 'c1')])
+  const confirmation = buildBatchConfirmation({
+    scope,
+    settings: defaultGenerationSettings(),
+    mode: 'dry_run',
+    operation: 'generate',
+    withReference: 0,
+  })
+  assert.equal(confirmation.required, false)
+  assert.equal(confirmation.blocked, false)
+})
+
+test('真实模式一律二次确认，并出现"会产生真实费用"的明确提示', () => {
+  const scope = summarizeSelection(MIXED, [assetKeyOf('character', 'c1')])
+  const dryConfirmation = buildBatchConfirmation({
+    scope,
+    settings: defaultGenerationSettings(),
+    mode: 'dry_run',
+    operation: 'generate',
+    withReference: 0,
+  })
+  const realConfirmation = buildBatchConfirmation({
+    scope,
+    settings: defaultGenerationSettings(),
+    mode: 'real',
+    operation: 'generate',
+    withReference: 0,
+  })
+  assert.equal(dryConfirmation.required, false)
+  assert.equal(realConfirmation.required, true)
+  assert.equal(realConfirmation.costWarning, COST_WARNING_REAL)
+  assert.equal(dryConfirmation.costWarning, COST_WARNING_DRY_RUN)
+  assert.match(realConfirmation.costWarning, /会产生真实费用/)
+  assert.match(realConfirmation.costWarning, /按张计费/)
+})
+
+test('批量（多于一项）一律二次确认，确认框列出类型分布/预计张数/模式/是否用参考图', () => {
+  const scope = summarizeSelection(MIXED, selectUngenerated(MIXED))
+  const confirmation = buildBatchConfirmation({
+    scope,
+    settings: { useReference: false, aspectRatio: '9:16' },
+    mode: 'dry_run',
+    operation: 'generate',
+    withReference: null,
+  })
+  assert.equal(confirmation.required, true)
+  const text = confirmation.lines.join('\n')
+  assert.match(text, /本次选择资产 3 项：人物 1、场景 1、道具 1、服装 0/)
+  assert.match(text, /预计生成图片 3 张/)
+  assert.match(text, /不使用垫图/)
+  assert.match(text, /画面比例 9:16/)
+})
+
+test('把结果设为定版而该资产已有定版图 → 必须二次确认并写清替换的是什么', () => {
+  assert.equal(requiresPrimaryReplaceConfirmation(MIXED[3]), true)
+  assert.equal(requiresPrimaryReplaceConfirmation(MIXED[0]), false)
+  assert.equal(requiresPrimaryReplaceConfirmation(undefined), false)
+  const plan = buildPrimaryReplaceConfirmation({ assetName: '场景 s2', isFromGeneratedResult: true })
+  assert.equal(plan.required, true)
+  const text = plan.lines.join('\n')
+  assert.match(text, /替换掉它作为"定版"的身份/)
+  assert.match(text, /原图片不会被删除/)
+  assert.match(plan.costWarning, /不产生出图费用/)
+})
+
+/* ------------------------------------------------------------ 在途防重复 */
+
+test('在途闸门：同一资产同一轮重复点击被拒绝，不会重复提交', () => {
+  const gate = createAssetSubmitGate()
+  const key = assetKeyOf('character', 'c1')
+  const first = gate.begin(key)
+  assert.equal(first.allowed, true)
+  const second = gate.begin(key)
+  assert.equal(second.allowed, false)
+  if (!second.allowed) {
+    assert.equal(second.reason, 'in_flight')
+    assert.match(second.message, /不会重复生成/)
+  }
+  assert.equal(gate.isInFlight(key), true)
+  gate.finish(key, 'jellyfish:p:character:c1:abcd1234')
+  assert.equal(gate.isInFlight(key), false)
+  assert.equal(gate.begin(key).allowed, true)
+})
+
+test('在途闸门：异常后释放，否则该资产永远点不动', () => {
+  const gate = createAssetSubmitGate()
+  const key = assetKeyOf('scene', 's1')
+  assert.equal(gate.begin(key).allowed, true)
+  gate.release(key)
+  assert.equal(gate.begin(key).allowed, true)
+})
+
+test('复用后端幂等键：同一资产同一提示词再次提交会被识别为已有结果', () => {
+  const gate = createAssetSubmitGate()
+  const key = assetKeyOf('scene', 's1')
+  const sourceTaskId = 'jellyfish:proj:scene:s1:e5be3933'
+  assert.equal(gate.begin(key).allowed, true)
+  gate.finish(key, sourceTaskId)
+  assert.deepEqual(gate.submittedKeys(), [sourceTaskId])
+  assert.equal(findIdempotentReuse(gate.submittedKeys(), sourceTaskId), true)
+  assert.equal(findIdempotentReuse(gate.submittedKeys(), 'jellyfish:proj:scene:s1:other'), false)
+  // 没有幂等键（后端没返回）时不误报重复
+  assert.equal(findIdempotentReuse(gate.submittedKeys(), ''), false)
+})
+
+/* ------------------------------------------------------------ 进度数字聚合 */
+
+test('进度数字：总数/已完成/失败/生成中/排队中/已停止/演练占位都是真实计数', () => {
+  const tasks: ProductionTask[] = [
+    makeSampleTask({ key: 'k1', status: 'done' }),
+    makeSampleTask({ key: 'k2', status: 'done' }),
+    makeSampleTask({ key: 'k3', status: 'failed', errorMessage: '上游返回失败' }),
+    makeSampleTask({ key: 'k4', status: 'generating' }),
+    makeSampleTask({ key: 'k5', status: 'submitting' }),
+    makeSampleTask({ key: 'k6', status: 'queued' }),
+    makeSampleTask({ key: 'k7', status: 'stopped' }),
+    makeSampleTask({ key: 'k8', status: 'dry_run' }),
+  ]
+  const summary = summarizeTaskProgress(tasks)
+  assert.equal(summary.total, 8)
+  assert.equal(summary.done, 2)
+  assert.equal(summary.failed, 1)
+  assert.equal(summary.generating, 2)
+  assert.equal(summary.queued, 1)
+  assert.equal(summary.stopped, 1)
+  assert.equal(summary.dryRun, 1)
+  assert.equal(summary.finished, 5)
+  assert.equal(summary.percent, 63)
+  assert.equal(summary.hasFailure, true)
+  assert.deepEqual(summary.failureReasons, ['上游返回失败'])
+})
+
+test('进度文案包含用户点名的五个数字，且不含内部口径', () => {
+  const summary = summarizeTaskProgress([
+    makeSampleTask({ key: 'k1', status: 'done' }),
+    makeSampleTask({ key: 'k2', status: 'queued' }),
+  ])
+  const labels = describeProgressLines(summary).map((line) => line.label)
+  ;['总数', '已完成', '失败', '生成中', '排队中'].forEach((label) => assert.ok(labels.includes(label), label))
+  // 1 项已完成 + 1 项排队中 → 进度是 50%，不是"成功"也不是"100%"
+  assert.equal(summary.percent, 50)
+})
+
+test('空一轮的进度不会显示成 100%', () => {
+  assert.equal(summarizeTaskProgress([]).percent, 0)
+  assert.equal(summarizeTaskProgress([]).total, 0)
+})
+
+/* --------------------------------------------- 停止后已完成结果必须保留 */
+
+test('停止只标记"还没开始"的项，已完成的卡片与定版状态一个都不丢', () => {
+  const tasks: ProductionTask[] = [
+    makeSampleTask({ key: 'k1', status: 'done', ossUrl: 'https://oss/a.png', adoptedImageId: 7, adoptedUrl: '/a.png' }),
+    makeSampleTask({ key: 'k2', status: 'done', isPrimary: true, adoptedImageId: 8 }),
+    makeSampleTask({ key: 'k3', status: 'failed', errorMessage: 'x' }),
+    makeSampleTask({ key: 'k4', status: 'generating', serviceTaskId: 'svc-1' }),
+    makeSampleTask({ key: 'k5', status: 'queued' }),
+    makeSampleTask({ key: 'k6', status: 'queued' }),
+  ]
+  const stopped = applyStopToQueue(tasks)
+  assert.equal(stopped[0].status, 'done')
+  assert.equal(stopped[0].ossUrl, 'https://oss/a.png')
+  assert.equal(stopped[1].status, 'done')
+  assert.equal(stopped[1].isPrimary, true)
+  assert.equal(stopped[2].status, 'failed')
+  // 正在跑的那一项保持不动：出图服务没有取消接口
+  assert.equal(stopped[3].status, 'generating')
+  assert.equal(stopped[4].status, 'stopped')
+  assert.equal(stopped[5].status, 'stopped')
+  const summary = summarizeTaskProgress(stopped)
+  assert.equal(summary.done, 2)
+  assert.equal(summary.stopped, 2)
+  assert.equal(summary.queued, 0)
+  assert.match(describeStopEffect(summary), /已完成的 2 项结果会保留/)
+})
+
+test('结果卡片顺序：已停止的排到最后，已完成结果不会被挤出可视区', () => {
+  const tasks: ProductionTask[] = [
+    makeSampleTask({ key: 'k1', status: 'done', ossUrl: 'https://oss/1.png' }),
+    makeSampleTask({ key: 'k2', status: 'stopped' }),
+    makeSampleTask({ key: 'k3', status: 'done', ossUrl: 'https://oss/3.png' }),
+    makeSampleTask({ key: 'k4', status: 'stopped' }),
+  ]
+  const shown = orderCardsForDisplay(tasks, { showAll: false, maxVisible: 2 })
+  assert.deepEqual(shown.map((task) => task.key), ['k1', 'k3'])
+  const all = orderCardsForDisplay(tasks, { showAll: true, maxVisible: 2 })
+  assert.deepEqual(all.map((task) => task.key), ['k1', 'k3', 'k2', 'k4'])
+  // 全是停止项时也要看得见（不能白屏）
+  const onlyStopped = orderCardsForDisplay([makeSampleTask({ key: 's1', status: 'stopped' })], {
+    showAll: false,
+    maxVisible: 2,
+  })
+  assert.equal(onlyStopped.length, 1)
+})
+
+test('还有未结算任务时才算"在跑"（用于按钮态与轮询开关）', () => {
+  assert.equal(hasUnsettledTasks([makeSampleTask({ status: 'done' })]), false)
+  assert.equal(hasUnsettledTasks([makeSampleTask({ status: 'queued' })]), true)
+  assert.equal(hasUnsettledTasks([makeSampleTask({ status: 'generating' })]), true)
+})
+
+/* ------------------------------------------------------ 结果 → 状态与原因 */
+
+test('提交结果 → 任务状态：演练占位不算完成，也不冒充成功', () => {
+  const dry = resolveResultStatus({ dry_run: true, outcome: 'dry_run', image_url: 'https://dry-run.invalid/a.png' })
+  assert.equal(dry.status, 'dry_run')
+  assert.match(dry.reason, /占位结果/)
+  assert.equal(isPlaceholderUrl('https://dry-run.invalid/a.png'), true)
+})
+
+test('提交结果 → 任务状态：拿到长期地址才算完成', () => {
+  const done = resolveResultStatus({ outcome: 'ok', oss_url: 'https://oss/a.png', service_task_id: 'svc-1' })
+  assert.equal(done.status, 'done')
+  assert.equal(done.hasLongTermAddress, true)
+  const local = resolveResultStatus({ outcome: 'ok', image_url: 'http://localhost:4173/images/a.png', service_task_id: 'svc-2' })
+  assert.equal(local.status, 'done')
+  assert.equal(local.hasLongTermAddress, false)
+  assert.match(local.reason, /采纳后才会落到资产图片里/)
+})
+
+test('提交结果 → 任务状态：还在生成 / 失败 / 没有任务号', () => {
+  assert.equal(resolveResultStatus({ outcome: 'running', service_task_id: 'svc-3' }).status, 'generating')
+  const failed = resolveResultStatus({ outcome: 'failed', error_message: '上游返回 HTTP 500' })
+  assert.equal(failed.status, 'failed')
+  assert.match(failed.reason, /HTTP 500/)
+  const noTask = resolveResultStatus({ outcome: 'unknown', ok: true })
+  assert.equal(noTask.status, 'failed')
+  assert.match(noTask.reason, /查看详情/)
+})
+
+test('失败原因优先上游原文，并屏蔽内部标识；没有原文时给可执行说明', () => {
+  const masked = describeFailureReason({ error_message: 'HTTP 500 file_id=abc123', outcome: 'failed' })
+  assert.ok(!masked.includes('file_id=abc123'))
+  assert.match(masked, /HTTP 500/)
+  assert.match(describeFailureReason({ outcome: 'partial_failed' }), /长期存储/)
+  assert.match(describeFailureReason({ outcome: 'failed' }), /没有拿到具体原因/)
+})
+
+test('回读任务：完成/失败/演练/进行中四种口径', () => {
+  const done = resolveTaskQueryPatch({ status: 'completed', oss_url: 'https://oss/b.png', local_path: '/tmp/b.png' })
+  assert.equal(done?.status, 'done')
+  assert.equal(done?.ossUrl, 'https://oss/b.png')
+  const failed = resolveTaskQueryPatch({ status: 'failed', error_message: '上游超时' })
+  assert.equal(failed?.status, 'failed')
+  assert.match(failed?.errorMessage ?? '', /上游超时/)
+  assert.equal(resolveTaskQueryPatch({ dry_run: true, status: 'dry_run' })?.status, 'dry_run')
+  assert.equal(resolveTaskQueryPatch({ status: 'queued' })?.status, 'generating')
+})
+
+/* ------------------------------------------- 提交结果去重（幂等键合并） */
+
+test('同一次提交里的重复条目按幂等键合并（进度数字不被放大）', () => {
+  const results = [
+    { source_task_id: 'k1', source_asset_id: 's1', service_task_id: 'svc-1', status: 'queued' },
+    { source_task_id: 'k1', source_asset_id: 's1', service_task_id: 'svc-1', status: 'queued' },
+    { source_task_id: 'k1', source_asset_id: 's1', service_task_id: 'svc-1', status: 'queued' },
+    { source_task_id: 'k1', source_asset_id: 's1', service_task_id: 'svc-1', status: 'completed', oss_url: 'https://oss/a.png' },
+  ]
+  const deduped = dedupeResults(results)
+  assert.equal(deduped.length, 1)
+  assert.equal(deduped[0].oss_url, 'https://oss/a.png')
+})
+
+test('多资产结果各自保留，并按资产挑出代表结果', () => {
+  const results = [
+    { source_task_id: 'k1', source_asset_id: 's1', service_task_id: 'svc-1', image_url: 'http://localhost:4173/a.png' },
+    { source_task_id: 'k1', source_asset_id: 's1', service_task_id: 'svc-1', oss_url: 'https://oss/a.png' },
+    { source_task_id: 'k2', source_asset_id: 's2', service_task_id: 'svc-2', error_message: '上游失败', outcome: 'failed' },
+  ]
+  assert.equal(dedupeResults(results).length, 2)
+  const first = pickResultForAsset(results, 's1')
+  assert.equal(first?.oss_url, 'https://oss/a.png')
+  const second = pickResultForAsset(results, 's2')
+  assert.equal(second?.error_message, '上游失败')
+  assert.equal(pickResultForAsset([], 's1'), null)
+  // 结果里没有该资产时退化为整批的代表结果（不返回 null 让卡片空白）
+  assert.ok(pickResultForAsset(results, 's3'))
+})
+
+/* ------------------------------------------------------------ 采纳落点决策 */
+
+test('采纳：资产还没有图片 → 直接存入（不动任何现有内容）', () => {
+  const plan = planAdoption({ asset: asset('character', 'c1'), url: 'https://oss/a.png', emptySlotId: null })
+  assert.equal(plan.mode, 'adopt')
+  if (plan.mode === 'adopt') {
+    assert.equal(plan.imageId, null)
+    assert.match(plan.reason, /首张图片/)
+  }
+})
+
+test('采纳：资产已有图片但有空槽位 → 存入空槽位，不覆盖现有图片', () => {
+  const plan = planAdoption({
+    asset: asset('scene', 's2', { hasImage: true, hasPrimary: true, imageId: 12 }),
+    url: 'https://oss/a.png',
+    emptySlotId: 21,
+  })
+  assert.equal(plan.mode, 'adopt')
+  if (plan.mode === 'adopt') assert.equal(plan.imageId, 21)
+})
+
+test('采纳：资产已有图片且没有空槽位 → 新增一张图片，绝不覆盖现有定版图', () => {
+  const plan = planAdoption({
+    asset: asset('scene', 's2', { hasImage: true, hasPrimary: true, imageId: 12 }),
+    url: 'https://oss/a.png',
+    emptySlotId: null,
+  })
+  assert.equal(plan.mode, 'new_slot')
+  if (plan.mode === 'new_slot') assert.match(plan.reason, /现有图片与定版图都保持不变/)
+})
+
+test('采纳：只有出图服务本机地址时不自动采纳（避免覆盖），并说明去哪处理', () => {
+  const plan = planAdoption({
+    asset: asset('scene', 's2', { hasImage: true, hasPrimary: true, imageId: 12 }),
+    url: 'http://localhost:4173/images/a.png',
+    emptySlotId: null,
+  })
+  assert.equal(plan.mode, 'blocked')
+  if (plan.mode === 'blocked') assert.match(plan.reason, /资产编辑页/)
+})
+
+test('采纳：演练占位地址与空地址一律拒绝', () => {
+  const placeholder = planAdoption({ asset: asset('character', 'c1'), url: 'https://dry-run.invalid/a.png', emptySlotId: null })
+  assert.equal(placeholder.mode, 'blocked')
+  const empty = planAdoption({ asset: asset('character', 'c1'), url: '', emptySlotId: null })
+  assert.equal(empty.mode, 'blocked')
+})
+
+/* ---------------------------------------------------------- 重新生成提示词 */
+
+test('重新生成：用「尝试序号」换新键，**提示词一个字都不改**', () => {
+  const base = '甲：正面全身参考图'
+  // 已经尝试过 1 次（首轮走过）→ 本次是第 2 次尝试，序号 1（新幂等键）
+  const second = buildAttemptPlan(base, { hasEditedPrompt: false, previousAttempt: 1 })
+  assert.equal(second.attempt, 1)
+  assert.equal(second.prompt, base)
+  assert.equal(second.isRetry, true)
+  assert.match(second.note, /第 2 次尝试/)
+  // 已尝试 3 次后的下一次是序号 3（第 4 次尝试）
+  assert.equal(buildAttemptPlan(base, { hasEditedPrompt: false, previousAttempt: 3 }).attempt, 3)
+  // 首轮（序号 0）的说明口径不同：如实说"同一提示词会复用已有结果"
+  const zero = buildAttemptPlan(base, { hasEditedPrompt: false, previousAttempt: 0 })
+  assert.equal(zero.attempt, 0)
+  assert.equal(zero.isRetry, false)
+  assert.match(zero.note, /复用已有结果/)
+})
+
+test('尝试序号不会越界（与后端 0..99 对齐）', () => {
+  assert.equal(attemptForNextTry(0), 0)
+  assert.equal(attemptForNextTry(1), 1)
+  assert.equal(attemptForNextTry(99), 99)
+  assert.equal(attemptForNextTry(500), 99)
+  assert.equal(attemptForNextTry(-5), 0)
+  assert.equal(attemptForNextTry(Number.NaN), 0)
+})
+
+test('重新生成：用户改过提示词时用改后的提示词，并且仍然换新键', () => {
+  const plan = buildAttemptPlan('甲：正面全身参考图，穿黑风衣', { hasEditedPrompt: true, previousAttempt: 1 })
+  assert.equal(plan.prompt, '甲：正面全身参考图，穿黑风衣')
+  assert.equal(plan.attempt, 1)
+  assert.match(plan.note, /改过的提示词/)
+})
+
+test('本机/内网地址不算长期可访问地址（采纳时会拦住）', () => {
+  assert.equal(isPubliclyReachableUrl('https://oss.example.com/a.png'), true)
+  assert.equal(isPubliclyReachableUrl('http://localhost:4173/images/a.png'), false)
+  assert.equal(isPubliclyReachableUrl('http://127.0.0.1:8000/a.png'), false)
+  assert.equal(isPubliclyReachableUrl('http://192.168.1.20/a.png'), false)
+  assert.equal(isPubliclyReachableUrl('/images/a.png'), false)
+})
+
+test('重新生成：还没有提示词时如实说明会先拼装提示词', () => {
+  const plan = buildAttemptPlan('', { hasEditedPrompt: false, previousAttempt: 0 })
+  assert.equal(plan.prompt, '')
+  assert.match(plan.note, /拼装提示词/)
+})
+
+/* -------------------------------------------------------------- 生成设置 */
+
+test('生成设置：参考图开关 → 后端口径；默认值稳定', () => {
+  assert.deepEqual(defaultGenerationSettings(), { useReference: true, aspectRatio: DEFAULT_ASPECT_RATIO })
+  assert.equal(stageForSettings({ useReference: true, aspectRatio: '16:9' }), 'reference_batch')
+  assert.equal(stageForSettings({ useReference: false, aspectRatio: '16:9' }), 'character_sheet')
+  const text = describeSettings({ useReference: true, aspectRatio: '16:9' })
+  assert.match(text, /使用定版图当垫图/)
+  assert.match(text, /每个资产 1 张/)
+  assert.ok(ASPECT_RATIO_OPTIONS.some((item) => item.value === '9:16'))
+})
+
+/* ---------------------------------------------------------------- 顶部状态 */
+
+test('顶部状态：六种用户语言取值各自可达', () => {
+  const empty = resolveProductionHeadline({ assets: [], progress: summarizeTaskProgress([]), readyCount: 0 })
+  assert.equal(empty.label, '可以开始提取')
+
+  const canGenerate = resolveProductionHeadline({
+    assets: selectUngeneratedAssets(),
+    progress: summarizeTaskProgress([]),
+    readyCount: 0,
+  })
+  assert.equal(canGenerate.label, '可以生成图片')
+
+  const running = resolveProductionHeadline({
+    assets: MIXED,
+    progress: summarizeTaskProgress([makeSampleTask({ status: 'generating' }), makeSampleTask({ status: 'queued' })]),
+    readyCount: 0,
+  })
+  assert.equal(running.label, '正在生成')
+  assert.match(running.detail, /生成中 1 项，排队中 1 项/)
+
+  const failed = resolveProductionHeadline({
+    assets: MIXED,
+    progress: summarizeTaskProgress([makeSampleTask({ status: 'failed', errorMessage: '上游返回失败' })]),
+    readyCount: 0,
+  })
+  assert.equal(failed.label, '生成失败')
+  assert.match(failed.detail, /上游返回失败/)
+
+  const waitingPrimary = resolveProductionHeadline({ assets: MIXED, progress: summarizeTaskProgress([]), readyCount: 1 })
+  assert.equal(waitingPrimary.label, '已有图片，待设为定版')
+
+  const allPrimary = resolveProductionHeadline({ assets: MIXED, progress: summarizeTaskProgress([]), readyCount: MIXED.length })
+  assert.equal(allPrimary.label, '已定版')
+  assert.match(allPrimary.detail, /进入下一步/)
+})
+
+function selectUngeneratedAssets(): ProductionAsset[] {
+  return MIXED.filter((item) => !item.hasImage)
+}
+
+/* -------------------------------------------------- 文案不含内部标识的黑名单 */
+
+test('顶部状态：图片都在且已定版、只缺提示词时，说清"缺的是提示词"而不是缺图片', () => {
+  const withImagesNoPrompt = MIXED.filter((asset) => asset.hasImage && asset.hasPrimary).map((asset) => ({
+    ...asset,
+    hasImagePrompt: false,
+  }))
+  const headline = resolveProductionHeadline({
+    assets: withImagesNoPrompt,
+    progress: summarizeTaskProgress([]),
+    readyCount: 0,
+  })
+  assert.equal(headline.label, '可以生成图片')
+  assert.match(headline.detail, /没有保存图片提示词/)
+  assert.ok(!headline.detail.includes('没有图片：'))
+})
+
+test('顶部状态：就绪数按"提示词+图片+定版"口径（与外层步骤摘要一致）', () => {
+  // 4 项就绪、1 项缺提示词 → 不能宣称"已定版"
+  const headline = resolveProductionHeadline({
+    assets: MIXED,
+    progress: summarizeTaskProgress([]),
+    readyCount: MIXED.length - 1,
+  })
+  assert.notEqual(headline.label, '已定版')
+})
+
+test('卡片/状态/确认文案不出现内部字段（status / file_id / 任务号 / 模型名 / 门禁）', () => {
+  const texts = collectUserFacingTexts()
+  assert.ok(texts.length > 20)
+  texts.forEach((text) => {
+    const lowered = text.toLowerCase()
+    INTERNAL_TOKEN_BLACKLIST.forEach((token) => {
+      assert.ok(!lowered.includes(token.toLowerCase()), `文案不该出现「${token}」：${text}`)
+    })
+  })
+})
+
+test('任务状态文案只有用户语言（无原始状态值）', () => {
+  const statuses: ProductionTaskStatus[] = ['queued', 'submitting', 'generating', 'done', 'failed', 'dry_run', 'stopped']
+  const labels = statuses.map((status) => describeTaskStatus(status).label)
+  assert.deepEqual(labels, ['排队中', '正在提交', '正在生成', '已完成', '生成失败', '演练占位', '已停止'])
+  labels.forEach((label) => {
+    INTERNAL_TOKEN_BLACKLIST.forEach((token) => {
+      assert.ok(!label.toLowerCase().includes(token.toLowerCase()), label)
+    })
+  })
+})
+
+test('任务 → 资产、资产 → 任务：键稳定（结果卡片按资产归组）', () => {
+  const converted = toProductionAssets([
+    {
+      id: 'x1',
+      name: '甲',
+      type: 'character',
+      hasImage: false,
+      hasPrimary: false,
+      hasImagePrompt: false,
+      imageId: null,
+      thumbnail: '',
+      hasPendingCandidate: false,
+    },
+  ])
+  assert.equal(converted[0].key, 'character:x1')
+  assert.equal(converted[0].name, '甲')
+  // 后端字段缺失/类型不对时不冒充实数
+  const fallback = toProductionAssets([
+    {
+      id: 'x2',
+      name: '',
+      type: 'prop',
+      hasImage: undefined as unknown as boolean,
+      hasPrimary: undefined as unknown as boolean,
+      hasImagePrompt: undefined as unknown as boolean,
+      imageId: undefined as unknown as number | null,
+      thumbnail: undefined as unknown as string,
+      hasPendingCandidate: undefined as unknown as boolean,
+    },
+  ])
+  assert.equal(fallback[0].name, 'x2')
+  assert.equal(fallback[0].hasImage, false)
+  assert.equal(fallback[0].imageId, null)
+  assert.equal(fallback[0].thumbnail, '')
+})
