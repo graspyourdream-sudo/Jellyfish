@@ -49,18 +49,18 @@ export const OVERALL_STYLE_PRESETS: OverallStylePreset[] = [
   {
     key: 'anime_2d',
     label: '2D',
-    description: '2D 动画/国漫质感，9:16 竖屏',
+    description: '2D 动画/国漫质感，16:9 横屏',
     visualStyle: '动漫',
     style: '国漫',
-    defaultVideoRatio: '9:16',
+    defaultVideoRatio: '16:9',
   },
   {
     key: 'anime_3d',
     label: '3D',
-    description: '3D 动画质感，9:16 竖屏',
+    description: '3D 动画质感，16:9 横屏',
     visualStyle: '动漫',
     style: '动漫3D',
-    defaultVideoRatio: '9:16',
+    defaultVideoRatio: '16:9',
   },
   {
     key: 'custom',
@@ -105,6 +105,26 @@ export function resolveOverallStyleFields(
     style: preset.style,
     default_video_ratio: preset.defaultVideoRatio,
   }
+}
+
+/**
+ * 新建项目时**最终写入** `projects.default_video_ratio` 的取值（方案 B，2026-09-23 用户拍板）。
+ *
+ * 口径：
+ * - 选中非「其他自定义」的风格时，选择器会把预设画幅**自动填进输入框**（见 ProjectLobby 的 onChange），
+ *   让用户看到「存进去的就是这个」；
+ * - **用户手填的值优先**（可以在预设基础上改成别的比例，比如真人竖屏改成 16:9）；
+ * - 输入框被清空时回落到该风格的预设默认值，而不是留空；
+ * - 「其他自定义」没有预设默认值，完全以用户填写为准（可以留空 = 由模型/供应商决定）。
+ */
+export function resolveProjectVideoRatio(
+  overallStyle: OverallStyleKey | undefined,
+  typedRatio: string | null | undefined,
+): string | null {
+  const typed = String(typedRatio ?? '').trim()
+  if (typed) return typed
+  const presetRatio = overallStyle ? resolveOverallStyleFields(overallStyle)?.default_video_ratio : undefined
+  return presetRatio ?? null
 }
 
 /** 新建成功后应该落到哪一步（工作台的 `?step=`）。 */

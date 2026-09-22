@@ -41,6 +41,7 @@ import { getChapterShotsPath } from './ProjectWorkbench/routes'
 import { loadProjectFlowStatsForChapters, type ProjectFlowStats } from './ProjectWorkbench/projectFlowStats'
 import {
   OVERALL_STYLE_PRESETS,
+  resolveProjectVideoRatio,
   START_MODE_OPTIONS,
   resolveLandingStep,
   resolveOverallStyleFields,
@@ -444,7 +445,8 @@ const ProjectLobby: React.FC = () => {
           style: preset?.style ?? values.style,
           visual_style: (preset?.visual_style ?? values.visual_style) as any,
           unify_style: values.unifyStyle,
-          default_video_ratio: preset?.default_video_ratio ?? values.default_video_ratio ?? null,
+          // 方案 B（2026-09-23）：预设只负责「自动填入默认值」，用户手填的优先
+          default_video_ratio: resolveProjectVideoRatio(values.overallStyle, values.default_video_ratio),
           start_mode: startMode as any,
           progress: 0,
         },
@@ -1040,7 +1042,17 @@ const ProjectLobby: React.FC = () => {
           </Form.Item>
           {/* 第二步：项目整体风格（预设直接写进既有列：视觉风格 + 视频风格 + 画幅） */}
           <Form.Item name="overallStyle" label="整体风格" rules={[{ required: true }]}>
-            <Radio.Group className="w-full">
+            <Radio.Group
+              className="w-full"
+              onChange={(event) => {
+                // 方案 B：选风格 = 把该风格的预设画幅**自动填进**下面的输入框（用户仍可手动改成别的）
+                const key = event.target.value as OverallStyleKey
+                const preset = resolveOverallStyleFields(key)
+                if (preset?.default_video_ratio) {
+                  form.setFieldValue('default_video_ratio', preset.default_video_ratio)
+                }
+              }}
+            >
               <Space wrap size={6}>
                 {OVERALL_STYLE_PRESETS.map((preset) => (
                   <Radio.Button key={preset.key} value={preset.key}>
@@ -1058,7 +1070,7 @@ const ProjectLobby: React.FC = () => {
                 <div className="mb-3 text-[11px] text-gray-500">
                   {OVERALL_STYLE_PRESETS.find((p) => p.key === form.getFieldValue('overallStyle'))?.description ??
                     '选择整体风格后，视觉风格、视频风格与默认画幅会一并写入项目配置。'}
-                  （如需自己指定视觉风格 / 视频风格，请选「其他自定义」）
+                  （画幅会按风格自动带入，需要别的比例可以直接改；如需自己指定视觉风格 / 视频风格，请选「其他自定义」）
                 </div>
               )
             }

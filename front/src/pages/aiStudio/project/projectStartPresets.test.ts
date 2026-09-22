@@ -17,6 +17,7 @@ import {
   getOverallStylePreset,
   resolveLandingStep,
   resolveOverallStyleFields,
+  resolveProjectVideoRatio,
 } from './projectStartPresets.ts'
 
 test('五个整体风格预设齐全（含其他自定义）', () => {
@@ -42,17 +43,36 @@ test('真人横屏 → 现实 + 真人都市 + 16:9', () => {
   })
 })
 
-test('2D → 动漫 + 国漫 + 9:16；3D → 动漫 + 动漫3D + 9:16', () => {
+test('2D → 动漫 + 国漫 + 16:9；3D → 动漫 + 动漫3D + 16:9', () => {
   assert.deepEqual(resolveOverallStyleFields('anime_2d'), {
     visual_style: '动漫',
     style: '国漫',
-    default_video_ratio: '9:16',
+    default_video_ratio: '16:9',
   })
   assert.deepEqual(resolveOverallStyleFields('anime_3d'), {
     visual_style: '动漫',
     style: '动漫3D',
-    default_video_ratio: '9:16',
+    default_video_ratio: '16:9',
   })
+})
+
+/* ------------------------------ 画幅取值（方案 B：手填优先） ------------------------------ */
+
+test('画幅：手填的值优先于预设（真人竖屏也能改成 16:9）', () => {
+  assert.equal(resolveProjectVideoRatio('live_portrait', '16:9'), '16:9')
+  assert.equal(resolveProjectVideoRatio('anime_2d', '9:16'), '9:16')
+})
+
+test('画幅：输入框为空时回落到该风格的预设默认值', () => {
+  assert.equal(resolveProjectVideoRatio('live_portrait', ''), '9:16')
+  assert.equal(resolveProjectVideoRatio('live_portrait', '   '), '9:16')
+  assert.equal(resolveProjectVideoRatio('anime_3d', null), '16:9')
+  assert.equal(resolveProjectVideoRatio('live_landscape', undefined), '16:9')
+})
+
+test('画幅：其他自定义完全以用户填写为准（留空就是留空）', () => {
+  assert.equal(resolveProjectVideoRatio('custom', '21:9'), '21:9')
+  assert.equal(resolveProjectVideoRatio('custom', ''), null)
 })
 
 test('其他自定义不覆盖任何字段（由用户自己填）', () => {
