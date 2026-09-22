@@ -323,6 +323,16 @@ export function submitImagePlan(body: {
   image_model?: string
   negative_prompt?: string
   wait_seconds?: number
+  /**
+   * 尝试序号（重试失败项时 +1）。
+   *
+   * 后端幂等键 `source_task_id` 只哈希「项目 + 类型 + 资产 + 提示词前 8 位」，
+   * 所以**同一资产同一提示词重试会被上游按既有（失败）任务去重，等于没重试**；
+   * 传 1/2/3… 才会拿到**新的**幂等键、真的重新出图。
+   * 同一个序号重复提交仍是同一个键（上游去重，不会重复下单），页面侧的在途闸门继续拦住连点。
+   * 本次实际使用的键回显在每条结果的 `source_task_id` 上。
+   */
+  attempt?: number
 }): Promise<{
   project_id: string
   results: ImageTaskResult[]
@@ -429,6 +439,8 @@ export function adoptGeneratedImage(body: {
   url: string
   image_id?: number | null
   set_primary?: boolean
+  /** 该资产已有定版图时会顶掉它 → 必须由用户在确认框里确认后传 true（否则后端 409） */
+  confirm_replace_primary?: boolean
   name?: string
 }): Promise<AnyRecord> {
   return callApi('/api/v1/studio/image-pipeline/adopt', body as AnyRecord)
@@ -594,16 +606,23 @@ export function getAssetImagePrompts(entity: AnyRecord | null | undefined): Reco
  * 后端会自动把同一资产下其余行清成 false，所以这里只需把目标行置 true。
  * 此前该字段只有 `character_images` 有列、且未在任何 schema 暴露，
  * 因此通过 HTTP 完全不可达——本次迁移后 5 类图片表都已支持。
+ *
+ * `confirmReplacePrimary`：后端**不静默替换定版** —— 该资产已有定版图
+ * （`is_primary` 且已绑图）时，设版会返回结构化 409；只有用户在确认框里确认过，
+ * 才把 `confirm_replace_primary=true` 发出去。默认 false（既有调用方行为不变）。
  */
 export function setEntityImagePrimary(
   entityType: 'character' | 'scene' | 'prop' | 'costume' | 'actor',
   entityId: string,
   imageId: number,
   isPrimary = true,
+  confirmReplacePrimary = false,
 ): Promise<AnyRecord> {
+  const body: AnyRecord = { is_primary: isPrimary }
+  if (confirmReplacePrimary) body.confirm_replace_primary = true
   return callApiPatch(
     `/api/v1/studio/entities/${encodeURIComponent(entityType)}/${encodeURIComponent(entityId)}/images/${imageId}`,
-    { is_primary: isPrimary },
+    body,
   )
 }
 

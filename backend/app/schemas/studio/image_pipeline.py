@@ -23,7 +23,7 @@ PackageFormatLiteral = Literal["json", "text", "markdown"]
 
 
 class ReferenceImageRead(BaseModel):
-    """定版参考图（垫图）解析结果。"""
+    """定版参考图解析结果（默认主流程按提示词直接生成，不需要它）。"""
 
     asset_id: str
     asset_type: str
@@ -47,7 +47,13 @@ class SubmissionTargetRead(BaseModel):
     stage: str = ""
     negative_prompt: str = ""
     style_tags: list[str] = Field(default_factory=list)
-    reference_image: str = Field("", description="垫图地址（定版主图）")
+    reference_image: str = Field(
+        "",
+        description=(
+            "随请求一起发出的**已有参考图**地址（定版主图）。为空＝纯提示词生成，"
+            "这正是默认主流程的常态（按提示词直接生成参考图，不需要已有图）"
+        ),
+    )
     generation_type: str = ""
     aspect_ratio: str = ""
     image_model: str = ""
@@ -133,10 +139,18 @@ class ImagePlanPreviewRequest(BaseModel):
 
     project_id: str = Field(..., min_length=1)
     asset_type: AssetTypeLiteral = Field("character", description="出图服务只支持 character/scene/prop")
-    stage: StageLiteral = Field("character_sheet", description="定妆照阶段不带垫图；垫图批量阶段带定版垫图")
+    stage: StageLiteral = Field(
+        "character_sheet",
+        description=(
+            "character_sheet＝不随请求带参考图；reference_batch＝随请求带上已定版的参考图"
+            "（两者都是按提示词直接生成参考图，不需要已有图）"
+        ),
+    )
     asset_ids: list[str] = Field(default_factory=list, description="为空表示项目内该类型全部资产")
     prompt_overrides: list[PromptOverride] = Field(default_factory=list, description="用 P1 生成的提示词覆盖")
-    use_primary_reference: bool = Field(True, description="垫图批量阶段是否使用定版主图做垫图")
+    use_primary_reference: bool = Field(
+        True, description="reference_batch 阶段是否把定版主图作为参考图随请求发出"
+    )
     aspect_ratio: str = Field("", description="出图比例，如 16:9")
     image_model: str = Field("", description="图片模型选项（留空=默认 image2 → provider 模型 gpt-image-2）")
     negative_prompt: str = Field("", description="全局负面提示词")
@@ -146,6 +160,20 @@ class ImageSubmitRequest(ImagePlanPreviewRequest):
     """出图提交请求（受 DRY_RUN 守卫）。"""
 
     wait_seconds: float = Field(0.0, ge=0.0, le=120.0, description="有界等待产物秒数；0 表示不等")
+    attempt: int = Field(
+        0,
+        ge=0,
+        le=99,
+        description=(
+            "尝试序号（新，可选，默认 0 = 首轮）。**重试失败项时把这个数 +1**："
+            "幂等键 source_task_id 会把非 0 的序号混进哈希，于是拿到一个**新的**键，"
+            "上游才会真的重新出图（改动前只哈希 项目+类型+资产+提示词前 8 位，"
+            "同一资产同一提示词重试永远被上游按既有失败任务去重 → 重试无效）。"
+            "**同一序号重复提交＝同一个幂等键**：上游按既有任务返回，不会并发重复下单"
+            "（页面侧的「在途」闸门继续负责拦住同一轮里的连点）。"
+            "本次实际使用的幂等键会逐条回显在结果的 source_task_id 上"
+        ),
+    )
 
 
 class ImagePlanPreviewRead(BaseModel):
@@ -199,7 +227,22 @@ class AdoptImageRequest(BaseModel):
     entity_id: str = Field(..., min_length=1, description="资产 ID")
     url: str = Field(..., min_length=1, description="生成图片的可访问地址（不能是 DRY_RUN 占位地址）")
     image_id: int | None = Field(None, description="目标图片槽位 ID；为空则复用该资产第一个槽位，没有就新建")
-    set_primary: bool = Field(True, description="是否同时设为定版主图")
+    set_primary: bool = Field(
+        False,
+        description=(
+            "是否同时设为定版主图。**默认 false**（改动前默认 true）：不传就不会设版——"
+            "因为不传 image_id 时复用的是第一个槽位，而它常常就是当前定版那一行，"
+            "旧默认值会让「再采纳一次」静默把定版图换掉"
+        ),
+    )
+    confirm_replace_primary: bool = Field(
+        False,
+        description=(
+            "显式确认替换定版图。该资产**已有定版图**（is_primary 且已绑图）而本次会顶掉它时"
+            "必须传 true，否则返回结构化 409（meta.error 里带将被替换那张图的只读摘要）；"
+            "没有定版图 / 不碰定版那一行时可以一直不传"
+        ),
+    )
     name: str = Field("", description="入库文件名（可空）")
 
 
@@ -210,7 +253,7 @@ class AdoptImageRead(BaseModel):
     entity_id: str
     image_id: int
     file_id: str
-    url: str = Field(..., description="落库后可访问地址（资产页与垫图实际使用的就是这个）")
+    url: str = Field(..., description="落库后可访问地址（资产页与实际使用的就是这个）")
     source_url: str = Field("", description="采纳时传入的来源地址，仅供溯源")
     is_primary: bool = False
     name: str = ""
@@ -218,7 +261,7 @@ class AdoptImageRead(BaseModel):
         None,
         description=(
             "落库地址是否**匿名公网可达**（新）：true=上游/浏览器都能匿名取到这张图；"
-            "false=不可达（本机地址或对象未公开读，后续当垫图会被上游 404 拒绝）；"
+            "false=不可达（本机地址或对象未公开读，后续当参考图交给上游会被 404 拒绝）；"
             "null=未验证（演练模式，或驱动没有产出可验证的公网地址）"
         ),
     )
@@ -230,8 +273,105 @@ class AdoptImageRead(BaseModel):
         default_factory=list,
         description="采纳过程中的如实提醒（新）：例如「已入库但匿名访问不可达」及其修法",
     )
+    replaced_primary: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "本次采纳**顶掉了哪张旧定版图**（新）：image_id（槽位 id）/ file_name（文件名）/ "
+            "url_is_public（是否 OSS 公网地址）。没有替换过旧定版时为 null；"
+            "摘要里不含 file_id、不含凭证、不含本机绝对路径"
+        ),
+    )
     note: str = Field(
-        "已写入 files 与对应图片槽位；刷新资产页即可看到，并可作为后续垫图使用。",
+        "已写入 files 与对应图片槽位；刷新资产页即可看到，并可作为后续出图的参考图使用。",
+        description="边界说明",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 「使用已有参考图重新生成」（可选返工流程；默认主流程仍是 /submit 按提示词直接生成）
+# ---------------------------------------------------------------------------
+
+
+class ReferenceRegenerateRequest(BaseModel):
+    """「使用已有参考图重新生成」请求（**可选返工**，不是默认主流程）。
+
+    默认主流程是按提示词**直接生成参考图**（``POST /image-pipeline/submit``，不传参考图也
+    照样出图）。本请求只在「该资产已经有参考图、且用户明确要保一致性」时才用：它走
+    Jellyfish 自己的 APIMart 图片通道，把公网可用的参考图真的传进请求。
+    """
+
+    project_id: str = Field(..., min_length=1)
+    asset_type: AssetTypeLiteral = Field(
+        "character",
+        description="character / scene / prop / costume（本端点不经过上游服务端点，所以 costume 也可用）",
+    )
+    asset_id: str = Field(..., min_length=1, description="资产 ID")
+    prompt: str = Field("", description="留空则用该资产**已保存**的图片提示词（image_prompts 槽位）")
+    reference_image_id: int | None = Field(
+        None,
+        description="已有参考图的槽位 id（图片行 ID）。与 reference_url 二选一；都不传则用该资产的定版/首选图",
+    )
+    reference_url: str = Field(
+        "",
+        description="显式指定已有参考图的公网地址（http/https）。与 reference_image_id 二选一",
+    )
+    target_ratio: str = Field("", description="画幅比例；留空用 16:9（APIMart 只支持 1:1 / 3:4 / 16:9）")
+    resolution_profile: Literal["standard", "high"] = Field("standard", description="输出分辨率档位")
+    model_id: str | None = Field(None, description="图片模型 ID；留空用 DB 的默认图片模型（必须是 APIMart 供应商）")
+    attempt: int = Field(
+        0,
+        ge=0,
+        le=99,
+        description=(
+            "尝试序号（语义与 POST /submit 的 attempt 一致）：同一序号＝同一轮，"
+            "**重复点击不会重复付费**（同一轮直接复用上一次结果）；要真的再生成一次请 +1"
+        ),
+    )
+    timeout_seconds: float = Field(600.0, ge=1.0, le=3600.0, description="同步等待的墙钟上限")
+
+
+class ReferenceRegenerateRead(BaseModel):
+    """「使用已有参考图重新生成」结果。
+
+    ``results`` / ``summary`` / ``outcome`` / ``warnings`` / ``guard_status`` 与默认主流程
+    （``ImageSubmitRead``）**同名同形**，前端可以复用同一套结果卡片。
+    """
+
+    project_id: str
+    asset_type: str
+    asset_id: str
+    asset_name: str = ""
+    prompt: str = ""
+    prompt_source: str = Field("", description="request（请求里传的）/ saved（该资产已保存的提示词）")
+    reference_image_id: int | None = Field(None, description="用到的参考图槽位 id（按资产首选图解析时为空）")
+    reference_url: str = Field("", description="**真正送进请求**的公网参考图地址（会进 image_urls）")
+    reference_label: str = Field("", description="参考图的可读名（页面文案用这个；不含 file_id）")
+    reference_source: str = Field(
+        "",
+        description="参考图来源：slot（指定槽位）/ explicit_url（显式地址）/ asset_primary（该资产定版图）/ asset_fallback",
+    )
+    attempt: int = 0
+    deduplicated: bool = Field(
+        False, description="同一轮（同一 source_task_id）重复点击 → 直接复用上一轮结果，没有再次调用供应商、没有再次计费"
+    )
+    source_task_id: str = Field("", description="本次（或复用的上一轮）的幂等键")
+    provider: str = ""
+    model_id: str = ""
+    model_name: str = ""
+    base_url: str = ""
+    api_key_configured: bool = False
+    results: list[ImageTaskResultRead] = Field(default_factory=list, description="与默认主流程同形的单条出图结果")
+    summary: dict[str, Any] = Field(default_factory=dict)
+    outcome: str = ""
+    warnings: list[str] = Field(default_factory=list)
+    guard_status: str = ""
+    paid_call_made: bool = Field(
+        False, description="本次是否真的发出了供应商调用（演练 / 被拦 / 复用上一轮时为 false）"
+    )
+    note: str = Field(
+        "这是可选的返工流程（用已有参考图重生成）。默认主流程是按提示词直接生成参考图"
+        "（POST /studio/image-pipeline/submit），不需要参考图。"
+        "结果地址是供应商返回的临时地址；要长期保存请走「采纳」落库。",
         description="边界说明",
     )
 

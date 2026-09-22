@@ -1,9 +1,10 @@
-"""P3 出图管线：定妆照 → 垫图批量 → OSS。
+"""P3 出图管线：定妆照 → 参考图批量 → OSS（都是**按提示词直接生成参考图**）。
 
 主流流程（对齐全链路方案 §环节 3）：
 1. 先出**角色定妆照**（角色正面资产图），人工审核后在 Jellyfish 里把该图设为
    ``is_primary=True``（走既有 ``POST /studio/entities/character/{id}/images``）；
-2. 批量出场景图 / 关键帧时，用定版主图做**垫图**（``asset.reference_image``）；
+2. 批量出场景图 / 关键帧时，把该资产已定版的那张图作为**参考图**随请求带上
+   （``asset.reference_image``；纯提示词生成时不带）；
 3. 结果由出图服务上传 OSS，回读 ``images[].oss_url`` 作为长期资产地址。
 
 硬边界：
@@ -169,10 +170,33 @@ class SubmissionTarget:
 # ---------------------------------------------------------------------------
 
 
-def build_source_task_id(*, project_id: str, asset_type: str, asset_id: str, prompt: str) -> str:
-    """稳定幂等键：同一项目+资产+提示词重复提交会被出图服务识别为同一任务。"""
-    digest = hashlib.sha1(str(prompt or "").encode("utf-8")).hexdigest()[:8]
-    return f"jellyfish:{project_id or 'unknown'}:{asset_type}:{asset_id}:{digest}"
+def build_source_task_id(
+    *,
+    project_id: str,
+    asset_type: str,
+    asset_id: str,
+    prompt: str,
+    attempt: int = 0,
+) -> str:
+    """稳定幂等键：同一项目+资产+提示词重复提交会被出图服务识别为同一任务。
+
+    ``attempt``（新增，可选，默认 0）是**尝试序号**，解决「失败重试被幂等键吃掉」：
+
+    出图服务对**同一个** ``source_task_id`` 直接返回既有任务，而旧实现只哈希
+    ``project+type+id+prompt[:8]``——于是同一个资产、同一段提示词无论点多少次重试，
+    拿回的都是那个已经失败的老任务，重试等于没重试。
+
+    - ``attempt=0`` → **与改动前逐字一致**（老键继续命中上游既有任务，不改历史行为）；
+    - ``attempt>0`` → 把序号混进哈希并加 ``:r<N>`` 后缀 → 一个新键 → 上游会真的重新出图；
+    - 同一个 ``attempt`` 重复提交仍是同一个键 → 上游去重，不会重复下单（幂等保护仍在）。
+    """
+    digest_source = str(prompt or "")
+    round_index = max(0, int(attempt or 0))
+    if round_index:
+        digest_source = f"{digest_source}#attempt={round_index}"
+    digest = hashlib.sha1(digest_source.encode("utf-8")).hexdigest()[:8]
+    suffix = f":r{round_index}" if round_index else ""
+    return f"jellyfish:{project_id or 'unknown'}:{asset_type}:{asset_id}:{digest}{suffix}"
 
 
 def build_object_key_template(*, project_id: str, asset_type: str) -> str:
@@ -253,8 +277,15 @@ async def build_targets(
     aspect_ratio: str = DEFAULT_ASPECT_RATIO,
     image_model: str = "",
     negative_prompt: str = "",
+    attempt: int = 0,
 ) -> tuple[list[SubmissionTarget], list[str]]:
-    """组装提交目标。``stage=character_sheet`` 时不带垫图，``stage=reference_batch`` 时带定版垫图。"""
+    """组装提交目标（两条 stage 都是**按提示词直接生成参考图**）。
+
+    ``stage=character_sheet`` 不随请求带参考图；``stage=reference_batch`` 带上已定版的参考图。
+
+    ``attempt``（新增，可选，默认 0）＝尝试序号，透传给 :func:`build_source_task_id`：
+    重试失败项时传 1/2/3… 才会拿到**新的**幂等键（详见该函数）。
+    """
     warnings: list[str] = []
     overrides = {str(k): str(v) for k, v in (prompt_overrides or {}).items() if str(v).strip()}
 
@@ -321,11 +352,15 @@ async def build_targets(
             target_warnings.extend(reference.warnings)
             reference_url = reference.url if use_primary_reference else ""
             if use_primary_reference and not reference_url:
-                target_warnings.append("没有可用垫图：本次会以纯文本提示词出图，一致性可能下降。")
+                target_warnings.append("没有可用的定版参考图：本次为纯文本提示词生成，一致性可能下降。")
         targets.append(
             SubmissionTarget(
                 source_task_id=build_source_task_id(
-                    project_id=project_id, asset_type=asset_type, asset_id=row.id, prompt=prompt
+                    project_id=project_id,
+                    asset_type=asset_type,
+                    asset_id=row.id,
+                    prompt=prompt,
+                    attempt=attempt,
                 ),
                 source_asset_id=row.id,
                 asset_type=asset_type,
@@ -377,7 +412,7 @@ def _dry_run_result(target: SubmissionTarget) -> ImageTaskResultRead:
 
 
 def reference_candidates(targets: list[SubmissionTarget]) -> list[reference_preflight.ReferenceCandidate]:
-    """把提交目标里的垫图抽成「提交前预检」的候选（只取真的要发出去的那些）。
+    """把提交目标里要随请求发出的参考图抽成「提交前预检」的候选（只取真的要发出去的那些）。
 
     ``allow_data_url=False``：出图服务（另一个进程/服务）是**自己抓这个地址**的，
     内嵌 base64 在这里没有意义，必须是真的公网 http(s) 地址。
@@ -389,7 +424,7 @@ def reference_candidates(targets: list[SubmissionTarget]) -> list[reference_pref
             continue
         candidates.append(
             reference_preflight.ReferenceCandidate(
-                label=f"{ASSET_TYPE_ZH.get(target.asset_type, target.asset_type)}「{target.name}」的定版垫图",
+                label=f"{ASSET_TYPE_ZH.get(target.asset_type, target.asset_type)}「{target.name}」的定版参考图",
                 url=url,
                 role="reference_image",
             )

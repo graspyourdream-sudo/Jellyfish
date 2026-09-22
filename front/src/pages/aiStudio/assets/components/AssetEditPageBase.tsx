@@ -775,8 +775,59 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     }
   }
 
+  /**
+   * 后端「不静默替换定版」的前端预判：这次采纳会不会顶掉一张**已绑图**的定版图。
+   *
+   * 与后端同一口径（`is_primary` **且** 已绑图才算定版图）：
+   * - `setPrimary=true`：只要该资产已有定版图就必须确认——目标槽位要么本身就是它，
+   *   要么设版会把它的定版身份顶掉，两种情况后端都会 409；
+   * - 不设版：只有目标槽位**就是**那张定版图时才需要确认（否则等于把定版图静默换掉）。
+   *
+   * 这里只用来决定「先弹确认框」，真正的判定仍在后端（前端判错也只是多/少一次提示，
+   * 后端该拦还是拦）。
+   */
+  const adoptionNeedsPrimaryConfirmation = (
+    targetImageId: number | null | undefined,
+    setPrimary: boolean,
+  ): boolean => {
+    const primaryWithFile = images.filter((img) => img.is_primary === true && !!img.file_id)
+    if (primaryWithFile.length === 0) return false
+    if (setPrimary) return true
+    return primaryWithFile.some((img) => img.id === targetImageId)
+  }
+
+  const confirmPrimaryReplaceThen = (reason: string, onOk: () => Promise<void>) => {
+    Modal.confirm({
+      title: '该资产已有定版图，确认替换？',
+      okText: '确认替换定版',
+      cancelText: '取消',
+      width: 520,
+      content: (
+        <div className="text-xs leading-5">
+          <div>{reason}</div>
+          <div>原来的定版图不会被删除，仍留在该资产里，随时可以再切回来。</div>
+          <div>替换定版本身不产生出图费用。</div>
+        </div>
+      ),
+      onOk,
+    })
+  }
+
   /** 采纳生成结果到资产图片槽位；`asPrimary` 决定是否同时设为定版（同一资产下唯一）。 */
   const adoptSingleGenResult = async (asPrimary: boolean) => {
+    if (!assetId || !singleGenResult || !assetNavigateRelationType) return
+    const targetImageId = promptPreviewImage?.id ?? null
+    if (adoptionNeedsPrimaryConfirmation(targetImageId, asPrimary)) {
+      confirmPrimaryReplaceThen(
+        '这次采纳会顶掉现有的定版图（无论设不设版，都不允许静默替换）。',
+        () => doAdoptSingleGenResult(asPrimary, true),
+      )
+      return
+    }
+    await doAdoptSingleGenResult(asPrimary, false)
+  }
+
+  const doAdoptSingleGenResult = async (asPrimary: boolean, confirmReplacePrimary: boolean) => {
     if (!assetId || !singleGenResult || !assetNavigateRelationType) return
     setSingleGenAdopting(asPrimary ? 'primary' : 'slot')
     try {
@@ -787,6 +838,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         image_id: promptPreviewImage?.id,
         set_primary: asPrimary,
         name: `${formName || asset?.name || assetId} 生成图`,
+        ...(confirmReplacePrimary ? { confirm_replace_primary: true } : {}),
       })
       message.success(asPrimary ? '已采纳并设为定版（刷新后仍在，后续出图会用它当垫图）' : '已采纳到该槽位（刷新后仍在）')
       setSingleGenResult(null)
@@ -955,13 +1007,48 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     }
   }
 
-  /** T3：设为定版（后端会自动清掉同一资产其它行的 is_primary）。 */
+  /** T3：设为定版（后端会自动清掉同一资产其它行的 is_primary）。
+   *
+   * 后端**不静默替换定版**：该资产已有定版图（`is_primary` 且已绑图）时，直接设版会返回
+   * 结构化 409。所以这里先按既有口径问一次「确认替换」，用户点确认后才把
+   * `confirm_replace_primary=true` 发出去。
+   */
   const handleSetPrimaryImage = async (image: TImage) => {
+    if (!assetId || !assetNavigateRelationType) return
+
+    const existingPrimary = images.find((item) => item.is_primary === true && item.id !== image.id)
+    if (existingPrimary) {
+      Modal.confirm({
+        title: '该资产已有定版图，确认替换？',
+        okText: '确认替换定版',
+        cancelText: '取消',
+        width: 520,
+        content: (
+          <div className="text-xs leading-5">
+            <div>替换后，原来的定版图不再作为「定版」；它仍留在该资产里，随时可以再切回来。</div>
+            <div>后续出图会以新的定版图当垫图，镜头一致性以它为准。</div>
+            <div>替换定版本身不产生出图费用。</div>
+          </div>
+        ),
+        onOk: () => doSetPrimaryImage(image, true),
+      })
+      return
+    }
+    await doSetPrimaryImage(image, false)
+  }
+
+  const doSetPrimaryImage = async (image: TImage, confirmReplacePrimary: boolean) => {
     if (!assetId || !assetNavigateRelationType) return
 
     setSettingPrimaryImageId(image.id)
     try {
-      await setEntityImagePrimary(assetNavigateRelationType, assetId, image.id, true)
+      await setEntityImagePrimary(
+        assetNavigateRelationType,
+        assetId,
+        image.id,
+        true,
+        confirmReplacePrimary,
+      )
       message.success('已设为定版')
       await loadData()
     } catch (error) {
@@ -1163,6 +1250,23 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   const handleAdoptResult = async (row: ReferenceBatchSubmitResult['results'][number]) => {
     const url = adoptableUrl(row)
     if (!assetId || !url || !assetNavigateRelationType) return
+    // 这条路径**会设版**（set_primary=true），所以只要资产已有定版图，后端就要求显式确认。
+    if (adoptionNeedsPrimaryConfirmation(null, true)) {
+      confirmPrimaryReplaceThen(
+        '这次采纳会把现有定版图换成这张新结果（不会再静默替换）。',
+        () => doAdoptResult(row, url, true),
+      )
+      return
+    }
+    await doAdoptResult(row, url, false)
+  }
+
+  const doAdoptResult = async (
+    row: ReferenceBatchSubmitResult['results'][number],
+    url: string,
+    confirmReplacePrimary: boolean,
+  ) => {
+    if (!assetId || !assetNavigateRelationType) return
     const key = `${row.source_asset_id}_${row.service_task_id}`
     setAdoptingKey(key)
     try {
@@ -1172,6 +1276,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         url,
         set_primary: true,
         name: `${formName || asset?.name || assetId} 生成图`,
+        ...(confirmReplacePrimary ? { confirm_replace_primary: true } : {}),
       })
       message.success('已采纳到资产并设为定版，刷新后仍在')
       await loadData()

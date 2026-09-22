@@ -1,4 +1,4 @@
-"""P3 出图管线路由：出图服务对接 / 定妆照垫图 / 提示词包 / 直提出视频。
+"""P3 出图管线路由：出图服务对接 / 按提示词生成参考图 / 提示词包 / 直提出视频。
 
 挂载：``/api/v1/studio/image-pipeline``（见 ``app/api/v1/routes/studio/__init__.py``）。
 
@@ -35,12 +35,15 @@ from app.schemas.studio.image_pipeline import (
     PromptPackageRead,
     PromptPackageRequest,
     ReferenceImageRead,
+    ReferenceRegenerateRead,
+    ReferenceRegenerateRequest,
     VideoSubmitPlanRead,
     VideoSubmitPlanRequest,
     VideoSubmitRead,
     VideoSubmitRequest,
 )
 from app.services import paid_outlet_guard
+from app.core.integrations.apimart.images import ApimartImageError
 from app.services.studio.image_pipeline import external_image_client as image_client
 from app.services.studio.image_pipeline import reference_preflight
 from app.services.studio.image_pipeline.frame_submit import (
@@ -55,6 +58,9 @@ from app.services.studio.image_pipeline.image_pipeline import (
 )
 from app.services.studio.image_pipeline.adopt import adopt_generated_image
 from app.services.studio.image_pipeline.prompt_package import build_prompt_package
+from app.services.studio.image_pipeline.reference_regenerate import (
+    regenerate_with_existing_reference,
+)
 from app.services.studio.image_pipeline.reference_resolver import resolve_references
 from app.services.studio.image_pipeline.video_submit import (
     build_video_submit_plan,
@@ -148,13 +154,17 @@ async def get_image_pipeline_status() -> ApiResponse[ImageServiceStatusRead]:
 @router.post(
     "/plan/preview",
     response_model=ApiResponse[ImagePlanPreviewRead],
-    summary="出图提交计划预览（定妆照 / 垫图批量，不触网）",
+    summary="出图提交计划预览（定妆照 / 参考图批量，不触网）",
 )
 async def preview_image_plan(
     body: ImagePlanPreviewRequest,
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    """组装提交给出图服务的计划：幂等键、垫图来源、OSS 对象键模板，全部只读。"""
+    """组装提交给出图服务的计划：幂等键、参考图来源、OSS 对象键模板，全部只读。
+
+    默认主流程是**按提示词直接生成参考图**（不给参考图也能出图）；
+    ``reference_batch`` 只是额外把该资产已定版的那张图随请求带上去。
+    """
     try:
         targets, warnings = await build_targets(
             db,
@@ -223,7 +233,7 @@ async def submit_image_plan(
 ) -> Any:
     """受守卫的出图提交。默认 DRY_RUN：返回占位 task_id 与不可达占位地址。
 
-    提交前会逐张探活每一条垫图 URL（``preflight_guard``）：不可达就**一个请求都不提交**，
+    提交前会逐张探活每一条参考图 URL（``preflight_guard``）：不可达就**一个请求都不提交**，
     返回结构化中文错误（哪张图 / 哪个资产 / 实际状态码 / 怎么修），且不产生任何付费调用。
     """
     try:
@@ -238,6 +248,7 @@ async def submit_image_plan(
             aspect_ratio=body.aspect_ratio,
             image_model=body.image_model,
             negative_prompt=body.negative_prompt,
+            attempt=body.attempt,
         )
         results = await submit_targets(
             targets,
@@ -312,6 +323,60 @@ async def query_image_task(service_task_id: str) -> Any:
             error_message=detail.error_message,
         )
     )
+
+
+# ---------- 使用已有参考图重新生成（可选返工；默认主流程仍是 /submit） ----------
+
+
+@router.post(
+    "/reference-regenerate",
+    response_model=ApiResponse[ReferenceRegenerateRead],
+    summary="使用已有参考图重新生成（可选返工；默认主流程是按提示词直接生成）",
+)
+async def regenerate_with_existing_reference_route(
+    body: ReferenceRegenerateRequest,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """用该资产**已有的参考图**重新生成一张图。
+
+    与默认主流程的分工：
+
+    - **默认主流程**：``POST /image-pipeline/submit`` —— 按提示词**直接生成参考图**：
+      不传参考图照样出图，前端文案也不要把它描述成需要已有图的工作流；
+    - **本端点（可选返工 = 使用已有参考图重新生成）**：只有该资产已经有参考图、
+      且用户明确要保一致性时才用。它走 **Jellyfish 自己的 APIMart 图片通道**
+      （参考图字段 ``image_urls``），把**公网可用**的那张参考图真的传进请求；
+      **不**把参考图交给上游服务端点（那个端点对带参考图的生成有已知限制）。
+
+    安全口径：
+
+    - 参考图必须是公网地址：本机相对路径 / 内网地址在这里就判死（409）；
+    - 提交前逐张匿名探活（``preflight_guard``）：不可达 → 409 + 结构化中文错误
+      （哪个资产、真实状态码、怎么修、``paid_call_made:false``），**不提交、不写库、不出网**；
+    - 受付费守卫约束：DRY_RUN 下返回占位结果、一个字节都不出网；
+    - 幂等键复用 ``build_source_task_id``（含 ``attempt``）：同一轮重复点击**不会重复付费**
+      （同一轮直接复用上一轮结果，``deduplicated=true``）。
+    """
+    try:
+        data = await regenerate_with_existing_reference(
+            db,
+            body=body,
+            preflight=preflight_guard,
+        )
+    except paid_outlet_guard.PaidOutletBlocked as exc:
+        return _guard_blocked_envelope(exc)
+    except HTTPException as exc:
+        return _error_envelope(code=exc.status_code, detail=exc.detail)
+    except dry_run.DryRunBlocked as exc:
+        return _guard_blocked_envelope(exc)
+    except dry_run.RealCallNotConfirmed as exc:
+        return _guard_blocked_envelope(exc)
+    except ApimartImageError as exc:
+        return _error_envelope(
+            code=502,
+            detail={"code": "apimart_image_failed", "message": str(exc), "paid_call_made": True},
+        )
+    return success_response(data)
 
 
 # ---------- 直提出视频 ----------
@@ -438,6 +503,11 @@ async def adopt_generated_image_route(
 
     这是断点③的落点：出图提交本身不写库，必须由用户显式"采纳"才落正式产物。
     DRY_RUN 占位地址会被拒绝。
+
+    **不静默替换定版**：``set_primary`` 默认 false；该资产已有定版图而本次会顶掉它时，
+    必须显式传 ``confirm_replace_primary=true``，否则返回结构化 409
+    （``meta.error.existing_primary`` 里带将被替换那张图的只读摘要：槽位 id / 文件名 /
+    是否 OSS 公网地址），并且**一行都不会改**（判定发生在下载入库之前）。
     """
     try:
         adopted = await adopt_generated_image(
@@ -447,6 +517,7 @@ async def adopt_generated_image_route(
             url=body.url,
             image_id=body.image_id,
             set_primary=body.set_primary,
+            confirm_replace_primary=body.confirm_replace_primary,
             name=body.name or None,
         )
     except HTTPException as exc:
