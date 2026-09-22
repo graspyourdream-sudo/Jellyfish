@@ -1,4 +1,4 @@
-"""定版参考图（垫图）解析：把 Jellyfish 里的"定版主图"解析成出图服务可用的参考图地址。
+"""定版参考图解析：把 Jellyfish 里的"定版主图"解析成出图服务可用的参考图地址。
 
 定版语义（**零表结构变更**，全部复用既有列）：
 - 每个资产图片表（CharacterImage / SceneImage / PropImage / CostumeImage）都有
@@ -85,7 +85,7 @@ async def _resolve_url_for_file(db: AsyncSession, *, file_id: str) -> tuple[str,
     三种 storage_key 形态都要支持（实测库里都有）：
 
     1. **已经是完整 URL**（如 OSS 地址）——直接用。这本身就是长期资产地址，
-       也正是垫图需要的形态（AGENTS.md V0 #10：长期资产优先用 OSS URL）。
+       也正是参考图需要的形态（AGENTS.md V0 #10：长期资产优先用 OSS URL）。
     2. **相对 key**——先按**唯一正确的公网口径**拼 OSS 地址（``storage.public_url_for_key``，
        即 ``{s3_public_base_url}/{base_path}/{key}``），再照旧向对象存储确认这个对象真的在。
        为什么不能只信 ``get_file_info().url``：没配 ``s3_public_base_url`` 时它**不再**退回
@@ -176,7 +176,7 @@ async def resolve_references(
             result[asset_id] = ReferenceImage(
                 asset_id=asset_id,
                 asset_type=asset_type,
-                warnings=[f"{asset_type} {asset_id} 还没有图片，无法作为垫图使用。"],
+                warnings=[f"{asset_type} {asset_id} 还没有图片，无法作为参考图使用。"],
             )
             continue
 
@@ -190,7 +190,7 @@ async def resolve_references(
         if not getattr(row, "is_primary", False):
             warnings.append(
                 f"{asset_type} {asset_id} 没有定版主图（is_primary），已退回"
-                f"{getattr(row, 'view_angle', '') or '任意视角'}的图片作垫图，建议先人工定版。"
+                f"{getattr(row, 'view_angle', '') or '任意视角'}的图片作参考图，建议先人工定版。"
             )
         result[asset_id] = ReferenceImage(
             asset_id=asset_id,

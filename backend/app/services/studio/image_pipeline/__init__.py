@@ -1,9 +1,9 @@
-"""P3 出图管线包：出图服务 HTTP 对接 + 定妆照/垫图垫图批量 + 提示词包导出 + 直提出视频。
+"""P3 出图管线包：出图服务 HTTP 对接 + 按提示词生成参考图 + 参考图返工 + 提示词包导出 + 直提出视频。
 
 子模块：
 - ``external_image_client``：出图服务 HTTP 客户端（受守卫）
-- ``reference_resolver``：定版主图（垫图）解析
-- ``image_pipeline``：定妆照 → 垫图批量 → OSS 编排 + 受守卫提交
+- ``reference_resolver``：定版参考图解析
+- ``image_pipeline``：定妆照 → 参考图批量 → OSS 编排 + 受守卫提交
 - ``video_submit``：直提出视频（计划预览 + 受守卫同步提交）
 - ``prompt_package``：提示词包导出（图片 + 视频 + 绑定 + 参考图）
 """
@@ -85,7 +85,7 @@ __all__ = [
     "resolve_image_provider_model",
     "service_base_url",
     "service_timeout_seconds",
-    # 定版垫图
+    # 定版参考图
     "IMAGE_MODEL_BY_ASSET_TYPE",
     "ReferenceImage",
     "resolve_references",

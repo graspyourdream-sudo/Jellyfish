@@ -107,7 +107,7 @@ _HOW_TO_FIX_CODE: dict[str, str] = {
 class ReferenceCandidate:
     """一张**即将发给上游**的参考图（或参考音频）。
 
-    ``label`` 必须是可读名（如「场景「会议室」的定版垫图」「首帧参考图」），
+    ``label`` 必须是可读名（如「场景「会议室」的定版参考图」「首帧参考图」），
     这是它进入任何用户可见文案的唯一身份 —— 不要放 ``file_id``。
 
     ``allow_data_url``：该上游是否**接受内嵌 base64**（``vendor_accepts_data_url``）。
@@ -520,7 +520,7 @@ def _unreachable_warning(outcome: ReferenceProbeResult, label: str) -> str:
         f"已入库，但「{label}」的地址**匿名公网访问不可达**"
         + (f"（HTTP {outcome.http_status}）" if outcome.http_status else "")
         + f"：{outcome.reason} {outcome.how_to_fix}"
-        + "（这条地址当垫图/参考图交给上游时会被上游拒绝。）"
+        + "（这条地址当参考图交给上游时会被上游拒绝。）"
     )
 
 

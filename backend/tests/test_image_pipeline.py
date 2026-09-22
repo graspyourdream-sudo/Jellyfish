@@ -249,13 +249,13 @@ async def test_build_targets_warns_when_reference_missing() -> None:
     db, engine = await build_session()
     async with db:
         await _seed_assets(db)
-        # 场景没有图片 → 垫图批量阶段应明确提示"没有可用垫图"
+        # 场景没有图片 → reference_batch 阶段应明确提示"没有可用的定版参考图"
         targets, _ = await build_targets(
             db, project_id="proj-1", asset_type="scene", stage="reference_batch"
         )
 
     assert targets[0].reference_image == ""
-    assert any("没有可用垫图" in w for w in targets[0].warnings)
+    assert any("没有可用的定版参考图" in w for w in targets[0].warnings)
     await engine.dispose()
 
 

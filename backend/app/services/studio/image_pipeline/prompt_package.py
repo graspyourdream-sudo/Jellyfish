@@ -69,7 +69,7 @@ async def _collect_references(
     *,
     bound: dict[str, list[str]],
 ) -> tuple[list[ReferenceImageRead], list[str]]:
-    """把镜头已绑定资产里"有定版图"的挑出来，作为可垫图参考。"""
+    """把镜头已绑定资产里"有定版图"的挑出来，作为可参考的定版图。"""
     references: list[ReferenceImageRead] = []
     warnings: list[str] = []
     for asset_type, slot in REFERENCE_SLOT_BY_TYPE.items():

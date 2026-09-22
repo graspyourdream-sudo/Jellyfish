@@ -326,7 +326,8 @@ async def test_submit_targets_preflight_blocks_before_any_request(monkeypatch: p
     assert candidates and candidates[0].url.endswith("test_scene.png")
     detail = exc_info.value.detail
     assert detail["paid_call_made"] is False
-    assert "角色「林晓」的定版垫图" == detail["unreachable"][0]["asset"]
+    # 用户口径：默认主流程生成的是「参考图」，响应文案里不许出现「垫图」这种模糊词
+    assert "角色「林晓」的定版参考图" == detail["unreachable"][0]["asset"]
     # 页面文案里不许出现 file_id / 本机绝对路径
     assert "file_id" not in str(detail)
     assert "/Users/" not in str(detail)
