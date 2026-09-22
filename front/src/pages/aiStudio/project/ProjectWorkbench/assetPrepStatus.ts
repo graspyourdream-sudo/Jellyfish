@@ -9,6 +9,11 @@
  *   - 是否已设为定版（`*_images.is_primary`）
  *
  * 五个状态按顺序推进，每个状态对应**唯一明确的下一步**。
+ *
+ * 文案口径：这里的 label / nextActionLabel 都是**给用户看的**（可以开始提取、可以生成图片、
+ * 已有图片待设为定版…），所以不出现模型名、原始状态值或内部文件编号；
+ * 表名、列名、原始计数这些排查用的信息统一收进页面顶部默认收起的「技术详情」。
+ * 下面的表名/列名只出现在注释里，用于说明数据从哪来。
  */
 
 export type AssetPrepStatusKey =
@@ -78,7 +83,7 @@ export type AssetReadinessFlags = {
   has_pending_candidate: boolean
   /** 已保存图片提示词 */
   has_image_prompt: boolean
-  /** 已有图片（图片表里有 `file_id` 非空的行） */
+  /** 已有图片（图片表里存在带内部文件编号的行；编号本身只在「技术详情」展示） */
   has_image: boolean
   /** 已设为定版 */
   has_primary: boolean

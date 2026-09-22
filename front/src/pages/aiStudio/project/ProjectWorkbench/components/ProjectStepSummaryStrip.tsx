@@ -36,7 +36,12 @@ type ProjectStepSummaryStripProps = {
   continueDisabledReason?: string
   /** 「继续」按钮文案（与顶部主按钮同一份判定算出的同一句话）。 */
   continueLabel?: string
-  /** 折叠起来的「开发信息」节点 */
+  /**
+   * 折叠起来的「技术详情」节点（默认收起）。
+   *
+   * 接口路径、字段口径、模型与供应商、原始状态值、任务编号、内部文件编号这类
+   * 排查用的信息都收在里面，普通生产页面上一律不显示。
+   */
   devInfo?: ReactNode
 }
 
@@ -45,6 +50,7 @@ type ProjectStepSummaryStripProps = {
  * - 当前步骤 + 描述；
  * - 完成当前步骤还缺什么（与 resolveProjectStep 同源）；
  * - 主行动按钮「继续」与「返回修改」；
+ * - 排查用的内部信息统一挂在默认收起的「技术详情」里。
  * 刻意做得很薄——这是摘要条，不是仪表盘。
  */
 export function ProjectStepSummaryStrip({

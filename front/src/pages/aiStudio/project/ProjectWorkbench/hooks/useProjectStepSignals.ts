@@ -11,7 +11,8 @@ import { collectPrimaryLookupTargets } from '../assetPrepStatus'
  * 1. 便宜：落地一次总共约 8 个请求（下面每个常量的取舍都写在注释里）；
  * 2. 防御：任何一个请求失败都不阻塞页面，只把对应信号降级为 0/未知，
  *    `resolveProjectStep` 因此会停在更靠前的步骤，而不是抛错或跳步；
- * 3. 可解释：把原始计数与失败来源一起返回，供「开发信息」面板展示。
+ * 3. 可解释：把原始计数与失败来源一起返回，统一收进页面顶部默认收起的「技术详情」
+ *    （普通页面只显示用户能看懂的状态，不出现模型名、原始状态值或内部文件编号）。
  */
 
 /** 项目-章节-镜头-实体关联支持的资产类型（后端 `_link_spec`）。 */
@@ -30,11 +31,11 @@ export type ProjectSignalAsset = {
   id: string
   name: string
   type: ProjectSignalAssetType
-  /** 已有参考图片（图片表里有 `file_id` 非空的行） */
+  /** 已有参考图片（图片表里存在带内部文件编号的行；编号本身只在「技术详情」展示） */
   hasImage: boolean
   /** 定版/缩略图地址（空串 = 还没有图）；第 2 步「查看定版图」用它。 */
   thumbnail: string
-  /** 是否已设为定版（`*_images.is_primary`，且该行有 `file_id`） */
+  /** 是否已设为定版（`*_images.is_primary`，且该行确实有图片文件） */
   hasPrimary: boolean
   /** 当前首选图的行 ID（用于「设为定版」这个唯一主操作）；null = 没有图片 */
   imageId: number | null

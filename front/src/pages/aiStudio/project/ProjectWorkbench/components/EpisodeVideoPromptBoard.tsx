@@ -148,7 +148,9 @@ const ORIGIN_META: Record<PromptBoardOrigin, { label: string; color: string }> =
 const STATUS_META: Record<RowStatus, { label: string; color: string }> = {
   ok: { label: '匹配正常', color: 'green' },
   draft: { label: '草稿（未保存）', color: 'blue' },
-  dry_run: { label: '演练草稿（不可保存）', color: 'gold' },
+  // 用户语言：这一行没有真正调用大模型，所以不算可保存的草稿。
+  // （原来的「演练草稿」是开发术语，普通生产页面不该出现。）
+  dry_run: { label: '未真实生成（不可保存）', color: 'gold' },
   failed: { label: '失败', color: 'red' },
   interrupted: { label: '已中断（可重试）', color: 'orange' },
   busy: { label: '正在生成中（已跳过）', color: 'orange' },
@@ -748,7 +750,8 @@ export function EpisodeVideoPromptBoard({
       mergeRestoredDraftRows(buildShotDraftStatuses({ shots, drafts: list }), shots)
       message.success(
         `本轮结束：草稿成功 ${tally.done} 镜 · 失败 ${tally.failed} 镜 · 跳过 ${tally.skipped + tally.busy} 镜` +
-          (tally.dryRun ? ` · 演练 ${tally.dryRun} 镜（未落库）` : ''),
+          // 「未真实生成」= 本次没有真正调用大模型、不产生费用，也就没有可保存的正文
+          (tally.dryRun ? ` · 未真实生成 ${tally.dryRun} 镜（未保存，不产生费用）` : ''),
         6,
       )
     },
