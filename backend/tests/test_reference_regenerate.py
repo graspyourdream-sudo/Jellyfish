@@ -833,6 +833,26 @@ async def test_character_reference_sheet_is_16_9_and_not_the_project_video_ratio
     assert json.dumps(bodies[0], ensure_ascii=False).count(project_video_ratio) == 0, (
         f"项目级视频画幅 {project_video_ratio} 不得泄漏进人物参考图的出图请求"
     )
+    # 正向：一旦响应契约暴露了结果类型标签，人物必须是人物专用那一个
+    kind = str(data.results[0].model_dump().get("result_kind", "") or "")
+    if kind:
+        assert kind == EXPECTED_RESULT_KIND["character"]
+
+    # 中文标签说的是「人物参考图 / 设定图」，不是场景/道具/服装
+    assert data.results[0].asset_type == "character"
+    assert "人物参考图" in (data.results[0].model_dump().get("result_label") or "人物参考图")
+
+
+#: 用户口径的结果类型标签（**机器可读**）：``characterReference`` 是人物专用的那一个。
+#:
+#: 这里直接写死期望值（而不是 import 实现里的常量），是为了让用例钉住的**是用户口径**，
+#: 而不是"实现里刚好写了什么"：实现改了名字就该红。
+EXPECTED_RESULT_KIND = {
+    "character": "characterReference",
+    "scene": "sceneAssetImage",
+    "prop": "propAssetImage",
+    "costume": "costumeDesignImage",
+}
 
 
 #: 场景 / 道具 / 服装 的种子：(asset_type, asset_id, 名称, 提示词槽位, 公网参考图)
@@ -964,6 +984,17 @@ async def test_non_character_types_are_labelled_by_their_own_type(
     assert "characterReference" not in payload, f"{asset_type} 的结果不得挂人物内部类型标签 characterReference"
     assert "characterVariant" not in payload
     assert "character_sheet" not in payload
+
+    # 正向：一旦响应契约暴露了结果类型标签，它必须**是该类型自己的那一个**（不是人物的）
+    kind = str(result.model_dump().get("result_kind", "") or "")
+    if kind:
+        assert kind == EXPECTED_RESULT_KIND[asset_type], (
+            f"{asset_type} 的结果类型标签必须是 {EXPECTED_RESULT_KIND[asset_type]}，不能是 {kind}"
+        )
+        assert kind != EXPECTED_RESULT_KIND["character"]
+    label = str(result.model_dump().get("result_label", "") or "")
+    if label:
+        assert "角色" not in label and "人物" not in label
 
     # 中文标签说的是自己的类型（不是「角色」）
     assert ASSET_TYPE_ZH[asset_type] in data.reference_label
