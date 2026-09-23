@@ -8,7 +8,9 @@
  *   - 是否已有图片文件（`*_images`）
  *   - 是否已设为定版（`*_images.is_primary`）
  *
- * 五个状态按顺序推进，每个状态对应**唯一明确的下一步**。
+ * 六个状态按顺序推进，每个状态对应**唯一明确的下一步**。
+ * （第五个 `prompt_needs_supplement` 是本轮新增的"提示词存了但判定不能用"，
+ *   它只在页面**确实知道**质量判定时才可能出现，详见下面的注释。）
  *
  * 文案口径：这里的 label / nextActionLabel 都是**给用户看的**（可以开始提取、可以生成图片、
  * 已有图片待设为定版…），所以不出现模型名、原始状态值或内部文件编号；
@@ -19,6 +21,7 @@
 export type AssetPrepStatusKey =
   | 'pending_candidate'
   | 'linked_prompt_todo'
+  | 'prompt_needs_supplement'
   | 'prompt_ready_image_todo'
   | 'image_ready_primary_todo'
   | 'done'
@@ -42,6 +45,23 @@ export const ASSET_PREP_STATUSES: Record<AssetPrepStatusKey, AssetPrepStatusMeta
     key: 'linked_prompt_todo',
     label: '已关联，待完善图片提示词',
     nextActionLabel: '填提示词',
+    tone: 'gold',
+  },
+  /**
+   * 提示词**存了但不能用**（本轮新增）。
+   *
+   * 背景：图片提示词生成结果里大量出现「外观信息不足、需人工补充」，
+   * 但页面只看"有没有存过提示词"，于是把它显示成「提示词已就绪，待出图或上传」——
+   * 用户照着出图，钱花了、形象也不对。
+   *
+   * 口径：只有**确实判定为不可用**（`promptQuality === 'unusable'`，判定规则见
+   * `components/assetPromptQuality.ts`）才用这个状态；判不出来时仍然按原有四个状态走，
+   * 绝不因为"不确定"就宣称不可用、也不宣称可用。
+   */
+  prompt_needs_supplement: {
+    key: 'prompt_needs_supplement',
+    label: '提示词需要补充，暂时不能用',
+    nextActionLabel: '补提示词',
     tone: 'gold',
   },
   prompt_ready_image_todo: {
@@ -71,6 +91,12 @@ export type AssetPrepInput = {
   linked?: boolean
   /** 是否已保存图片提示词；null = 当前载荷无法判定 */
   hasImagePrompt?: boolean | null
+  /**
+   * 已保存/将要使用的提示词**质量**（可选）：
+   * `'unusable'` = 明确判定不能用（页面据此改说「提示词需要补充」而不是「已就绪」）；
+   * 其它取值（含 undefined）= 不变更原有判定口径。
+   */
+  promptQuality?: 'usable' | 'unusable' | 'unknown' | null
   /** 是否已有图片文件 */
   hasImage?: boolean
   /** 是否已设为定版（`is_primary`）；null/undefined = 无法判定 */
@@ -97,11 +123,15 @@ export type AssetReadinessFlags = {
  *
  * `linked` 恒为 true：能出现在项目资产清单里的资产，本身就意味着已经进了项目。
  */
-export function assetPrepInputFromReadiness(flags: AssetReadinessFlags): AssetPrepInput {
+export function assetPrepInputFromReadiness(
+  flags: AssetReadinessFlags,
+  promptQuality?: 'usable' | 'unusable' | 'unknown' | null,
+): AssetPrepInput {
   return {
     linked: true,
     hasPendingCandidate: flags.has_pending_candidate,
     hasImagePrompt: flags.has_image_prompt,
+    promptQuality: promptQuality ?? null,
     hasImage: flags.has_image,
     hasPrimary: flags.has_primary,
   }
@@ -112,6 +142,8 @@ export function resolveAssetPrepStatus(input: AssetPrepInput): AssetPrepStatusMe
   if (input.hasPendingCandidate) return ASSET_PREP_STATUSES.pending_candidate
   if (input.linked === false) return ASSET_PREP_STATUSES.pending_candidate
   if (input.hasImagePrompt !== true) return ASSET_PREP_STATUSES.linked_prompt_todo
+  // 提示词存了、但明确判定不能用：不许说「已就绪」，改说「需要补充」并指向同一步动作
+  if (input.promptQuality === 'unusable') return ASSET_PREP_STATUSES.prompt_needs_supplement
   if (!input.hasImage) return ASSET_PREP_STATUSES.prompt_ready_image_todo
   // 定版状态无法判定时不宣称「已定版」，停在「待设为定版」由用户确认
   if (input.hasPrimary !== true) return ASSET_PREP_STATUSES.image_ready_primary_todo
@@ -131,6 +163,7 @@ export function summarizeAssetPrep(inputs: readonly AssetPrepInput[]): AssetPrep
   const counts: Record<AssetPrepStatusKey, number> = {
     pending_candidate: 0,
     linked_prompt_todo: 0,
+    prompt_needs_supplement: 0,
     prompt_ready_image_todo: 0,
     image_ready_primary_todo: 0,
     done: 0,

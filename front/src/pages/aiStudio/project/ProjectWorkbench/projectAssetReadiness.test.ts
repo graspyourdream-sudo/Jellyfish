@@ -88,7 +88,8 @@ const PENDING_PAYLOAD: ReadinessPayload = {
 }
 
 function prepInputs(payload: ReadinessPayload) {
-  return payload.items.map(assetPrepInputFromReadiness)
+  // 显式传参：第二个参数是"提示词质量"，直接 `map(fn)` 会把下标当成它传进去
+  return payload.items.map((item) => assetPrepInputFromReadiness(item))
 }
 
 function itemByName(payload: ReadinessPayload, name: string): ReadinessItem {

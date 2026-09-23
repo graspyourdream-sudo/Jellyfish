@@ -48,6 +48,26 @@ import {
   supportsBatchReference,
   type ImageAssetType,
 } from '../../project/ProjectWorkbench/components/assetResultKind.ts'
+// 「生成依据」（默认收起）与提示词质量：与项目工作台**用同两份纯逻辑模块**，不各写一套
+import { AssetGenerationBasisPanel } from '../../project/ProjectWorkbench/components/AssetGenerationBasisPanel'
+import { PromptQualityAlert } from '../../project/ProjectWorkbench/components/PromptQualityAlert'
+import {
+  describePromptSaveFailure,
+  resolvePromptQuality,
+} from '../../project/ProjectWorkbench/components/assetPromptQuality.ts'
+import {
+  PROMPT_REQUEST_SUPPORT_NONE,
+  buildPromptRequestExtras,
+  describePromptRequestDelivery,
+  type PromptRequestFieldSupport,
+} from '../../project/ProjectWorkbench/components/assetPromptRequestContract.ts'
+import { fetchPromptRequestSupport } from '../../project/ProjectWorkbench/components/assetProductionApi'
+import {
+  buildGlobalAssetWriteConfirmation,
+  describeAssetScopeCopy,
+  isGlobalAssetType,
+} from '../../project/ProjectWorkbench/components/assetWriteScope.ts'
+import { buildRequestStructureText } from '../../project/ProjectWorkbench/components/assetGenerationBasis.ts'
 import { ASSET_OUTCOME_TAG_COLOR, normalizeAssetResultRow, summarizeAssetResults } from '../assetResultSummary'
 import { DisplayImageCard } from './DisplayImageCard'
 import { ProjectVisualStyleAndStyleFields } from '../../project/ProjectVisualStyleAndStyleFields'
@@ -356,6 +376,10 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   const [imagePromptLoading, setImagePromptLoading] = useState(false)
   const [imagePromptSaving, setImagePromptSaving] = useState(false)
   const [imagePromptResult, setImagePromptResult] = useState<ImagePromptPreviewResult | null>(null)
+  /** 请求字段能力（只读接口清单得到；读不到就一个额外字段都不发） */
+  const [promptRequestSupport, setPromptRequestSupport] = useState<PromptRequestFieldSupport>(PROMPT_REQUEST_SUPPORT_NONE)
+  /** ④ 本次真的发出去的请求结构（脱敏后展示在「生成依据」里） */
+  const [imagePromptRequestStructure, setImagePromptRequestStructure] = useState('')
   const [imagePromptDraftByCategory, setImagePromptDraftByCategory] = useState<Record<string, string>>({})
   const [savedPromptMap, setSavedPromptMap] = useState<Record<string, string>>({})
 
@@ -527,6 +551,17 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   useEffect(() => {
     void loadData()
   }, [loadData])
+
+  /** 请求字段能力（只读接口清单，不触发生成）：决定项目风格/资产身份这次能不能随请求送出去。 */
+  useEffect(() => {
+    let cancelled = false
+    void fetchPromptRequestSupport().then((support) => {
+      if (!cancelled) setPromptRequestSupport(support)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const slotItems = useMemo(() => {
     const count = clampViewCount(formViewCount)
@@ -962,12 +997,23 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     try {
       const saved = getAssetImagePrompts(asset)
       setSavedPromptMap(saved)
-      const data = await previewImagePrompts({
+      // 该资产的身份（后端声明了 asset_id 一类的字段时才会发出去）：让后端能装配它的资料与剧本片段
+      const extras = buildPromptRequestExtras({
+        support: promptRequestSupport,
+        assetId,
+        assetType: assetNavigateRelationType ?? '',
+        styleHint: formStyle.trim(),
+      })
+      const requestBody: Record<string, unknown> = {
         shot_text: shotText,
         project_id: resolvedProjectId || undefined,
         entity_profiles: [{ name, entity_type: assetNavigateRelationType ?? 'character', profile }],
         style_hint: formStyle.trim() || undefined,
-      })
+        ...extras,
+      }
+      // ④ 脱敏请求结构：原样记下"这次真的发出去的是什么"
+      setImagePromptRequestStructure(buildRequestStructureText(requestBody))
+      const data = await previewImagePrompts(requestBody as Parameters<typeof previewImagePrompts>[0])
       setImagePromptResult(data)
       const nextDraft: Record<string, string> = {}
       ;(data?.slots ?? []).forEach((slot) => {
@@ -987,12 +1033,24 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     if (!assetId || !assetNavigateRelationType) return
 
     const edited: Record<string, string> = {}
+    const blocked: string[] = []
     Object.entries(imagePromptDraftByCategory).forEach(([category, value]) => {
       const text = String(value ?? '').trim()
-      if (text) edited[category] = text
+      if (!text) return
+      // 判定不可用的槽位**不许存进资产**（否则它会被出图当成可用提示词）
+      const verdict = resolvePromptQuality({ prompt: text, assetName: asset?.name || formName || '' })
+      if (verdict.status === 'unusable') {
+        blocked.push(`${category}：${verdict.reason}`)
+        return
+      }
+      edited[category] = text
     })
     if (Object.keys(edited).length === 0) {
-      message.warning('没有可保存的提示词')
+      message.warning(
+        blocked.length > 0
+          ? `没有可保存的提示词：有 ${blocked.length} 个槽位判定不可用，先按提示补好再保存。`
+          : '没有可保存的提示词',
+      )
       return
     }
 
@@ -1006,13 +1064,61 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         // 读不到最新资产时退回页面已加载的 image_prompts
       }
       const merged = { ...currentSaved, ...edited }
-      await saveAssetImagePrompts(assetNavigateRelationType, assetId, merged)
-      setSavedPromptMap(merged)
-      setImagePromptOpen(false)
-      message.success(`已保存 ${Object.keys(edited).length} 个槽位提示词`)
-      await loadData()
+      /**
+       * 写入范围确认（用户口径）：
+       *   - 全局资产（场景/道具/服装）：**一律**先确认"这会写回全局资产库"，并列出差异；
+       *   - 角色（项目内资产）：只在会替换已有内容时确认。
+       * 已有提示词默认不动：要覆盖必须**显式确认**（与后端 409 image_prompt_replace_required 同口径）。
+       */
+      const writeScope = buildGlobalAssetWriteConfirmation({
+        assetType: assetNavigateRelationType ?? '',
+        assetName: asset?.name || formName || '',
+        existing: currentSaved,
+        incoming: merged,
+      })
+      const replacedSlots = writeScope.replacedSlots
+      const write = async (confirmReplace: boolean) => {
+        await saveAssetImagePrompts(
+          assetNavigateRelationType,
+          assetId,
+          merged,
+          confirmReplace ? { confirm_replace_image_prompt: true } : {},
+        )
+        setSavedPromptMap(merged)
+        setImagePromptOpen(false)
+        message.success(
+          blocked.length > 0
+            ? `已保存 ${Object.keys(edited).length} 个槽位提示词；另有 ${blocked.length} 个槽位判定不可用，未保存`
+            : `已保存 ${Object.keys(edited).length} 个槽位提示词`,
+        )
+        if (blocked.length > 0) {
+          // 说清被拦下的是哪些、为什么（不静默丢弃）
+          blocked.slice(0, 3).forEach((item) => message.warning(item))
+        }
+        await loadData()
+      }
+      if (writeScope.required) {
+        Modal.confirm({
+          title: writeScope.title,
+          width: 620,
+          okText: writeScope.okText,
+          cancelText: writeScope.cancelText,
+          content: (
+            <ul className="list-disc pl-5 text-xs leading-5">
+              {writeScope.lines.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          ),
+          onOk: () => write(replacedSlots.length > 0),
+        })
+        return
+      }
+      await write(false)
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '保存图片提示词失败')
+      // 后端的结构化中文错误优先原样展示（409 要显式确认 / 422 质量拦截）
+      const failure = describePromptSaveFailure(error)
+      message.error(failure.fix ? `${failure.message}（${failure.fix}）` : failure.message)
     } finally {
       setImagePromptSaving(false)
     }
@@ -1249,6 +1355,12 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   const imagePromptSavedOnlyCategories = Object.keys(savedPromptMap).filter(
     (category) => !imagePromptSlots.some((slot) => slot.category === category),
   )
+  /**
+   * 本次生成依据的原始回包（默认收起的「生成依据」面板读它）。
+   *
+   * 后端还没返回这些字段时面板如实显示「本次未提供生成依据」——**不编造**。
+   */
+  const imagePromptBasisPayload = imagePromptResult ?? null
   /** 采纳结果里可用的图片地址（DRY_RUN 占位地址不算）。 */
   const adoptableUrl = (row: ReferenceBatchSubmitResult['results'][number]): string => {
     const candidate = (row.oss_url || row.image_url || '').trim()
@@ -1894,6 +2006,22 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
               已保存过的类别会用已保存内容预填（下面标了「已保存」）；点「保存到资产」时会按类别合并写入
               该资产的已保存提示词，不会丢掉未出现在本次结果里的类别。
             </div>
+            {/* 生成依据（默认收起）：本次生成实际用到了哪些资料；字段没上线时如实说明 */}
+            <AssetGenerationBasisPanel
+              payload={imagePromptBasisPayload}
+              extras={{
+                requestStructure: imagePromptRequestStructure,
+                finalPrompt: String(imagePromptDraftByCategory[assetNavigateRelationType ? `${assetNavigateRelationType}_image_front` : ''] ?? ''),
+                globalAsset: isGlobalAssetType(assetNavigateRelationType),
+              }}
+              caption={`针对「${asset?.name || formName || '该资产'}」`}
+            />
+            {isGlobalAssetType(assetNavigateRelationType) ? (
+              <div className="text-[11px] text-gray-500">{describeAssetScopeCopy(assetNavigateRelationType).writeStatement}</div>
+            ) : null}
+            <div className="text-[11px] text-gray-500">
+              {describePromptRequestDelivery(promptRequestSupport, false)}
+            </div>
             {imagePromptSavedOnlyCategories.length > 0 ? (
               <div className="text-xs text-gray-500">
                 另有已保存但本次未生成的类别（保存时保留原值）：
@@ -1915,6 +2043,20 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                     {slot.entity_name ? <Tag>主体：{slot.entity_name}</Tag> : null}
                     {savedPromptMap[slot.category] ? <Tag color="green">已保存</Tag> : null}
                   </div>
+                  {/*
+                    质量如实呈现：这一条提示词不可用时给真实原因与怎么修，
+                    **不显示成"提示词已就绪"**，并且保存时会被拦下（见 handleSaveImagePrompts）。
+                  */}
+                  {(() => {
+                    const verdict = resolvePromptQuality({
+                      prompt: imagePromptDraftByCategory[slot.category] ?? slot.prompt,
+                      assetName: asset?.name || formName || '',
+                      // 后端本轮的正式判定就在槽位上（savable + quality_issues），整个槽位交给它读
+                      serverQuality: slot ?? imagePromptResult?.quality ?? null,
+                      serverWarnings: slot.warnings,
+                    })
+                    return verdict.status === 'usable' ? null : <PromptQualityAlert verdict={verdict} />
+                  })()}
                   <Input.TextArea
                     rows={4}
                     value={imagePromptDraftByCategory[slot.category] ?? slot.prompt}

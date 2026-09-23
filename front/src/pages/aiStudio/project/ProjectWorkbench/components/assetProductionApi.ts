@@ -20,10 +20,22 @@
  *                                                     参考图会真的进请求；不是默认主流程）
  */
 
-import { callApi, previewImagePrompts } from '../../../../../services/llmPipelineApi'
+import { callApi, previewImagePrompts, type ImagePromptSlot } from '../../../../../services/llmPipelineApi'
 import { StudioEntitiesApi } from '../../../../../services/studioEntities'
 import { OpenAPI } from '../../../../../services/generated'
 import { REFERENCE_REWORK_UNAVAILABLE_HINT } from './assetProduction'
+import {
+  ASSET_PROMPT_BATCH_SAVE_UNAVAILABLE,
+  PROMPT_REQUEST_SUPPORT_NONE,
+  buildEntityProfileEntry,
+  buildPromptRequestExtras,
+  matchesRequestedAsset,
+  readAssetPromptBatchSaveSupport,
+  readPromptRequestFieldSupport,
+  type AssetPromptBatchSaveBody,
+  type AssetPromptBatchSaveSupport,
+  type PromptRequestFieldSupport,
+} from './assetPromptRequestContract.ts'
 
 export type AssetImageServiceResult = {
   source_task_id?: string
@@ -55,6 +67,16 @@ export type AssetImageServiceResult = {
   aspect_ratio?: string
   /** 画幅来源（新）：character_reference_fixed / request / default */
   aspect_ratio_source?: string
+  /** 本次提示词的质量判定（新字段，契约以后端实现为准）：`usable: false` + 中文原因时页面拦截 */
+  quality?: unknown
+  /** 同上（后端也可能用 `prompt_quality`） */
+  prompt_quality?: unknown
+  /** 后端给的质量告警原文 */
+  prompt_warnings?: string[]
+  /** 本次生成依据（新字段）：默认收起的「生成依据」面板读它 */
+  generation_basis?: unknown
+  /** 同上（容器名可能是 `basis`） */
+  basis?: unknown
   detail?: Record<string, unknown>
 }
 
@@ -112,6 +134,21 @@ export type AssetImagePlanTargetLike = {
   aspect_ratio: string
   prompt_source?: string
   warnings?: string[]
+  /**
+   * 本次会用的提示词的质量判定（新字段，契约以后端实现为准）。
+   *
+   * 计划是只读的，但它给的正是"这次会送出去的那条提示词"，
+   * 所以页面可以直接据此在出图前拦住不可用的提示词（后端还会再兜一层）。
+   */
+  quality?: unknown
+  /** 同上（后端也可能用 `prompt_quality` 这个名字） */
+  prompt_quality?: unknown
+  /** 后端给的质量告警原文（作为"真实原因"展示） */
+  prompt_warnings?: string[]
+  /** 本次生成依据（新字段）：默认收起的「生成依据」面板读它 */
+  generation_basis?: unknown
+  /** 同上（容器名可能是 `basis`） */
+  basis?: unknown
 }
 
 export type AssetImagePlanPreview = {
@@ -375,30 +412,231 @@ export async function fetchReferenceReworkAvailability(force = false): Promise<R
 }
 
 /** 大模型生成/完善**一个**资产的图片提示词（只预览，不写库）。 */
+export type AssetPromptPreviewOutcome = {
+  prompt: string
+  llmCalled: boolean
+  warnings: string[]
+  latencyMs: number | null
+  /**
+   * 本次生成依据的原始回包片段（默认收起的「生成依据」面板用它读字段）。
+   *
+   * **原样透传，前端不加工**：字段还没上线时面板自己会如实显示「本次未提供生成依据」。
+   */
+  basisPayload: unknown
+  /** 本次提示词质量的原始回包片段（后端结构化判定优先） */
+  qualityPayload: unknown
+  /** 命中的槽位（技术详情用；拿不到就是 null） */
+  slot: ImagePromptSlot | null
+  /** 后端这次压根没返回可用槽位（例如槽位表里还没有这个类型） */
+  slotMissing: boolean
+  /**
+   * 本次画像资料是**谁装配的**：
+   *   - `server`：让后端自己装载（新后端会把「资产描述 + 候选结构化资料 + 剧本片段」拼起来，
+   *     这正是"生成时没有拿到剧本里的资产资料"的根因修复）；
+   *   - `request`：退回"调用方传入画像"（今天的口径：只有资产描述）；
+   *   - `none`：两条都没成。
+   */
+  profileSource: 'server' | 'request' | 'none'
+  /** 一句话说明（页面如实展示：这次资料是哪来的） */
+  profileNote: string
+  /**
+   * ④ 本次**真的发出去**的请求体（页面用它渲染脱敏请求结构）。
+   *
+   * 只记录结构本身；渲染时会把内部 ID 脱敏，见 `buildRequestStructureText`。
+   */
+  requestBody: Record<string, unknown>
+}
+
+/**
+ * **先让后端自己装载资产资料**（新后端 `load_project_entity_profiles(enrich=True)`）。
+ *
+ * 为什么值得多一步：后端装载时会按「资产描述 → 候选结构化资料（含出场镜头/剧本原文）
+ * → 剧本片段」拼画像；只要调用方**别把画像塞进来**，它就会走这条路。
+ * 这是用户那个问题（提示词大量"外观信息不足、需人工补充"）的根因修复。
+ *
+ * 安全网：拿回来的槽位必须**确实是这个资产**（名字对得上），否则退回调用方传入画像 ——
+ * 宁可少用一点资料，也绝不能把隔壁资产的资料画到它身上。
+ */
+async function previewWithServerProfiles(args: {
+  projectId?: string | null
+  assetName: string
+  category: string
+  extras: Record<string, string>
+}): Promise<{
+  slot: ImagePromptSlot
+  llmCalled: boolean
+  latencyMs: number | null
+  warnings: string[]
+  requestBody: Record<string, unknown>
+} | null> {
+  if (!args.projectId) return null
+  try {
+    const body: Record<string, unknown> = {
+      project_id: args.projectId,
+      // 只给名字，不给画像：后端据此在**它自己装载的**画像卡里挑中这个资产
+      shot_text: args.assetName,
+      categories: [args.category],
+      ...args.extras,
+    }
+    const preview = await previewImagePrompts(body as Parameters<typeof previewImagePrompts>[0])
+    const slots: ImagePromptSlot[] = Array.isArray(preview?.slots) ? preview.slots : []
+    const matched = slots.find((slot) => String(slot?.category ?? '') === args.category) ?? null
+    if (!matched) return null
+    if (!matchesRequestedAsset({ slot: matched }, args.assetName)) return null
+    return {
+      slot: matched,
+      // 演练 / 模板结果**绝不能**被当成大模型输出（保存前的守卫靠这个布尔量）
+      llmCalled: Boolean(preview?.meta?.llm_called),
+      latencyMs: typeof preview?.meta?.latency_ms === 'number' ? preview.meta.latency_ms : null,
+      warnings: Array.isArray(preview?.warnings) ? preview.warnings : [],
+      requestBody: body,
+    }
+  } catch {
+    // 老后端 / 网络问题：不报错，安静地退回调用方传入画像那条路
+    return null
+  }
+}
+
 export async function previewAssetImagePrompt(args: {
   projectId?: string | null
   assetType: string
+  /** 资产 id（后端声明了才会发送，见 assetPromptRequestContract 的能力探测） */
+  assetId?: string
   name: string
   description: string
   category: string
-}): Promise<{ prompt: string; llmCalled: boolean; warnings: string[]; latencyMs: number | null }> {
-  const preview = await previewImagePrompts({
+  /** 项目整体风格（`projects.visual_style` + `style`） */
+  styleHint?: string
+  /** 用户对该资产的补充/修改 */
+  userSupplement?: string
+  /** 请求字段能力（`fetchPromptRequestSupport()` 的结果；不给就不发额外字段） */
+  requestSupport?: PromptRequestFieldSupport
+}): Promise<AssetPromptPreviewOutcome> {
+  const extras = buildPromptRequestExtras({
+    support: args.requestSupport ?? PROMPT_REQUEST_SUPPORT_NONE,
+    styleHint: args.styleHint,
+    userSupplement: args.userSupplement,
+    assetId: args.assetId,
+    assetType: args.assetType,
+  })
+  // ① 先让后端自己装配（含候选结构化资料 + 剧本片段）：这是"生成时真的拿到剧本资料"的关键一步
+  const serverProfileSlot = await previewWithServerProfiles({
+    projectId: args.projectId,
+    assetName: args.name,
+    category: args.category,
+    extras,
+  })
+  if (serverProfileSlot) {
+    return {
+      prompt: String(serverProfileSlot.slot.prompt ?? '').trim(),
+      llmCalled: serverProfileSlot.llmCalled,
+      warnings: serverProfileSlot.warnings,
+      latencyMs: serverProfileSlot.latencyMs,
+      basisPayload: serverProfileSlot.slot,
+      qualityPayload: serverProfileSlot.slot,
+      slot: serverProfileSlot.slot,
+      slotMissing: false,
+      profileSource: 'server',
+      profileNote: '本次的资产资料由后端按「资产描述 → 候选结构化资料 → 剧本片段」装配（见「生成依据」）。',
+      requestBody: serverProfileSlot.requestBody,
+    }
+  }
+
+  // ② 退回调用方传入画像（老后端 / 后端没挑中这个资产时）
+  const body: Record<string, unknown> = {
     project_id: args.projectId ?? null,
     entity_profiles: [
-      {
+      buildEntityProfileEntry({
         name: args.name,
-        entity_type: args.assetType,
+        entityType: args.assetType,
         profile: args.description,
-      },
+        support: args.requestSupport ?? PROMPT_REQUEST_SUPPORT_NONE,
+      }),
     ],
     categories: [args.category],
-  })
-  const slots = Array.isArray(preview?.slots) ? preview.slots : []
-  const matched = slots.find((slot) => String(slot?.category ?? '') === args.category) ?? slots[0]
+    ...extras,
+  }
+  const preview = await previewImagePrompts(body as Parameters<typeof previewImagePrompts>[0])
+  const slots: ImagePromptSlot[] = Array.isArray(preview?.slots) ? preview.slots : []
+  const matched = slots.find((slot) => String(slot?.category ?? '') === args.category) ?? slots[0] ?? null
+  const hasDescription = Boolean(String(args.description ?? '').trim())
   return {
     prompt: String(matched?.prompt ?? '').trim(),
     llmCalled: Boolean(preview?.meta?.llm_called),
     warnings: Array.isArray(preview?.warnings) ? preview.warnings : [],
     latencyMs: typeof preview?.meta?.latency_ms === 'number' ? preview.meta.latency_ms : null,
+    // 依据字段可能在回包根上，也可能在槽位上：两个都给面板，由面板容错读取
+    basisPayload: matched ?? preview ?? null,
+    qualityPayload: matched ?? preview ?? null,
+    slot: matched,
+    slotMissing: !matched,
+    profileSource: 'request',
+    profileNote: hasDescription
+      ? '本次的资产资料来自**资产描述**（后端没有按项目装配结构化资料与剧本片段：这些资料补上后提示词会更准）。'
+      : '本次没有可用的资产资料（资产描述是空的，后端也没有装配到结构化资料）：难怪会出现「外观信息不足」。',
+    requestBody: body,
   }
+}
+
+/* ------------------------- 资产图片提示词的批量保存（后端"全有或全无"入口） ------------------------- */
+
+/**
+ * 批量保存资产图片提示词（`POST /studio/projects/{project_id}/asset-image-prompts`）。
+ *
+ * 为什么用它而不是逐个 PATCH：后端这一个入口一次事务内做四件事 ——
+ * 逐资产质量拦截（422）、**跨资产查重**（409）、覆盖保护、只写变化的槽位（合并写入）。
+ * 逐个 PATCH 看不到"两个角色拿到同一段提示词"，还会"部分成功"。
+ */
+export function saveAssetImagePromptsBatch(
+  projectId: string,
+  body: AssetPromptBatchSaveBody,
+): Promise<Record<string, unknown>> {
+  return callApi(
+    `/api/v1/studio/projects/${encodeURIComponent(projectId)}/asset-image-prompts`,
+    body as unknown as Record<string, unknown>,
+  )
+}
+
+let batchSaveSupport: AssetPromptBatchSaveSupport | null = null
+
+/** 批量保存入口在不在（读接口清单；读不到就退回逐资产保存，不把 404 甩给用户）。 */
+export async function fetchAssetPromptBatchSaveSupport(force = false): Promise<AssetPromptBatchSaveSupport> {
+  if (batchSaveSupport && !force) return batchSaveSupport
+  try {
+    const response = await fetch(`${OpenAPI.BASE}/openapi.json`)
+    if (!response.ok) {
+      batchSaveSupport = ASSET_PROMPT_BATCH_SAVE_UNAVAILABLE
+      return batchSaveSupport
+    }
+    batchSaveSupport = readAssetPromptBatchSaveSupport(await response.json())
+  } catch {
+    batchSaveSupport = ASSET_PROMPT_BATCH_SAVE_UNAVAILABLE
+  }
+  return batchSaveSupport
+}
+
+/* ------------------------- 请求字段能力探测（只读接口清单，不触网生成） ------------------------- */
+
+let promptRequestSupport: PromptRequestFieldSupport | null = null
+
+/**
+ * 读一次后端接口清单，判断「图片提示词生成」请求模型声明了哪些字段。
+ *
+ * 为什么这么做：新增的 `user_supplement` / `asset_id` 字段名以后端实现为准，
+ * 前端硬猜会 422；读清单则**后端一上线前端就自动开始使用**，
+ * 读不到就退化成今天的行为（一个额外字段都不发）。
+ */
+export async function fetchPromptRequestSupport(force = false): Promise<PromptRequestFieldSupport> {
+  if (promptRequestSupport && !force) return promptRequestSupport
+  try {
+    const response = await fetch(`${OpenAPI.BASE}/openapi.json`)
+    if (!response.ok) {
+      promptRequestSupport = PROMPT_REQUEST_SUPPORT_NONE
+      return promptRequestSupport
+    }
+    promptRequestSupport = readPromptRequestFieldSupport(await response.json())
+  } catch {
+    promptRequestSupport = PROMPT_REQUEST_SUPPORT_NONE
+  }
+  return promptRequestSupport
 }

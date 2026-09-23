@@ -132,6 +132,34 @@ export interface ImagePromptSlot {
   prompt: string
   negative_prompt: string
   warnings?: string[]
+  /**
+   * 本次生成**实际用到了什么**（新字段，契约以后端实现为准）。
+   *
+   * 页面用它渲染默认收起的「生成依据」；后端没有返回时前端**不编造**，
+   * 如实显示「本次未提供生成依据」（见 `ProjectWorkbench/components/assetGenerationBasis.ts`）。
+   */
+  generation_basis?: Record<string, unknown> | null
+  /** 同上：容器名也可能是 `basis` / `provenance`（前端几种都认） */
+  basis?: Record<string, unknown> | null
+  /**
+   * 这一条提示词能不能用（新字段，契约以后端实现为准）：
+   * `usable: false` + 中文原因（「外观信息不足，需人工补充」等）时，页面会拦住批量出图。
+   */
+  quality?: Record<string, unknown> | null
+  /** 简写形态：后端也可能直接在槽位上给一个布尔量 */
+  usable?: boolean | null
+  /**
+   * **后端本轮质量拦截的正式字段**（`ImagePromptSlotRead.savable`）：
+   * false = 这段内容不能保存成「提示词已就绪」，也不能进入批量出图。
+   */
+  savable?: boolean
+  /** 未通过的原因（结构化中文：`{code, message, fix, status_code}`） */
+  quality_issues?: Record<string, unknown>[]
+  /**
+   * 该槽位主体描述的资料来源：
+   * `asset_description` / `candidate_profile` / `request` / `none`（没有任何资料，只剩空话兜底）。
+   */
+  structured_source?: string
 }
 
 export interface EntityProfileInput {
@@ -140,6 +168,8 @@ export interface EntityProfileInput {
   profile?: string
   base_prompt?: string
   image_prompt?: string
+  /** 资产 id（新字段，可选）：后端据此装配该资产的结构化资料与相关剧本片段/分镜 */
+  asset_id?: string
 }
 
 export interface LlmRunMeta {
@@ -155,10 +185,16 @@ export interface LlmRunMeta {
 export interface ImagePromptPreviewResult {
   shot_id?: string | null
   project_id?: string | null
+  shot_text_chars?: number
   slots: ImagePromptSlot[]
   entity_cards?: AnyRecord[]
   warnings: string[]
   meta: LlmRunMeta
+  /** 本次生成依据（新字段，可选；容器名可能是 `basis` / `provenance` / `generation_context`） */
+  generation_basis?: Record<string, unknown> | null
+  basis?: Record<string, unknown> | null
+  /** 本次提示词的质量判定（新字段，可选） */
+  quality?: Record<string, unknown> | null
 }
 
 export interface VideoPromptPreviewResult {
@@ -254,6 +290,13 @@ export function previewImagePrompts(body: {
   categories?: string[]
   style_hint?: string
   negative_prompt?: string
+  /**
+   * 用户对该资产的补充/修改（新字段，可选；后端还没声明这个键时不会发送，
+   * 见 `ProjectWorkbench/components/assetPromptRequestContract.ts` 的能力探测）。
+   */
+  user_supplement?: string
+  /** 该资产 id（新字段，可选）：后端据此装配它的结构化资料与相关剧本片段/分镜 */
+  asset_id?: string
 }): Promise<ImagePromptPreviewResult> {
   return callApi('/api/v1/studio/llm/image-prompt/preview', body as AnyRecord)
 }

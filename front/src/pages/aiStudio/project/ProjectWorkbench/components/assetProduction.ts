@@ -872,6 +872,21 @@ export type ProductionTask = {
   errorMessage: string
   /** 正常结果的说明（例如「结果暂存在出图服务本机，采纳后才会落到资产图片里」） */
   note: string
+  /**
+   * 本次提示词质量的**原始回包片段**（新字段，契约以后端实现为准）。
+   *
+   * 结果卡片用它判"这条提示词能不能用于出图"：后端给了结构化判定就以后端为准，
+   * 没给就本地按「空 / 外观信息不足 / 只有名称+通用词 / 多个资产高度重复」自查。
+   */
+  promptQuality?: unknown
+  /** 后端给的质量告警原文（作为"真实原因"展示；内部标识会先屏蔽） */
+  promptWarnings?: string[]
+  /**
+   * 本次生成依据的**原始回包片段**（新字段）：默认收起的「生成依据」面板读它。
+   *
+   * 没有这个字段时面板如实显示「本次未提供生成依据」，绝不用资产名/类型顶上。
+   */
+  promptBasis?: unknown
   /** 采纳后落到资产图片槽位的地址与行 ID */
   adoptedUrl: string
   adoptedImageId: number | null

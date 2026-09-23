@@ -131,6 +131,7 @@ import {
 import {
   adoptAssetImageResult,
   createImageSlot,
+  fetchPromptRequestSupport,
   fetchReferenceReworkAvailability,
   regenerateWithExistingReference as callReferenceRegenerate,
   findEmptyImageSlot,
@@ -143,6 +144,35 @@ import {
   type AssetImageServiceResult,
 } from './assetProductionApi'
 import { AssetResultCard } from './AssetResultCard'
+import { AssetGenerationBasisPanel } from './AssetGenerationBasisPanel'
+import { buildRequestStructureText, type GenerationBasisExtras } from './assetGenerationBasis.ts'
+import { PromptQualityAlert, PromptQualityTag } from './PromptQualityAlert'
+import {
+  PROMPT_REQUEST_SUPPORT_NONE,
+  describePromptRequestDelivery,
+  describePromptRequestFields,
+  type PromptRequestFieldSupport,
+} from './assetPromptRequestContract.ts'
+import {
+  buildBatchPromptQualityGate,
+  buildPromptQualityGateModal,
+  describePromptSaveFailure,
+  resolvePromptQuality,
+  selectAssetsForSubmit,
+  summarizePromptDifferences,
+  type PromptQualityVerdict,
+} from './assetPromptQuality.ts'
+import {
+  buildGlobalAssetWriteConfirmation,
+  describeAssetScopeCopy,
+  isGlobalAssetType,
+} from './assetWriteScope.ts'
+import {
+  describePromptRowGenerateHint,
+  resolveAssetPromptSlot,
+  type AssetPromptSlotSpecLike,
+} from './assetPromptSlots.ts'
+import { fetchImagePromptSlots } from '../../../../../services/llmPipelineApi'
 
 /** 结果卡片一次最多铺多少张（多了会拖慢页面；其余可点「查看全部结果」）。 */
 const MAX_VISIBLE_CARDS = 6
@@ -151,8 +181,8 @@ const POLL_INTERVAL_MS = 3000
 const POLL_TIMEOUT_MS = 5 * 60 * 1000
 /** 编辑提示词时使用的槽位：**唯一映射**在 assetProduction.PROMPT_SLOT_BY_ASSET_TYPE（有单测）。 */
 const PROMPT_CATEGORY_BY_TYPE: Record<ProductionAssetType, string> = PROMPT_SLOT_BY_ASSET_TYPE
-/** 道具没有大模型槽位（后端槽位表只定义了人物/场景/服装），只能手工填写。 */
-const LLM_PROMPT_SUPPORTED: ProductionAssetType[] = ['character', 'scene', 'costume']
+/** 「生成依据」在生产区里最多同时铺几项（其余的在各自弹窗/结果卡片里看）。 */
+const MAX_BASIS_PANELS = 3
 
 const PROMPT_SOURCE_LABEL: Record<string, string> = {
   saved: '用已保存的提示词',
@@ -262,6 +292,16 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
   const [promptEditorKey, setPromptEditorKey] = useState('')
   const [promptSlotDrafts, setPromptSlotDrafts] = useState<Record<string, string>>({})
   const [promptSlotLoading, setPromptSlotLoading] = useState(false)
+  /** 该资产**已经保存过**的那条提示词（打开弹窗时读一次）：用于"覆盖前先确认" */
+  const [promptSlotSaved, setPromptSlotSaved] = useState('')
+  /**
+   * 该资产**已保存的全部槽位提示词**（打开弹窗时读一次）。
+   *
+   * 为什么必须整份带着：保存接口是"整列替换"（`setattr(entity, 'image_prompts', 传入的 map)`），
+   * 只发一个槽位会把该资产**其它槽位**的提示词一起抹掉。所以保存前先把已保存的合并回去，
+   * 只改动用户这一次编辑的那一个槽位。
+   */
+  const [promptExistingMap, setPromptExistingMap] = useState<Record<string, string>>({})
   const [promptSaving, setPromptSaving] = useState(false)
   const [promptGenerating, setPromptGenerating] = useState(false)
   const [detailTask, setDetailTask] = useState<ProductionTask | null>(null)
@@ -284,6 +324,28 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
   })
   /** 项目自己的最终视频画幅（`projects.default_video_ratio`）：只用于把人物固定 16:9 说清楚 */
   const [projectVideoRatio, setProjectVideoRatio] = useState('')
+  /** 项目整体风格（`projects.visual_style` + `style`）：生成图片提示词时的 ① 项依据 */
+  const [projectStyleHint, setProjectStyleHint] = useState('')
+  /**
+   * 生成图片提示词时**能送出去的请求字段**（读后端接口清单得到，见 assetPromptRequestContract）。
+   *
+   * 读不到时就一个额外字段都不发（退化成今天的行为），页面上也会如实说明。
+   */
+  const [promptRequestSupport, setPromptRequestSupport] = useState<PromptRequestFieldSupport>(PROMPT_REQUEST_SUPPORT_NONE)
+  /** 后端槽位表（`image_prompt_slots`）：道具槽位补上后，这里会自动出现它 */
+  const [promptSlotSpecs, setPromptSlotSpecs] = useState<AssetPromptSlotSpecLike[]>([])
+  /** 每个资产「本次的补充/修改」（④ 项依据，只用于生成提示词，不写进资产资料） */
+  const [promptUserSupplements, setPromptUserSupplements] = useState<Record<string, string>>({})
+  /** 每个资产最近一次提示词生成的**依据原文**（默认收起的「生成依据」面板读它） */
+  const [promptBasisByKey, setPromptBasisByKey] = useState<Record<string, unknown>>({})
+  /** 每个资产最近一次提示词生成的**质量判定原文**（后端结构化优先） */
+  const [promptQualityByKey, setPromptQualityByKey] = useState<Record<string, unknown>>({})
+  /** 每个资产最近一次提示词生成的后端告警原文（作为"真实原因"展示） */
+  const [promptWarningsByKey, setPromptWarningsByKey] = useState<Record<string, string[]>>({})
+  /** 最近一次提示词生成时"资料是哪来的"（页面如实展示：后端装配 / 只有资产描述 / 没有资料） */
+  const [promptProfileNote, setPromptProfileNote] = useState('')
+  /** ④ 每个资产最近一次提示词生成**真的发出去**的请求结构（脱敏后展示） */
+  const [promptRequestStructureByKey, setPromptRequestStructureByKey] = useState<Record<string, string>>({})
   /** 刷新后恢复上次结果时给用户的那句话（只读恢复，绝不会重新提交） */
   const [restoredNote, setRestoredNote] = useState('')
 
@@ -329,7 +391,7 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
     })
   }, [chapterId, effectiveProjectId, roundKey, tasks])
 
-  /** 项目自己的最终视频画幅：只读一次，用来把「人物参考图固定 16:9」和成片画幅分清楚。 */
+  /** 项目自己的最终视频画幅 + 整体风格：只读一次（画幅用来分清人物参考图 16:9，风格用于提示词生成） */
   useEffect(() => {
     if (!effectiveProjectId) return
     let cancelled = false
@@ -338,17 +400,46 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         const res = await StudioProjectsService.getProjectApiV1StudioProjectsProjectIdGet({
           projectId: effectiveProjectId,
         })
-        const ratio = (res?.data as { default_video_ratio?: string | null } | undefined)?.default_video_ratio
-        if (!cancelled) setProjectVideoRatio(typeof ratio === 'string' ? ratio.trim() : '')
+        const project = (res?.data ?? {}) as { default_video_ratio?: string | null; visual_style?: string | null; style?: string | null }
+        if (cancelled) return
+        const ratio = project.default_video_ratio
+        setProjectVideoRatio(typeof ratio === 'string' ? ratio.trim() : '')
+        // ① 项目整体风格：项目自己的视觉风格 + 风格取值（读不到就留空，不编一个风格出来）
+        const styleParts = [project.visual_style, project.style]
+          .map((item) => (typeof item === 'string' ? item.trim() : ''))
+          .filter((item) => item.length > 0)
+        setProjectStyleHint(Array.from(new Set(styleParts)).join('，'))
       } catch {
-        // 读不到就只写人物固定口径那一半，不编一个项目画幅出来
-        if (!cancelled) setProjectVideoRatio('')
+        // 读不到就只写人物固定口径那一半，不编一个项目画幅/风格出来
+        if (!cancelled) {
+          setProjectVideoRatio('')
+          setProjectStyleHint('')
+        }
       }
     })()
     return () => {
       cancelled = true
     }
   }, [effectiveProjectId])
+
+  /** 请求字段能力 + 后端槽位表：都是**只读**读取（不触发任何生成、不花钱），失败就如实降级 */
+  useEffect(() => {
+    let cancelled = false
+    void fetchPromptRequestSupport().then((state) => {
+      if (!cancelled) setPromptRequestSupport(state)
+    })
+    void fetchImagePromptSlots()
+      .then((specs) => {
+        if (!cancelled) setPromptSlotSpecs(Array.isArray(specs) ? specs : [])
+      })
+      .catch(() => {
+        // 读不到槽位表：退回内置槽位表（四类资产都有槽位，道具不再显示「不支持」）
+        if (!cancelled) setPromptSlotSpecs([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // 资产清单变化（例如刚采纳完）时重建默认勾选：**仍然只勾未生成项**
   const assetsFingerprint = productionAssets.map((asset) => `${asset.key}:${asset.hasImage ? 1 : 0}`).join('|')
@@ -474,6 +565,150 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
     (assetType: ProductionAssetType): Record<string, unknown> =>
       planStrategyByType[`${assetType}:${SUBMIT_STAGE}:${settings.aspectRatio}`] ?? {},
     [planStrategyByType, settings.aspectRatio],
+  )
+
+  /* ------------------------------------------------- 提示词质量（本次能不能出图） */
+
+  /** 该资产**本次实际会送出去**的那条提示词（本次改过的优先，其次只读计划里会给的那条）。 */
+  const effectivePromptFor = useCallback(
+    (asset: ProductionAsset, planByType?: Map<string, AssetImagePlanTargetLike[]>): string | null => {
+      const edited = String(promptDrafts[asset.key] ?? '').trim()
+      if (edited) return edited
+      const targets = planByType?.get(asset.type) ?? planTargetsByType[planKeyFor(asset.type)] ?? []
+      const target = planTargetForAsset(asset, targets)
+      // 计划还没拿到 → 返回 null（判不出来就如实说"未知"，不编造"可用"）
+      return target ? String(target.prompt ?? '') : null
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [planTargetForAsset, planTargetsByType, promptDrafts, settings.aspectRatio],
+  )
+
+  /**
+   * 出图前的**质量闸门**（前端这一刀；后端还会再兜一层）。
+   *
+   * 判定口径在 `assetPromptQuality.resolvePromptQuality`：后端结构化判定优先，
+   * 后端没给时前端按「空 / 外观信息不足 / 只有名称+通用摄影词 / 多个资产高度重复」自查。
+   */
+  const promptQualityGateFor = useCallback(
+    (items: readonly ProductionAsset[], planByType?: Map<string, AssetImagePlanTargetLike[]>) =>
+      buildBatchPromptQualityGate({
+        assets: items,
+        promptFor: (asset) => effectivePromptFor(asset, planByType),
+        serverQualityFor: (asset) => {
+          if (promptQualityByKey[asset.key] !== undefined) return promptQualityByKey[asset.key]
+          const targets = planByType?.get(asset.type) ?? planTargetsByType[planKeyFor(asset.type)] ?? []
+          const target = planTargetForAsset(asset, targets)
+          return target?.quality ?? target?.prompt_quality ?? null
+        },
+        serverWarningsFor: (asset) => {
+          const own = promptWarningsByKey[asset.key]
+          if (own && own.length > 0) return own
+          const targets = planByType?.get(asset.type) ?? planTargetsByType[planKeyFor(asset.type)] ?? []
+          return planTargetForAsset(asset, targets)?.prompt_warnings
+        },
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [effectivePromptFor, planTargetForAsset, planTargetsByType, promptQualityByKey, promptWarningsByKey, settings.aspectRatio],
+  )
+
+  /** 当前页签的判定结果：状态列、质量标签、生成依据面板都用它（键 = 资产 key）。 */
+  const currentTabQuality = useMemo(
+    () =>
+      buildBatchPromptQualityGate({
+        assets: tabAssets.filter((asset) => isSubmittableAssetType(asset.type)),
+        promptFor: (asset) => effectivePromptFor(asset),
+        serverQualityFor: (asset) => {
+          if (promptQualityByKey[asset.key] !== undefined) return promptQualityByKey[asset.key]
+          const target = planTargetForAsset(asset, currentPlanTargets)
+          return target?.quality ?? target?.prompt_quality ?? null
+        },
+        serverWarningsFor: (asset) => {
+          const own = promptWarningsByKey[asset.key]
+          if (own && own.length > 0) return own
+          return planTargetForAsset(asset, currentPlanTargets)?.prompt_warnings
+        },
+      }),
+    [
+      currentPlanTargets,
+      effectivePromptFor,
+      planTargetForAsset,
+      promptQualityByKey,
+      promptWarningsByKey,
+      tabAssets,
+    ],
+  )
+
+  const qualityVerdictByKey = useMemo(() => {
+    const map = new Map<string, PromptQualityVerdict>()
+    ;[...currentTabQuality.blocked, ...currentTabQuality.allowed, ...currentTabQuality.unknown].forEach((item) => {
+      map.set(item.asset.key, item.verdict)
+    })
+    return map
+  }, [currentTabQuality])
+
+  /* ------------------------------------------------------------ 生成依据（默认收起） */
+
+  /**
+   * 该资产本次的「生成依据」原文。
+   *
+   * 三处来源依次尝试：① 它自己最近一次提示词生成的回包（最准）；
+   * ② 只读出图计划里带的依据字段；③ 都没有 → null（面板如实显示「本次未提供生成依据」）。
+   */
+  const basisPayloadFor = useCallback(
+    (asset: ProductionAsset): unknown => {
+      if (promptBasisByKey[asset.key] !== undefined) return promptBasisByKey[asset.key]
+      const target = planTargetForAsset(asset, planTargetsByType[planKeyFor(asset.type)] ?? [])
+      return target?.generation_basis ?? target?.basis ?? null
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [planTargetForAsset, planTargetsByType, promptBasisByKey, settings.aspectRatio],
+  )
+
+  /** 生产区里展示依据的资产：优先已选中的，其次当前页签的，最多 `MAX_BASIS_PANELS` 个。 */
+  const basisAssets = useMemo(() => {
+    const picked = tabAssets.filter((asset) => selectedKeys.includes(asset.key))
+    const pool = picked.length > 0 ? picked : tabAssets
+    return pool.slice(0, MAX_BASIS_PANELS)
+  }, [selectedKeys, tabAssets])
+
+  /** 某个资产在提示词面板里的槽位（**吃后端槽位表**；后端补齐道具槽位后自动可用）。 */
+  const slotFor = useCallback(
+    (assetType: ProductionAssetType) => resolveAssetPromptSlot(assetType, promptSlotSpecs),
+    [promptSlotSpecs],
+  )
+
+  /**
+   * ⑤ 当前页签的「最终提示词与差异」：把每条提示词与同批其它资产的相似度算出来。
+   *
+   * 验收要核对"四个资产的提示词确实不同"，而这件事单看一条看不出来 —— 必须并排比。
+   */
+  const tabPromptDifferences = useMemo(
+    () =>
+      summarizePromptDifferences(
+        tabAssets
+          .filter((asset) => isSubmittableAssetType(asset.type))
+          .map((asset) => ({
+            key: asset.key,
+            name: asset.name,
+            type: asset.type,
+            prompt: effectivePromptFor(asset) ?? '',
+          })),
+      ),
+    [effectivePromptFor, tabAssets],
+  )
+  const differenceLineByKey = useMemo(
+    () => new Map(tabPromptDifferences.map((row) => [row.key, row.diffLine])),
+    [tabPromptDifferences],
+  )
+  /** 这一项上一次生成依据的 ④⑤（前端自己知道的证据）：喂给「生成依据」面板 */
+  const basisExtrasFor = useCallback(
+    (asset: ProductionAsset): GenerationBasisExtras => ({
+      requestStructure: promptRequestStructureByKey[asset.key] ?? '',
+      finalPrompt: effectivePromptFor(asset) ?? '',
+      promptDifferences: differenceLineByKey.has(asset.key) ? [differenceLineByKey.get(asset.key) as string] : [],
+      globalAsset: isGlobalAssetType(asset.type),
+    }),
+    [differenceLineByKey, effectivePromptFor, promptRequestStructureByKey],
   )
 
   /** 返工能力在**当前页签类型**下的如实说明（端点没上线时按类型取词，不让场景说"参考图"） */
@@ -688,6 +923,18 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
             aspectRatioSource:
               normalized.aspectRatioSource ||
               aspectRatioSourceFromStrategy(strategyForType(asset.type)),
+            // 「生成依据」与质量判定：回包里有就用回包，其次用只读计划/提示词生成时留下的那两份
+            promptQuality:
+              result.quality ?? result.prompt_quality ?? promptQualityByKey[asset.key] ?? planTarget?.quality ?? null,
+            promptWarnings:
+              result.prompt_warnings ?? promptWarningsByKey[asset.key] ?? planTarget?.prompt_warnings ?? [],
+            promptBasis:
+              result.generation_basis ??
+              result.basis ??
+              planTarget?.generation_basis ??
+              planTarget?.basis ??
+              promptBasisByKey[asset.key] ??
+              null,
             errorMessage: normalized.status === 'failed' ? normalized.reason : '',
             note: normalized.status === 'failed' ? '' : normalized.reason,
           })
@@ -707,7 +954,18 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
       }
       setRunning(false)
     },
-    [effectiveProjectId, planTargetForAsset, pollTask, promptDrafts, settings, strategyForType, updateTask],
+    [
+      effectiveProjectId,
+      planTargetForAsset,
+      pollTask,
+      promptBasisByKey,
+      promptDrafts,
+      promptQualityByKey,
+      promptWarningsByKey,
+      settings,
+      strategyForType,
+      updateTask,
+    ],
   )
 
   /** 取只读计划（不触网、不花钱），供确认框与提交时的提示词/幂等键使用。 */
@@ -834,6 +1092,18 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         return
       }
       const planByType = await preparePlans([asset])
+      // 提示词不可用就先拦住这一刀（后端还会再兜一层）：省下一次白花钱的出图
+      const qualityGate = promptQualityGateFor([asset], planByType)
+      if (qualityGate.blocked.length > 0) {
+        const gateModal = buildPromptQualityGateModal(qualityGate)
+        Modal.warning({
+          title: gateModal.title,
+          width: 600,
+          content: <PromptQualityGateBody lines={gateModal.lines} />,
+          okText: '知道了',
+        })
+        return
+      }
       const singleScope = summarizeSelection(productionAssets, [asset.key])
       const confirmation = buildBatchConfirmation({
         scope: singleScope,
@@ -867,7 +1137,7 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         onOk: proceed,
       })
     },
-    [preparePlans, productionAssets, projectVideoRatio, runtimeMode, settings, strategyForType, submitRound],
+    [preparePlans, productionAssets, projectVideoRatio, promptQualityGateFor, runtimeMode, settings, strategyForType, submitRound],
   )
 
   const regenerateOne = useCallback(
@@ -881,6 +1151,18 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         return
       }
       const planByType = await preparePlans([asset])
+      // 提示词不可用就先拦住这一刀（后端还会再兜一层）
+      const qualityGate = promptQualityGateFor([asset], planByType)
+      if (qualityGate.blocked.length > 0) {
+        const gateModal = buildPromptQualityGateModal(qualityGate)
+        Modal.warning({
+          title: gateModal.title,
+          width: 600,
+          content: <PromptQualityGateBody lines={gateModal.lines} />,
+          okText: '知道了',
+        })
+        return
+      }
       const scopeForOne = summarizeSelection(productionAssets, [asset.key])
       const confirmation = buildBatchConfirmation({
         scope: scopeForOne,
@@ -909,7 +1191,7 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         },
       })
     },
-    [preparePlans, productionAssets, projectVideoRatio, runtimeMode, settings, strategyForType, submitRound],
+    [preparePlans, productionAssets, projectVideoRatio, promptQualityGateFor, runtimeMode, settings, strategyForType, submitRound],
   )
 
   /**
@@ -992,6 +1274,18 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         return
       }
       const planByType = await preparePlans([asset])
+      // 重试同样要过质量闸门：提示词不可用时重试只会再烧一次钱
+      const qualityGate = promptQualityGateFor([asset], planByType)
+      if (qualityGate.blocked.length > 0) {
+        const gateModal = buildPromptQualityGateModal(qualityGate)
+        Modal.warning({
+          title: gateModal.title,
+          width: 600,
+          content: <PromptQualityGateBody lines={gateModal.lines} />,
+          okText: '知道了',
+        })
+        return
+      }
       Modal.confirm({
         title: `重试「${asset.name}」这一项？`,
         width: 560,
@@ -1021,7 +1315,7 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         },
       })
     },
-    [assetByKey, preparePlans, runtimeMode, submitRound],
+    [assetByKey, preparePlans, promptQualityGateFor, runtimeMode, submitRound],
   )
 
   /* ------------------------------------------------------- 批量生成 / 重新生成 */
@@ -1033,7 +1327,6 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         return
       }
       const picked = scope.assets.filter((asset) => isSubmittableAssetType(asset.type))
-      const groups = groupAssetsByType(picked)
       const ratioStrategy = strategyForType(picked[0]?.type ?? tab)
       const confirmationInput = {
         scope,
@@ -1057,22 +1350,62 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         return
       }
       /**
+       * **提示词质量闸门**（前端这一刀；后端还会再兜一层）。
+       *
+       * 判定不可用的项**一个都不提交**：空 / 外观信息不足需人工补充 /
+       * 只有名称与通用摄影词 / 多个资产高度重复 —— 都要先补好再出图，不然既花钱又出废图。
+       * 判不出来（拿不到提示词内容）的项不硬拦，但页面会写明"未知"。
+       */
+      const qualityGate = promptQualityGateFor(picked, planByType)
+      const allowedAssets = selectAssetsForSubmit(qualityGate)
+      /**
        * **按 asset_type 分组提交**（用户点名）。
        *
        * 出图提交接口一次只接受一个 asset_type，所以混选时逐组提交（每组自己一轮、自己的结果类型标签），
        * 而不是把人物 / 场景 / 道具混成一批当成同一种类型处理。
+       * 分组只覆盖**通过质量闸门**的那些项。
        */
-      const proceed = () => {
+      const proceed = (targets: ProductionAsset[]) => {
         void (async () => {
-          for (const group of groups) {
+          for (const group of groupAssetsByType(targets)) {
             // eslint-disable-next-line no-await-in-loop
             await submitRound(operation, group.items, planByType)
           }
         })()
       }
+      if (qualityGate.blocked.length > 0) {
+        const gateModal = buildPromptQualityGateModal(qualityGate)
+        if (allowedAssets.length === 0) {
+          Modal.warning({
+            title: gateModal.title,
+            width: 620,
+            content: <PromptQualityGateBody lines={gateModal.lines} />,
+            okText: gateModal.okText,
+          })
+          return
+        }
+        Modal.confirm({
+          title: gateModal.title,
+          width: 620,
+          okText: gateModal.okText,
+          cancelText: gateModal.cancelText,
+          content: (
+            <div className="space-y-2">
+              <PromptQualityGateBody lines={gateModal.lines} />
+              <Alert
+                type="info"
+                showIcon
+                message={<span className="text-xs">不可用的项不会被提交，出图仍然按类型分组进行。</span>}
+              />
+            </div>
+          ),
+          onOk: () => proceed(allowedAssets),
+        })
+        return
+      }
       // 一次点击只产生一轮任务：不确认就绝不提交
       if (!confirmation.required) {
-        proceed()
+        proceed(allowedAssets)
         return
       }
       Modal.confirm({
@@ -1081,10 +1414,10 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         okText: confirmation.okText,
         cancelText: confirmation.cancelText,
         content: <ConfirmationBody lines={confirmation.lines} costWarning={confirmation.costWarning} mode={runtimeMode} />,
-        onOk: proceed,
+        onOk: () => proceed(allowedAssets),
       })
     },
-    [busyNow, preparePlans, projectVideoRatio, runtimeMode, scope, settings, strategyForType, submitRound, tab],
+    [busyNow, preparePlans, projectVideoRatio, promptQualityGateFor, runtimeMode, scope, settings, strategyForType, submitRound, tab],
   )
 
   const handleStop = () => {
@@ -1260,6 +1593,9 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
       const category = PROMPT_CATEGORY_BY_TYPE[asset.type]
       setPromptEditorKey(asset.key)
       setPromptSlotDrafts({ [category]: promptDrafts[asset.key] ?? '' })
+      setPromptSlotSaved('')
+      setPromptExistingMap({})
+      setPromptProfileNote('')
       setPromptSlotLoading(true)
       try {
         const res = await StudioEntitiesApi.get(asset.type, asset.id)
@@ -1267,6 +1603,13 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         const saved = String(prompts[category] ?? '').trim()
         const targets = planTargetsByType[planKeyFor(asset.type)] ?? []
         const planPrompt = String(planTargetForAsset(asset, targets)?.prompt ?? '').trim()
+        setPromptSlotSaved(saved)
+        // 整份已保存的槽位提示词都留着：保存时合并回去，绝不抹掉其它槽位
+        setPromptExistingMap(
+          Object.fromEntries(
+            Object.entries(prompts).map(([key, value]) => [key, String(value ?? '').trim()]).filter(([, value]) => Boolean(value)),
+          ),
+        )
         setPromptSlotDrafts({ [category]: promptDrafts[asset.key] ?? saved ?? '' })
         if (!saved && !promptDrafts[asset.key] && planPrompt) {
           // 没保存过提示词时，把"计划里实际会用的那条"展示出来（用户据此改）
@@ -1284,10 +1627,7 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
 
   const generatePrompt = useCallback(
     async (asset: ProductionAsset) => {
-      if (!LLM_PROMPT_SUPPORTED.includes(asset.type)) {
-        message.info('该资产类型没有大模型提示词槽位（道具），请在这里手工填写。')
-        return
-      }
+      const slot = slotFor(asset.type)
       setPromptGenerating(true)
       try {
         const detail = await StudioEntitiesApi.get(asset.type, asset.id)
@@ -1295,15 +1635,34 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         const result = await previewAssetImagePrompt({
           projectId: effectiveProjectId || null,
           assetType: asset.type,
+          assetId: asset.id,
           name: String(entity.name ?? asset.name),
           description: String(entity.description ?? ''),
-          category: PROMPT_CATEGORY_BY_TYPE[asset.type],
+          category: slot.category || PROMPT_CATEGORY_BY_TYPE[asset.type],
+          // ① 项目整体风格 + ④ 用户的补充/修改：只有后端声明过对应字段时才会真的发出去
+          styleHint: projectStyleHint,
+          userSupplement: promptUserSupplements[asset.key] ?? '',
+          requestSupport: promptRequestSupport,
         })
+        // 依据与质量判定都**原样**留在页面状态里（面板据此显示，不编造）
+        setPromptBasisByKey((prev) => ({ ...prev, [asset.key]: result.basisPayload }))
+        setPromptProfileNote(result.profileNote)
+        // ④ 脱敏请求结构：记录"这次真的发出去的是什么"
+        setPromptRequestStructureByKey((prev) => ({
+          ...prev,
+          [asset.key]: buildRequestStructureText(result.requestBody),
+        }))
+        setPromptQualityByKey((prev) => ({ ...prev, [asset.key]: result.qualityPayload }))
+        setPromptWarningsByKey((prev) => ({ ...prev, [asset.key]: result.warnings }))
         if (!result.prompt) {
-          message.warning('这次没有拿到提示词内容，请稍后重试或手工填写。')
+          message.warning(
+            result.slotMissing
+              ? '后端这次没有返回这个类型的提示词槽位（可能还在补槽位表）：可以在下面手工填写后保存到资产，保存后出图会直接读它。'
+              : '这次没有拿到提示词内容，请稍后重试或手工填写。',
+          )
           return
         }
-        setPromptSlotDrafts({ [PROMPT_CATEGORY_BY_TYPE[asset.type]]: result.prompt })
+        setPromptSlotDrafts({ [slot.category || PROMPT_CATEGORY_BY_TYPE[asset.type]]: result.prompt })
         if (!result.llmCalled) {
           message.warning('演练模式下后端没有真的调用大模型，这是模板内容：可以手工修改后再保存。')
         }
@@ -1313,8 +1672,28 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         setPromptGenerating(false)
       }
     },
-    [effectiveProjectId],
+    [
+      effectiveProjectId,
+      projectStyleHint,
+      promptRequestSupport,
+      promptUserSupplements,
+      slotFor,
+    ],
   )
+
+  /** 弹窗里那条草稿的**质量判定**（用户边改边重算：改好了就能保存/出图）。 */
+  const promptEditorVerdict = useMemo(() => {
+    if (!promptEditorKey) return null
+    const asset = assetByKey.get(promptEditorKey)
+    if (!asset) return null
+    const category = PROMPT_CATEGORY_BY_TYPE[asset.type]
+    return resolvePromptQuality({
+      prompt: String(promptSlotDrafts[category] ?? ''),
+      assetName: asset.name,
+      serverQuality: promptQualityByKey[asset.key] ?? null,
+      serverWarnings: promptWarningsByKey[asset.key],
+    })
+  }, [assetByKey, promptEditorKey, promptQualityByKey, promptSlotDrafts, promptWarningsByKey])
 
   const savePrompt = useCallback(async () => {
     const asset = assetByKey.get(promptEditorKey)
@@ -1325,19 +1704,84 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
       message.warning('提示词为空，没有保存。')
       return
     }
-    setPromptSaving(true)
-    try {
-      await saveAssetImagePrompts(asset.type, asset.id, { [category]: text })
-      setPromptDrafts((prev) => ({ ...prev, [asset.key]: text }))
-      setPromptEditorKey('')
-      message.success(`已保存「${asset.name}」的图片提示词（出图会立刻读它）`)
-      onReload?.()
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : '保存提示词失败')
-    } finally {
-      setPromptSaving(false)
+    // 判定不可用的提示词**不允许**存进资产（否则它会被后面的批量出图当成可用提示词）
+    const verdict = resolvePromptQuality({
+      prompt: text,
+      assetName: asset.name,
+      serverQuality: promptQualityByKey[asset.key] ?? null,
+      serverWarnings: promptWarningsByKey[asset.key],
+    })
+    if (verdict.status === 'unusable') {
+      message.error(`这条提示词暂时不能保存：${verdict.reason}${verdict.fixes[0] ? `；怎么修：${verdict.fixes[0]}` : ''}`)
+      return
     }
-  }, [assetByKey, onReload, promptEditorKey, promptSlotDrafts])
+    // 合并写回：只改这一个槽位，该资产其它已保存的槽位原样保留（保存接口是整列替换）
+    const nextPrompts: Record<string, string> = { ...promptExistingMap, [category]: text }
+    /**
+     * **写入范围确认**（用户点名）：
+     *   - 全局资产（场景/道具/服装）：**一律**先确认"这会写回全局资产库"，并列出差异；
+     *   - 项目内资产（角色）：只在会替换已有内容时确认。
+     */
+    const writeScope = buildGlobalAssetWriteConfirmation({
+      assetType: asset.type,
+      assetName: asset.name,
+      existing: promptExistingMap,
+      incoming: nextPrompts,
+    })
+    const replacedSlots = writeScope.replacedSlots
+    const doSave = async () => {
+      setPromptSaving(true)
+      try {
+        // 覆盖已有提示词必须**显式确认**（后端 `asset_prompt_quality` 的口径：默认不动、要覆盖传 true）
+        await saveAssetImagePrompts(
+          asset.type,
+          asset.id,
+          nextPrompts,
+          replacedSlots.length > 0 ? { confirm_replace_image_prompt: true } : {},
+        )
+        setPromptDrafts((prev) => ({ ...prev, [asset.key]: text }))
+        setPromptSlotSaved(text)
+        setPromptEditorKey('')
+        message.success(`已保存「${asset.name}」的图片提示词（出图会立刻读它）`)
+        onReload?.()
+      } catch (error) {
+        // 后端的结构化中文错误（409 要显式确认 / 422 质量拦截）优先原样展示
+        const failure = describePromptSaveFailure(error)
+        message.error(failure.fix ? `${failure.message}（${failure.fix}）` : failure.message)
+      } finally {
+        setPromptSaving(false)
+      }
+    }
+    // 保护已有的人工提示词：覆盖前先确认（不会静默盖掉）；全局资产还要说明"写回全局"
+    if (writeScope.required) {
+      Modal.confirm({
+        title: writeScope.title,
+        width: 600,
+        okText: writeScope.okText,
+        cancelText: writeScope.cancelText,
+        content: (
+          <div className="space-y-1">
+            <ul className="list-disc pl-5 text-xs leading-5">
+              {writeScope.lines.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          </div>
+        ),
+        onOk: doSave,
+      })
+      return
+    }
+    await doSave()
+  }, [
+    assetByKey,
+    onReload,
+    promptEditorKey,
+    promptExistingMap,
+    promptQualityByKey,
+    promptSlotDrafts,
+    promptWarningsByKey,
+  ])
 
   /* -------------------------------------------------------------------- 渲染 */
 
@@ -1358,6 +1802,20 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
               </Tag>
             </Tooltip>
           ) : null}
+          {/* 数据隔离：全局资产（场景/道具/服装）的通用资料在全局库，本章依据按 项目+章节 隔离 */}
+          {isGlobalAssetType(record.type) ? (
+            <Tooltip title={`${describeAssetScopeCopy(record.type).statement} ${describeAssetScopeCopy(record.type).writeStatement}`}>
+              <Tag color="geekblue" bordered={false} className="mr-0">
+                全局资产
+              </Tag>
+            </Tooltip>
+          ) : (
+            <Tooltip title={describeAssetScopeCopy(record.type).statement}>
+              <Tag bordered={false} className="mr-0 text-gray-400">
+                项目内资产
+              </Tag>
+            </Tooltip>
+          )}
         </span>
       ),
     },
@@ -1366,13 +1824,18 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
       key: 'status',
       width: 180,
       render: (_: unknown, record) => {
+        // 质量判定已知且判定为不可用时，状态**不再说"提示词已就绪"**（改说"需要补充"）
+        const verdict = qualityVerdictByKey.get(record.key)
         const status = resolveAssetPrepStatus(
-          assetPrepInputFromReadiness({
-            has_pending_candidate: record.hasPendingCandidate,
-            has_image_prompt: record.hasImagePrompt,
-            has_image: record.hasImage,
-            has_primary: record.hasPrimary,
-          }),
+          assetPrepInputFromReadiness(
+            {
+              has_pending_candidate: record.hasPendingCandidate,
+              has_image_prompt: record.hasImagePrompt,
+              has_image: record.hasImage,
+              has_primary: record.hasPrimary,
+            },
+            verdict ? verdict.status : null,
+          ),
         )
         const color =
           status.tone === 'green' ? 'green' : status.tone === 'blue' ? 'blue' : status.tone === 'gold' ? 'gold' : 'default'
@@ -1380,6 +1843,32 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
           <Tag color={color} bordered={false}>
             {status.label}
           </Tag>
+        )
+      },
+    },
+    {
+      title: '提示词质量',
+      key: 'promptQuality',
+      width: 200,
+      render: (_: unknown, record) => {
+        const verdict = qualityVerdictByKey.get(record.key)
+        if (!verdict) {
+          // 拿不到本次会用的提示词（例如这一页签还没读到出图计划）→ 如实说"未检查"
+          return (
+            <Tooltip title="还没有读到这一项本次会用的提示词，暂时无法判断（不会假装它可用）">
+              <span className="text-[11px] text-gray-400">未检查</span>
+            </Tooltip>
+          )
+        }
+        return (
+          <Space size={4} wrap>
+            <PromptQualityTag verdict={verdict} />
+            {verdict.status === 'unusable' ? (
+              <Tooltip title={verdict.reason}>
+                <span className="text-[11px] text-red-500">已拦住出图</span>
+              </Tooltip>
+            ) : null}
+          </Space>
         )
       },
     },
@@ -1649,6 +2138,40 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
           />
         ) : null}
 
+        {/*
+          ⑤ 最终提示词与差异（验收要核对"四个资产的提示词确实不同"）：
+          并排比相似度，达到阈值就点名"高度重复"。默认收起，不占主区域。
+        */}
+        {tabPromptDifferences.length > 0 ? (
+          <Collapse
+            ghost
+            size="small"
+            items={[
+              {
+                key: 'prompt-diffs',
+                label: (
+                  <span className="text-xs text-slate-600">
+                    ⑤ 最终提示词与差异（本页签 {tabPromptDifferences.length} 条）
+                  </span>
+                ),
+                children: (
+                  <div className="space-y-1">
+                    {tabPromptDifferences.map((row) => (
+                      <div key={row.key} className="text-[11px] leading-5">
+                        <span className="font-medium text-slate-700">{`${row.name}（${row.typeLabel}）`}</span>
+                        <span className={row.duplicated ? 'text-red-500' : 'text-gray-500'}>{`：${row.diffLine}`}</span>
+                        <div className="truncate text-gray-400" title={row.prompt}>
+                          {row.prompt || '（还没有提示词）'}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ),
+              },
+            ]}
+          />
+        ) : null}
+
         <Space size={8} wrap>
           {/* 批量按钮**按类型取名**：人物 = 批量生成参考图；场景/道具 = 各自的资产图；混选时按类型分组列出 */}
           <Tooltip title="默认只勾选还没有图片的资产，不会覆盖已有图片或已有定版图">
@@ -1815,6 +2338,40 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         }}
       />
 
+      {/*
+        **生成依据（默认收起）**：本次生成实际用到了哪些资料。
+        后端还没提供这些字段时，这里如实显示「本次未提供生成依据」，位置保留、不编造。
+      */}
+      <div className="rounded-lg border border-slate-200 p-2">
+        <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+          <span className="text-[11px] text-gray-500">
+            默认收起；展开可以看到本次生成实际用到的项目风格 / 资产资料 / 剧本片段 / 分镜依据
+          </span>
+          <span className="text-[11px] text-gray-400">
+            {selectedKeys.length > 0
+              ? `按已选中的资产展示（最多 ${MAX_BASIS_PANELS} 项）`
+              : `按当前页签的资产展示（最多 ${MAX_BASIS_PANELS} 项）`}
+          </span>
+        </div>
+        <div className="space-y-1">
+          {basisAssets.map((asset) => (
+            <AssetGenerationBasisPanel
+              key={asset.key}
+              payload={basisPayloadFor(asset)}
+              extras={basisExtrasFor(asset)}
+              caption={`针对「${asset.name}」${basisPayloadFor(asset) ? '' : '（还没有它的生成依据）'}`}
+              showTechnical={false}
+            />
+          ))}
+          {basisAssets.length === 0 ? <span className="text-[11px] text-gray-400">当前页签还没有资产。</span> : null}
+          {tabAssets.length > basisAssets.length ? (
+            <span className="text-[11px] text-gray-400">
+              {`其余 ${tabAssets.length - basisAssets.length} 项的依据可以在它们各自的「填提示词」弹窗或结果卡片里查看。`}
+            </span>
+          ) : null}
+        </div>
+      </div>
+
       {promptPanel ? <div className="border-t border-slate-200 pt-3">{promptPanel}</div> : null}
 
       {/* 编辑提示词 */}
@@ -1854,14 +2411,19 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
               <div className="space-y-2 rounded-md border border-gray-200 p-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <Tag color="blue" className="mr-0">
-                    {`${getProjectSignalAssetTypeLabel(promptEditorAsset.type)}正面图片`}
+                    {slotFor(promptEditorAsset.type).label || `${getProjectSignalAssetTypeLabel(promptEditorAsset.type)}正面图片`}
                   </Tag>
                   <span className="text-[11px] text-gray-500">
-                    {LLM_PROMPT_SUPPORTED.includes(promptEditorAsset.type)
-                      ? '可以让大模型按资产描述生成一条，再手工修改'
-                      : '该资产类型没有大模型提示词槽位，请手工填写'}
+                    {slotFor(promptEditorAsset.type).generateSupported
+                      ? '可以让大模型按资产描述 + 上面这些依据生成一条，再手工修改'
+                      : describePromptRowGenerateHint({
+                          supported: true,
+                          generateSupported: false,
+                          generateBlockedReason: slotFor(promptEditorAsset.type).generateBlockedReason,
+                        })}
                   </span>
                 </div>
+                {promptEditorVerdict ? <PromptQualityAlert verdict={promptEditorVerdict} /> : null}
                 <Input.TextArea
                   rows={5}
                   value={promptSlotDrafts[promptEditorCategory] ?? ''}
@@ -1872,15 +2434,84 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
                   <Button
                     size="small"
                     loading={promptGenerating}
-                    disabled={!LLM_PROMPT_SUPPORTED.includes(promptEditorAsset.type)}
+                    disabled={!slotFor(promptEditorAsset.type).generateSupported}
                     onClick={() => void generatePrompt(promptEditorAsset)}
                   >
                     用大模型生成/完善
                   </Button>
                   <span className="text-[11px] text-gray-400">{OUTPUT_MODE_STATEMENT}</span>
+                  {promptSlotSaved ? (
+                    <span className="text-[11px] text-gray-400">该资产已保存过一条提示词：保存时会先跟你确认再覆盖</span>
+                  ) : null}
                 </Space>
+                {isGlobalAssetType(promptEditorAsset.type) ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    banner
+                    style={{ padding: '2px 8px' }}
+                    message={<span className="text-[11px]">{describeAssetScopeCopy(promptEditorAsset.type).statement}</span>}
+                  />
+                ) : null}
+                {promptProfileNote ? (
+                  <Alert
+                    type="info"
+                    showIcon
+                    banner
+                    style={{ padding: '2px 8px' }}
+                    message={<span className="text-[11px]">{promptProfileNote}</span>}
+                  />
+                ) : null}
+                {/* ④ 用户对该资产的补充/修改：这一次生成会带上它（后端起不起作用见下面那句话） */}
+                <div className="space-y-1 rounded bg-slate-50 p-2">
+                  <div className="text-[11px] text-slate-600">本次补充/修改（只用于这一次生成，不写进资产资料）</div>
+                  <Input.TextArea
+                    rows={2}
+                    value={promptUserSupplements[promptEditorAsset.key] ?? ''}
+                    placeholder="例如：正面半身，纯白背景，不戴帽子；发型按剧本第 3 集改成短发"
+                    onChange={(event) =>
+                      setPromptUserSupplements((prev) => ({ ...prev, [promptEditorAsset.key]: event.target.value }))
+                    }
+                  />
+                  <div className="text-[11px] text-gray-500">
+                    {describePromptRequestDelivery(
+                      promptRequestSupport,
+                      Boolean(String(promptUserSupplements[promptEditorAsset.key] ?? '').trim()),
+                    )}
+                  </div>
+                </div>
               </div>
             </Spin>
+            {/*
+              **生成依据（默认收起）**：这一次生成实际用到的资料。
+              后端还没返回这些字段时如实显示「本次未提供生成依据」，不编造。
+            */}
+            <AssetGenerationBasisPanel
+              payload={basisPayloadFor(promptEditorAsset)}
+              extras={{
+                ...basisExtrasFor(promptEditorAsset),
+                // ⑤ 用**弹窗里当前这条草稿**：它就是保存/出图会用的那一条
+                finalPrompt: String(promptSlotDrafts[promptEditorCategory] ?? '').trim(),
+              }}
+              caption={`针对「${promptEditorAsset.name}」`}
+            />
+            {/* 请求字段的技术细节（默认收起，主界面不出现字段名） */}
+            <Collapse
+              ghost
+              size="small"
+              items={[
+                {
+                  key: 'prompt-request',
+                  label: <span className="text-[11px] text-gray-500">技术详情：本次请求带上了哪些字段</span>,
+                  children: (
+                    <div className="space-y-1 text-[11px] text-gray-500">
+                      <div>{describePromptRequestFields(promptRequestSupport)}</div>
+                      <div>{`项目整体风格（读到的）：${projectStyleHint || '（项目还没有设置风格）'}`}</div>
+                    </div>
+                  ),
+                },
+              ]}
+            />
           </div>
         ) : null}
       </Modal>
@@ -1911,6 +2542,21 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
                 <span className="text-xs">{detailTask.prompt || '（还没有提示词）'}</span>
               </Descriptions.Item>
             </Descriptions>
+            {/* 提示词质量：与批量面板/资产清单用同一份判定与文案 */}
+            {(() => {
+              const verdict = resolvePromptQuality({
+                prompt: detailTask.prompt || (detailTask.status === 'done' || detailTask.status === 'failed' ? '' : null),
+                assetName: detailTask.assetName,
+                serverQuality: detailTask.promptQuality,
+                serverWarnings: detailTask.promptWarnings,
+              })
+              return <PromptQualityAlert verdict={verdict} />
+            })()}
+            {/* 生成依据（默认收起）：这一张结果生成时实际用到的资料 */}
+            <AssetGenerationBasisPanel
+              payload={detailTask.promptBasis}
+              caption={`结果「${detailTask.assetName}」`}
+            />
             <Collapse
               size="small"
               items={[
@@ -1932,6 +2578,9 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
                           is_primary: detailTask.isPrimary,
                           error_message: detailTask.errorMessage,
                           note: detailTask.note,
+                          prompt_quality: detailTask.promptQuality ?? null,
+                          prompt_warnings: detailTask.promptWarnings ?? [],
+                          generation_basis: detailTask.promptBasis ?? null,
                         },
                         null,
                         2,
@@ -2006,6 +2655,25 @@ function ConfirmationBody(props: { lines: string[]; costWarning: string; mode: '
         showIcon
         message={<span className="text-xs">{props.costWarning}</span>}
       />
+    </div>
+  )
+}
+
+/**
+ * 质量闸门的正文：逐项写清「哪一项、为什么不能用、怎么修」。
+ *
+ * 与批量面板/结果卡片用的是**同一份** `assetPromptQuality` 文案，不另写一套说法。
+ */
+function PromptQualityGateBody(props: { lines: string[] }) {
+  return (
+    <div className="space-y-2">
+      <ul className="list-disc pl-5 text-xs leading-5">
+        {props.lines.map((line, index) => (
+          <li key={`${index}-${line}`} className={line.startsWith('　怎么修：') ? 'text-slate-500' : undefined}>
+            {line.replace(/^　/, '')}
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

@@ -95,14 +95,65 @@ test('概览文案包含各状态数量', () => {
   assert.equal(describeAssetPrepSummary(summarizeAssetPrep([])), '还没有需要准备的资产')
 })
 
-test('五个状态的标签与动作齐全（页面直接用它们渲染）', () => {
+test('提示词已保存但**判定不可用** → 不说"已就绪"，改说"需要补充"并指向补提示词', () => {
+  // 存了提示词，但质量判定明确不可用（外观信息不足 / 只有名称+通用词 …）
+  const status = resolveAssetPrepStatus({
+    linked: true,
+    hasImagePrompt: true,
+    promptQuality: 'unusable',
+    hasImage: false,
+  })
+  assert.equal(status.key, 'prompt_needs_supplement')
+  assert.equal(status.nextActionLabel, '补提示词')
+  assert.ok(!status.label.includes('已就绪'), status.label)
+  assert.match(status.label, /需要补充/)
+
+  // 判不出来时**不改口径**（既不宣称可用、也不宣称不可用）
+  assert.equal(
+    resolveAssetPrepStatus({ linked: true, hasImagePrompt: true, promptQuality: 'unknown', hasImage: false }).key,
+    'prompt_ready_image_todo',
+  )
+  assert.equal(
+    resolveAssetPrepStatus({ linked: true, hasImagePrompt: true, promptQuality: 'usable', hasImage: false }).key,
+    'prompt_ready_image_todo',
+  )
+  // 还没存提示词时仍然是"待完善提示词"（不能因为质量未知就跳步）
+  assert.equal(
+    resolveAssetPrepStatus({ linked: true, hasImagePrompt: false, promptQuality: 'unusable' }).key,
+    'linked_prompt_todo',
+  )
+  // 已有图片甚至有定版的资产，质量不可用时同样不会说"已定版"
+  assert.equal(
+    resolveAssetPrepStatus({
+      linked: true,
+      hasImagePrompt: true,
+      promptQuality: 'unusable',
+      hasImage: true,
+      hasPrimary: true,
+    }).key,
+    'prompt_needs_supplement',
+  )
+})
+
+test('六个状态的标签与动作齐全（页面直接用它们渲染）', () => {
   assert.deepEqual(
     Object.values(ASSET_PREP_STATUSES).map((item) => item.key),
-    ['pending_candidate', 'linked_prompt_todo', 'prompt_ready_image_todo', 'image_ready_primary_todo', 'done'],
+    [
+      'pending_candidate',
+      'linked_prompt_todo',
+      'prompt_needs_supplement',
+      'prompt_ready_image_todo',
+      'image_ready_primary_todo',
+      'done',
+    ],
   )
   for (const item of Object.values(ASSET_PREP_STATUSES)) {
     assert.ok(item.label.length > 0)
     assert.ok(item.nextActionLabel.length > 0)
+    // 主界面文案里不出现"说成就绪"的错标（只有真就绪的那个状态可以用这个词）
+    if (item.key !== 'prompt_ready_image_todo') {
+      assert.ok(!item.label.includes('已就绪'), `${item.key} 不该说"已就绪"：${item.label}`)
+    }
   }
 })
 

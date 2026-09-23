@@ -26,6 +26,8 @@ import {
   type ProductionTask,
 } from './assetProduction'
 import { buildResultKindTag, resultArtifactCopy } from './assetResultKind.ts'
+import { PromptQualityAlert } from './PromptQualityAlert'
+import { resolvePromptQuality } from './assetPromptQuality.ts'
 
 const TONE_COLOR: Record<string, string> = {
   green: 'green',
@@ -77,11 +79,29 @@ export function AssetResultCard(props: AssetResultCardProps) {
   // 演练占位地址是不可达域名：不要拿它去发请求（页面会白报一堆网络错误），直接说明"这是演练占位"
   const rawUrl = task.adoptedUrl || task.ossUrl || task.imageUrl
   const previewUrl = rawUrl && !isPlaceholderUrl(rawUrl) ? rawUrl : ''
+  /**
+   * 这一张结果用的提示词**能不能用**（后端结构化判定优先，前端自查兜底）。
+   *
+   * 还在排队/生成中的卡片不判（那时提示词还没定），一旦有提示词或已经跑完就判：
+   * 判定不可用时**不许**把这张的结果当成可用提示词继续出图（重生成/返工按钮会被拦住并说明原因）。
+   */
+  const promptQualityKnown = Boolean(task.prompt) || task.status === 'done' || task.status === 'failed'
+  const promptQualityVerdict = promptQualityKnown
+    ? resolvePromptQuality({
+        prompt: task.prompt || '',
+        assetName: task.assetName,
+        serverQuality: task.promptQuality ?? null,
+        serverWarnings: task.promptWarnings,
+      })
+    : null
+  const promptBlocked = promptQualityVerdict?.status === 'unusable'
   const canAdopt = task.status === 'done' && !task.adoptedImageId
   // 「设为定版」在结果可用时就可以点：它内部会先把这张保存进资产、再设为定版；
   // 资产已有定版时会先弹二次确认（硬边界 B），不会静默替换。
+  // 注意：提示词不可用**不拦**这一步 —— 那是"采纳已经生成的这张图"，不是再花钱出图。
   const canSetPrimary = task.status === 'done' && !task.isPrimary
-  const canRetry = task.status === 'failed'
+  // 但**再生成**（重新生成 / 重试 / 返工）会被拦住：提示词不可用时再出图只会再浪费一次计费调用
+  const canRetry = task.status === 'failed' && !promptBlocked
   const canRefresh = task.status === 'generating' || task.status === 'submitting'
 
   return (
@@ -156,6 +176,12 @@ export function AssetResultCard(props: AssetResultCardProps) {
             <div className="text-[11px] text-slate-500">{task.note}</div>
           ) : null}
 
+          {/*
+            提示词质量：判定不可用时**不显示成"提示词已就绪"**，而是给出真实原因与怎么修。
+            这里的拦截与批量面板用的是同一份文案（assetPromptQuality）。
+          */}
+          {promptQualityVerdict ? <PromptQualityAlert verdict={promptQualityVerdict} compact /> : null}
+
           <Typography.Paragraph
             className="!mb-0 text-[11px] text-gray-500"
             ellipsis={{ rows: 2, tooltip: task.prompt || '（还没有提示词）' }}
@@ -181,9 +207,23 @@ export function AssetResultCard(props: AssetResultCardProps) {
             <Button size="small" onClick={() => props.onEditPrompt(task)}>
               编辑提示词
             </Button>
-            <Button size="small" icon={<ReloadOutlined />} loading={busy} onClick={() => props.onRegenerate(task)}>
-              {copy.regenerateAction}
-            </Button>
+            <Tooltip
+              title={
+                promptBlocked
+                  ? `这一项不能按当前提示词再生成：${promptQualityVerdict?.reason ?? ''}（先点「编辑提示词」补好）`
+                  : undefined
+              }
+            >
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                loading={busy}
+                disabled={promptBlocked}
+                onClick={() => props.onRegenerate(task)}
+              >
+                {copy.regenerateAction}
+              </Button>
+            </Tooltip>
             {props.canUseExistingReference ? (
               <Tooltip
                 title={
@@ -194,7 +234,7 @@ export function AssetResultCard(props: AssetResultCardProps) {
               >
                 <Button
                   size="small"
-                  disabled={!props.reworkAvailable || busy}
+                  disabled={!props.reworkAvailable || busy || promptBlocked}
                   onClick={() => props.onRegenerateWithExistingReference(task)}
                 >
                   {copy.existingImageAction}
@@ -205,6 +245,9 @@ export function AssetResultCard(props: AssetResultCardProps) {
               <Button size="small" onClick={() => props.onRetry(task)}>
                 重试这一项
               </Button>
+            ) : null}
+            {task.status === 'failed' && promptBlocked ? (
+              <span className="text-[11px] text-red-500">提示词不可用：先按上面的原因补好再重试</span>
             ) : null}
             {canRefresh ? (
               <Button size="small" icon={<SyncOutlined />} onClick={() => props.onRefresh(task)}>
