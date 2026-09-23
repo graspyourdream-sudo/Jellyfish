@@ -80,6 +80,14 @@ class SubmissionTargetRead(BaseModel):
         ),
     )
     prompt_template: str = Field("", description="本类型使用的提示词模板名（新，审计用）")
+    generation_basis: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "本次生成依据（新，只读）：项目风格 / 该资产的结构化资料（按项目 + 章节持久化保存）/ "
+            "剧本片段与出场分镜 / 资料来自哪里。页面「生成依据」面板直接读它，"
+            "所以在**还没生成**的时候也能看到这份资产到底有什么资料 —— 不依赖先花一次模型调用。"
+        ),
+    )
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -186,6 +194,13 @@ class ImagePlanPreviewRequest(BaseModel):
     aspect_ratio: str = Field("", description="出图比例，如 16:9")
     image_model: str = Field("", description="图片模型选项（留空=默认 image2 → provider 模型 gpt-image-2）")
     negative_prompt: str = Field("", description="全局负面提示词")
+    chapter_id: str = Field(
+        "",
+        description=(
+            "章节 ID（可选，新）：给了就按**该章**装配 generation_basis（章节资产资料的隔离维度）；"
+            "留空则不装配生成依据，其它行为完全不变"
+        ),
+    )
 
 
 class ImageSubmitRequest(ImagePlanPreviewRequest):

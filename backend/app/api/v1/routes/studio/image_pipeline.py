@@ -178,6 +178,8 @@ async def preview_image_plan(
             aspect_ratio=body.aspect_ratio,
             image_model=body.image_model,
             negative_prompt=body.negative_prompt,
+            # 页面「生成依据」面板要按本章装配（没给章节就不装配，行为与之前一致）
+            chapter_id=str(getattr(body, "chapter_id", "") or ""),
         )
         references: dict[str, ReferenceImageRead] = {}
         if body.stage == "reference_batch" and body.use_primary_reference:

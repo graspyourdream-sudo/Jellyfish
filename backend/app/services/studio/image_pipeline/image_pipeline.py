@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.studio import Character, Costume, Prop, Scene
 from app.models.types import PromptCategory
+from app.services.studio.llm_orchestration.json_utils import normalize_name
 from app.schemas.studio.image_pipeline import (
     ImageTaskResultRead,
     SubmissionTargetRead,
@@ -117,6 +118,9 @@ class SubmissionTarget:
     # template（确定性模板 + 资产描述）。用户要求「验收必须能证明保存内容被下一步实际使用」，
     # 所以这个来源必须显式带出来，不能只靠肉眼比对文本。
     prompt_source: str = PROMPT_SOURCE_TEMPLATE
+    #: 本次生成依据（只读）：项目风格 / 结构化资料 / 剧本片段与出场分镜 / 资料来自哪里。
+    #: 页面「生成依据」面板直接读它 —— 这样**还没生成**时也能看到这份资产有什么资料。
+    generation_basis: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
     def to_read(self) -> SubmissionTargetRead:
@@ -139,6 +143,7 @@ class SubmissionTarget:
             result_label=self.result_label,
             aspect_ratio_source=self.aspect_ratio_source,
             prompt_template=self.prompt_template,
+            generation_basis=dict(self.generation_basis),
             warnings=list(self.warnings),
         )
 
@@ -284,6 +289,7 @@ async def build_targets(
     image_model: str = "",
     negative_prompt: str = "",
     attempt: int = 0,
+    chapter_id: str = "",
 ) -> tuple[list[SubmissionTarget], list[str]]:
     """组装提交目标（两条 stage 都是**按提示词直接生成参考图**）。
 
@@ -353,6 +359,10 @@ async def build_targets(
     if reference_mode:
         references = await resolve_references(db, asset_type=asset_type, asset_ids=[row.id for row in rows])
 
+    basis_by_key, project_style = await _load_generation_basis_context(
+        db, project_id=project_id, chapter_id=chapter_id
+    )
+
     targets: list[SubmissionTarget] = []
     for row in rows:
         description = str(getattr(row, "description", "") or "")
@@ -413,10 +423,150 @@ async def build_targets(
                 result_label=strategy.result_label,
                 aspect_ratio_source=ratio_resolution.source,
                 prompt_template=strategy.prompt_template,
+                # 只在给了章节时装配依据（没给就不猜章节：**旧调用方行为一个字不变**）
+                generation_basis=(
+                    build_generation_basis(
+                        row=row,
+                        asset_type=asset_type,
+                        record=basis_by_key.get((asset_type, normalize_name(str(row.name or "")))),
+                        project_style=project_style,
+                        slot_requirement=(slot_spec.view_hint if slot_spec else strategy.default_view_hint),
+                        prompt=prompt,
+                        description=description,
+                    )
+                    if str(chapter_id or "").strip()
+                    else {}
+                ),
                 warnings=target_warnings,
             )
         )
     return targets, warnings
+
+
+async def _load_generation_basis_context(
+    db: AsyncSession,
+    *,
+    project_id: str,
+    chapter_id: str,
+) -> tuple[dict[tuple[str, str], Any], str]:
+    """读一次"生成依据"需要的上下文：本章资产资料（专用表）+ 项目风格。
+
+    ``chapter_id`` 为空时返回空上下文（**行为与加这个功能之前完全一致**，不猜章节）。
+    """
+    if not str(chapter_id or "").strip():
+        return {}, ""
+    from app.models.studio import Project
+    from app.services.studio.chapter_asset_record_store import load_chapter_record_map
+
+    records = await load_chapter_record_map(db, chapter_id=chapter_id)
+    project = await db.get(Project, project_id)
+    style_parts = [
+        str(getattr(project, "style", "") or "").strip(),
+        str(getattr(project, "visual_style", "") or "").strip(),
+    ]
+    return records, " / ".join(part for part in style_parts if part)
+
+
+def build_generation_basis(
+    *,
+    row: Any,
+    asset_type: str,
+    record: Any | None,
+    project_style: str,
+    slot_requirement: str,
+    prompt: str,
+    description: str,
+) -> dict[str, Any]:
+    """组装**本次生成依据**（只读，不调用模型、不写库）。
+
+    为什么放在后端而不是页面自己拼：这份依据必须与"真正生成时用的那份资料"**同源**，
+    否则页面看到的和模型拿到的是两套东西。这里读的就是
+    :mod:`app.services.studio.chapter_asset_record_store` 里按项目 + 章节持久化的资料行
+    （也就是图片提示词链路实际用的那一份）。
+
+    字段名与页面「生成依据」的容错读取一致（``asset_profile`` / ``shot_refs`` /
+    ``structured_source`` / ``chapter_basis`` / ``global_profile`` …），读不到就如实留空，
+    **绝不编造**：没有资料行时 ``asset_profile`` 为空、``structured_source`` 说明来源。
+    """
+    from app.services.studio.chapter_asset_record_store import (
+        effective_profile,
+        evidence_scope_of,
+        plot_identity_of,
+        record_evidence_text,
+        temporary_notes_of,
+    )
+    from app.services.studio.asset_overlays import is_global_asset
+
+    global_asset = is_global_asset(asset_type)
+    basis: dict[str, Any] = {
+        "asset_type": asset_type,
+        "name": str(getattr(row, "name", "") or ""),
+        "global_asset": global_asset,
+        "project_style": str(project_style or ""),
+        "asset_type_requirement": str(slot_requirement or ""),
+        "final_prompt": str(prompt or ""),
+        "notes": [
+            "本依据来自数据库里按项目 + 章节保存的资产资料（chapter_asset_profiles），"
+            "只读装配，没有调用任何模型。"
+        ],
+    }
+    if description:
+        basis["asset_description"] = str(description)
+
+    if record is None:
+        basis["structured_source"] = "asset_description" if description else "none"
+        basis["shot_refs"] = []
+        basis["script_excerpts"] = []
+        basis["asset_profile"] = {}
+        basis["notes"].append("本章没有这份资产的结构化资料行（可能是别的章节/项目建的资产）。")
+        return basis
+
+    profile = effective_profile(record)
+    shot_refs = [ref for ref in (record.shot_refs or []) if isinstance(ref, dict)]
+    evidence = [entry for entry in (record.evidence or []) if isinstance(entry, dict)]
+    basis.update(
+        {
+            "structured_source": ("asset_description+chapter_record" if description else "chapter_record"),
+            "canonical_name": str(record.name or ""),
+            "display_name": str(record.name or ""),
+            "aliases": [str(alias) for alias in (record.aliases or [])],
+            "asset_profile": profile,
+            "asset_profile_text": record_evidence_text(record),
+            "shot_refs": shot_refs,
+            "script_excerpts": [
+                {
+                    "shot_id": str(ref.get("shot_id") or ""),
+                    "shot_index": ref.get("shot_index"),
+                    "title": str(ref.get("title") or ""),
+                    "text": str(ref.get("script_excerpt") or ""),
+                }
+                for ref in shot_refs
+                if str(ref.get("script_excerpt") or "").strip()
+            ],
+            "evidence": evidence,
+            "evidence_scope": evidence_scope_of(record),
+            "plot_identity": plot_identity_of(record),
+            "temporary_notes": temporary_notes_of(record),
+            "user_supplement": "；".join(str(note) for note in (record.user_notes or [])),
+            "chapter_basis": [
+                line
+                for line in (
+                    f"本章剧情身份：{plot_identity_of(record)}" if plot_identity_of(record) else "",
+                    "；".join(str(note) for note in temporary_notes_of(record)),
+                )
+                if line
+            ],
+            "record_status": str(record.status or ""),
+            "source_summary": dict(record.source_summary or {}),
+        }
+    )
+    basis["notes"].append(
+        "结构化资料按项目 + 章节隔离保存（重启与重新提取都不会丢）；"
+        "全局资产（场景/道具/服装）的通用资料没有被本章资料覆盖。"
+        if global_asset
+        else "该资产归属项目（角色），资料保存在本项目内。"
+    )
+    return basis
 
 
 # ---------------------------------------------------------------------------

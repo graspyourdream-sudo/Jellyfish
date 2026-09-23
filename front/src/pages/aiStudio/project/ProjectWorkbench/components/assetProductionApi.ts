@@ -213,6 +213,11 @@ export function previewAssetImagePlan(body: {
   asset_type: 'character' | 'scene' | 'prop'
   asset_ids?: string[]
   aspect_ratio?: string
+  /**
+   * 章节 ID（可选）：给了后端就按**该章**装配 `generation_basis`（本章资产资料 / 剧本片段 /
+   * 出场分镜），页面「生成依据」在**还没生成**时也能看到真实资料；留空则不下发该字段。
+   */
+  chapter_id?: string
 }): Promise<AssetImagePlanPreview> {
   return callApi('/api/v1/studio/image-pipeline/plan/preview', {
     ...body,

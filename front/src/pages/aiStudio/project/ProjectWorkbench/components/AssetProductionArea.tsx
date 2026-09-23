@@ -503,6 +503,8 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
           project_id: effectiveProjectId,
           asset_type: assetType as 'character' | 'scene' | 'prop',
           aspect_ratio: settings.aspectRatio,
+          // 带上当前集：后端据此装配「生成依据」（含本章资产资料 / 剧本片段 / 出场分镜）
+          ...(chapterId ? { chapter_id: chapterId } : {}),
         })
         const targets = Array.isArray(data?.targets) ? data.targets : []
         planCacheRef.current.set(cacheKey, targets)
