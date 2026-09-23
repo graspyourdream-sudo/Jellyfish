@@ -51,6 +51,7 @@ from app.schemas.studio.image_pipeline import (
 )
 from app.services import paid_outlet_guard
 from app.services.llm.provider_resolver import resolve_provider_config_by_model
+from app.services.studio.image_pipeline import asset_strategies as strategies
 from app.services.studio.image_pipeline import reference_preflight
 from app.services.studio.image_pipeline.image_pipeline import (
     ASSET_TYPE_ZH,
@@ -60,7 +61,6 @@ from app.services.studio.image_pipeline.image_pipeline import (
     OUTCOME_OK,
     PROMPT_SOURCE_REQUEST,
     PROMPT_SOURCE_SAVED,
-    SLOT_BY_ASSET_TYPE,
     # 同包内的两个「唯一实现」：按项目装载资产、从错误原文抠 HTTP 状态码。
     # 不在这里各写第二份，否则两条链路的口径会悄悄跑偏。
     _http_status_from_text,
@@ -79,11 +79,11 @@ from app.services.studio.image_pipeline.reference_resolver import (
 from app.services.studio.image_tasks import resolve_image_model
 from app.services.studio.llm_orchestration import dry_run
 
-#: 本端点支持的资产类型。
+#: 本端点支持的资产类型 = 分流表覆盖的类型（character / scene / prop / costume）。
 #:
 #: 比上游服务端的契约（character/scene/prop）多一个 costume —— 因为本端点**不经过**
 #: 上游服务端点，走的是 Jellyfish 自己的 APIMart 图片通道，参考图来源是本地的图片槽位。
-REGENERATE_ASSET_TYPES: tuple[str, ...] = ("character", "scene", "prop", "costume")
+REGENERATE_ASSET_TYPES: tuple[str, ...] = strategies.SUPPORTED_ASSET_TYPES
 
 #: 响应里 results[].stage 的取值（与默认主流程的 character_sheet / reference_batch 区分开）
 STAGE_REFERENCE_REGENERATE = "reference_regenerate"
@@ -330,6 +330,10 @@ def _result_from_generation(
     asset_id: str,
     generated: Any,
     reference_url: str,
+    result_kind: str = "",
+    result_label: str = "",
+    aspect_ratio: str = "",
+    aspect_ratio_source: str = "",
 ) -> ImageTaskResultRead:
     """把 APIMart 通道的结果映射成**与既有出图结果同形**的一条结果。"""
     images = list(getattr(generated, "images", []) or [])
@@ -352,11 +356,15 @@ def _result_from_generation(
         oss_url=oss_url,
         oss_ready=bool(oss_url),
         message=(
-            "已用该资产的已有参考图重新生成一张图。"
+            f"已用该资产的已有参考图重新生成一张{result_label or '图'}。"
             + ("" if oss_url else "注意：这是供应商返回的临时地址，不是长期资产地址。")
         ),
         error_message="",
         http_status=None,
+        result_kind=result_kind,
+        result_label=result_label,
+        aspect_ratio=aspect_ratio,
+        aspect_ratio_source=aspect_ratio_source,
         detail={
             "error_message": "",
             "http_status": None,
@@ -364,6 +372,10 @@ def _result_from_generation(
             "local_path": "",
             "images": [{"url": item_url} for item_url in _image_urls(generated)],
             "status": status,
+            "result_kind": result_kind,
+            "result_label": result_label,
+            "aspect_ratio": aspect_ratio,
+            "aspect_ratio_source": aspect_ratio_source,
             "provider": str(getattr(generated, "provider", "apimart") or "apimart"),
             "provider_task_id": provider_task_id,
             "provider_notes": provider_notes,
@@ -405,6 +417,10 @@ def _failed_result(
     asset_id: str,
     error_message: str,
     reference_url: str,
+    result_kind: str = "",
+    result_label: str = "",
+    aspect_ratio: str = "",
+    aspect_ratio_source: str = "",
 ) -> ImageTaskResultRead:
     """供应商失败 → **照样返回一条结果**（与既有结果卡片同形），不抛 5xx 断掉整条链路。"""
     http_status = _http_status_from_text(error_message)
@@ -423,6 +439,10 @@ def _failed_result(
         message=error_message,
         error_message=error_message,
         http_status=http_status,
+        result_kind=result_kind,
+        result_label=result_label,
+        aspect_ratio=aspect_ratio,
+        aspect_ratio_source=aspect_ratio_source,
         detail={
             "error_message": error_message,
             "http_status": http_status,
@@ -431,6 +451,10 @@ def _failed_result(
             "images": [],
             "status": "failed",
             "provider": "apimart",
+            "result_kind": result_kind,
+            "result_label": result_label,
+            "aspect_ratio": aspect_ratio,
+            "aspect_ratio_source": aspect_ratio_source,
             "reference_image_url": reference_url,
             "how_to_fix": (
                 "参考图已通过匿名预检，所以这次失败来自供应商侧：可按上面的原文排障，"
@@ -441,7 +465,15 @@ def _failed_result(
 
 
 def _dry_run_result(
-    *, source_task_id: str, asset_type: str, asset_id: str, reference_url: str
+    *,
+    source_task_id: str,
+    asset_type: str,
+    asset_id: str,
+    reference_url: str,
+    result_kind: str = "",
+    result_label: str = "",
+    aspect_ratio: str = "",
+    aspect_ratio_source: str = "",
 ) -> ImageTaskResultRead:
     """演练占位：结构完整、地址不可达、绝不触网（与默认主流程的占位口径一致）。"""
     return ImageTaskResultRead(
@@ -458,10 +490,18 @@ def _dry_run_result(
         oss_url="",
         oss_ready=False,
         message="[DRY_RUN] 未提交 APIMart 参考图重生成；这是占位结果，不是真实图片地址。",
+        result_kind=result_kind,
+        result_label=result_label,
+        aspect_ratio=aspect_ratio,
+        aspect_ratio_source=aspect_ratio_source,
         detail={
             "error_message": "",
             "http_status": None,
             "reference_image_url": reference_url,
+            "result_kind": result_kind,
+            "result_label": result_label,
+            "aspect_ratio": aspect_ratio,
+            "aspect_ratio_source": aspect_ratio_source,
             "note": "[DRY_RUN] 占位结果，未向供应商发出任何请求。",
         },
     )
@@ -486,6 +526,11 @@ def _to_read(
     deduplicated: bool = False,
     paid_call_made: bool = False,
     warnings: list[str] | None = None,
+    result_kind: str = "",
+    result_label: str = "",
+    aspect_ratio: str = "",
+    aspect_ratio_source: str = "",
+    prompt_template: str = "",
 ) -> ReferenceRegenerateRead:
     results = [result]
     summary = summarize_results(results)
@@ -508,6 +553,11 @@ def _to_read(
         model_name=model_name,
         base_url=base_url,
         api_key_configured=api_key_configured,
+        result_kind=result_kind,
+        result_label=result_label,
+        aspect_ratio=aspect_ratio,
+        aspect_ratio_source=aspect_ratio_source,
+        prompt_template=prompt_template,
         results=results,
         summary=summary,
         outcome=str(summary.get("outcome") or summary_outcome(results)),
@@ -542,6 +592,8 @@ async def regenerate_with_existing_reference(
                 f"收到「{body.asset_type or '空'}」。"
             ),
         )
+    # 按 asset_type 分流：模板 / 画幅 / 结果类型标签（唯一一份实现在 asset_strategies）
+    strategy = strategies.strategy_for(asset_type)
 
     rows = await _load_asset_rows(db, project_id=body.project_id, asset_type=asset_type)
     row = next((item for item in rows if str(item.id) == str(body.asset_id)), None)
@@ -556,7 +608,7 @@ async def regenerate_with_existing_reference(
     asset_name = str(getattr(row, "name", "") or "")
 
     requested_prompt = str(body.prompt or "").strip()
-    saved_prompt = saved_image_prompt(row, SLOT_BY_ASSET_TYPE.get(asset_type))
+    saved_prompt = saved_image_prompt(row, strategy.prompt_slot)
     if requested_prompt:
         prompt, prompt_source = requested_prompt, PROMPT_SOURCE_REQUEST
     elif saved_prompt:
@@ -584,7 +636,12 @@ async def regenerate_with_existing_reference(
     if not body.reference_image_id and not str(body.reference_url or "").strip():
         warnings.append(f"未指定参考图，已自动使用「{reference.label}」作为参考图。")
 
-    ratio = str(body.target_ratio or "").strip() or DEFAULT_ASPECT_RATIO
+    # 画幅按类型解析：**人物参考图固定 16:9**（写死在分流表里，不是项目最终视频画幅）；
+    # 场景/道具/服装按各自既有口径。显式传了非 16:9 的人物请求 → 忽略 + 如实回报。
+    ratio_resolution = strategies.resolve_aspect_ratio(asset_type, body.target_ratio)
+    ratio = ratio_resolution.ratio
+    if ratio_resolution.warning:
+        warnings.append(ratio_resolution.warning)
     if ratio not in SUPPORTED_RATIOS:
         raise HTTPException(
             status_code=400,
@@ -619,8 +676,17 @@ async def regenerate_with_existing_reference(
                 asset_type=asset_type,
                 asset_id=body.asset_id,
                 reference_url=reference.url,
+                result_kind=strategy.result_kind,
+                result_label=strategy.result_label,
+                aspect_ratio=ratio,
+                aspect_ratio_source=ratio_resolution.source,
             ),
             warnings=warnings,
+            result_kind=strategy.result_kind,
+            result_label=strategy.result_label,
+            aspect_ratio=ratio,
+            aspect_ratio_source=ratio_resolution.source,
+            prompt_template=strategy.prompt_template,
         )
 
     # 真实提交：这里会产生费用 → 守卫（与既有出口同一个）。
@@ -671,6 +737,11 @@ async def regenerate_with_existing_reference(
             result=cached,
             deduplicated=True,
             paid_call_made=False,
+            result_kind=strategy.result_kind,
+            result_label=strategy.result_label,
+            aspect_ratio=ratio,
+            aspect_ratio_source=ratio_resolution.source,
+            prompt_template=strategy.prompt_template,
             warnings=[
                 *warnings,
                 (
@@ -733,6 +804,10 @@ async def regenerate_with_existing_reference(
             asset_id=body.asset_id,
             error_message=f"APIMart 参考图重生成失败：{exc}",
             reference_url=reference.url,
+            result_kind=strategy.result_kind,
+            result_label=strategy.result_label,
+            aspect_ratio=ratio,
+            aspect_ratio_source=ratio_resolution.source,
         )
         _remember_round(source_task_id, result)
         return _to_read(
@@ -747,6 +822,11 @@ async def regenerate_with_existing_reference(
             result=result,
             paid_call_made=True,
             warnings=warnings,
+            result_kind=strategy.result_kind,
+            result_label=strategy.result_label,
+            aspect_ratio=ratio,
+            aspect_ratio_source=ratio_resolution.source,
+            prompt_template=strategy.prompt_template,
         )
     except BaseException:
         # 任何其它异常都不能把这一轮永久占在「正在执行中」里（否则用户只能靠 attempt+1 绕）。
@@ -759,6 +839,10 @@ async def regenerate_with_existing_reference(
         asset_id=body.asset_id,
         generated=generated,
         reference_url=reference.url,
+        result_kind=strategy.result_kind,
+        result_label=strategy.result_label,
+        aspect_ratio=ratio,
+        aspect_ratio_source=ratio_resolution.source,
     )
     _remember_round(source_task_id, result)
     return _to_read(
@@ -778,6 +862,11 @@ async def regenerate_with_existing_reference(
         api_key_configured=bool(api_key),
         paid_call_made=True,
         warnings=warnings,
+        result_kind=strategy.result_kind,
+        result_label=strategy.result_label,
+        aspect_ratio=ratio,
+        aspect_ratio_source=ratio_resolution.source,
+        prompt_template=strategy.prompt_template,
     )
 
 

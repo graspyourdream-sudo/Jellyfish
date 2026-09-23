@@ -30,6 +30,7 @@ from app.schemas.studio.image_pipeline import (
     ImageTaskResultRead,
     SubmissionTargetRead,
 )
+from app.services.studio.image_pipeline import asset_strategies as strategies
 from app.services.studio.image_pipeline import external_image_client as client
 from app.services.studio.image_pipeline import reference_preflight
 from app.services.studio.image_pipeline.reference_resolver import (
@@ -49,27 +50,19 @@ from app.services.studio.llm_orchestration.registry import (
 )
 from app.schemas.studio.llm_orchestration import EntityProfileInput
 
-DEFAULT_ASPECT_RATIO = "16:9"
+# 画幅 / 槽位 / 结果类型标签的**唯一**分流表见 ``asset_strategies``：
+# 「按资产类型分流提示词模板 + 画幅 + 结果类型」只有那一份实现，本模块不再自己写一套。
+DEFAULT_ASPECT_RATIO = strategies.DEFAULT_ASPECT_RATIO
 DEFAULT_POLL_INTERVAL_SECONDS = 2.0
 MAX_POLL_SECONDS = 120.0
 
-# 资产类型 → 出图服务支持的 generation_type（单一事实来源在客户端模块）
+# 资产类型 → 出图服务支持的 generation_type（单一事实来源在客户端模块，分流表引用同一份）
 GENERATION_TYPE_BY_ASSET_TYPE: dict[str, str] = client.DEFAULT_GENERATION_TYPE
 
-# 资产类型 → 用于组装确定性提示词的图片槽位
-SLOT_BY_ASSET_TYPE: dict[str, PromptCategory] = {
-    "character": PromptCategory.character_image_front,
-    "scene": PromptCategory.scene_image_front,
-    "prop": PromptCategory.prop_image_front,
-    "costume": PromptCategory.costume_image_front,
-}
+# 资产类型 → 用于组装确定性提示词的图片槽位（兼容导出；真源在 asset_strategies）
+SLOT_BY_ASSET_TYPE: dict[str, PromptCategory] = strategies.SLOT_BY_ASSET_TYPE
 
-ASSET_TYPE_ZH: dict[str, str] = {
-    "character": "角色",
-    "scene": "场景",
-    "prop": "道具",
-    "costume": "服装",
-}
+ASSET_TYPE_ZH: dict[str, str] = {key: item.asset_zh for key, item in strategies.STRATEGIES.items()}
 
 
 # 提示词来源枚举（与 ``SubmissionTarget.prompt_source`` 一一对应）
@@ -111,6 +104,15 @@ class SubmissionTarget:
     image_model: str = ""
     object_key_template: str = ""
     profile_card: str = ""
+    # —— 按 asset_type 分流后的口径（只增字段：页面据此标注「本次生成的是什么」）——
+    #: 结果类型标签（机器可读）：characterReference / sceneAssetImage / propAssetImage / costumeDesignImage
+    result_kind: str = ""
+    #: 结果类型的中文标签：人物参考图 / 场景资产图 / 道具资产图 / 服装设定图
+    result_label: str = ""
+    #: 本类型使用的画幅来源：character_reference_fixed / request / default
+    aspect_ratio_source: str = ""
+    #: 本类型使用的提示词模板名（审计用）
+    prompt_template: str = ""
     # 提示词实际来自哪里：request（调用方显式传）/ saved（步骤 3 已保存的 image_prompts）/
     # template（确定性模板 + 资产描述）。用户要求「验收必须能证明保存内容被下一步实际使用」，
     # 所以这个来源必须显式带出来，不能只靠肉眼比对文本。
@@ -133,6 +135,10 @@ class SubmissionTarget:
             image_model=self.image_model,
             object_key_template=self.object_key_template,
             prompt_source=self.prompt_source,
+            result_kind=self.result_kind,
+            result_label=self.result_label,
+            aspect_ratio_source=self.aspect_ratio_source,
+            prompt_template=self.prompt_template,
             warnings=list(self.warnings),
         )
 
@@ -281,7 +287,17 @@ async def build_targets(
 ) -> tuple[list[SubmissionTarget], list[str]]:
     """组装提交目标（两条 stage 都是**按提示词直接生成参考图**）。
 
-    ``stage=character_sheet`` 不随请求带参考图；``stage=reference_batch`` 带上已定版的参考图。
+    按 ``asset_type`` 分流到各自的**提示词模板 / 画幅 / 结果类型**——这张分流表只有一份，
+    在 ``asset_strategies`` 里（本函数不自己写一套）：
+
+    - 人物：进「人物参考图库」的人物参考图（设定图），画幅**固定 16:9**
+      （写死在 ``CHARACTER_REFERENCE_RATIO``，**不是**项目最终视频画幅；显式传入的其它比例
+      会被忽略并如实报警告）；
+    - 场景 / 道具 / 服装：各自的资产图 / 设定图，画幅按各自既有口径（不会被顺手改成 16:9）。
+
+    ``stage=character_sheet`` 不随请求带参考图；``stage=reference_batch``（**只对人物开放**）
+    会带上该资产已定版的参考图 —— 非人物类型走这条路时**明确忽略并如实回报**，
+    绝不静默按人物处理。
 
     ``attempt``（新增，可选，默认 0）＝尝试序号，透传给 :func:`build_source_task_id`：
     重试失败项时传 1/2/3… 才会拿到**新的**幂等键（详见该函数）。
@@ -294,6 +310,13 @@ async def build_targets(
             f"出图服务 V0 只支持 asset_type ∈ {list(client.SERVICE_ASSET_TYPES)}；"
             f"当前 {asset_type or '空'} 不在其契约内，无法提交。"
         )
+
+    # 按类型分流：模板 / 画幅 / 结果类型标签（唯一一份实现在 asset_strategies）
+    strategy = strategies.strategy_for(asset_type)
+    ratio_resolution = strategies.resolve_aspect_ratio(asset_type, aspect_ratio)
+    if ratio_resolution.warning:
+        # 如实回报（例如人物参考图被写死 16:9 时忽略了调用方传的其它比例）
+        warnings.append(ratio_resolution.warning)
 
     # 图片模型固定策略：请求里可以写标签（image2），这里统一解析成 provider 实际模型。
     resolved_image_model, model_source = client.resolve_image_provider_model(image_model)
@@ -319,15 +342,25 @@ async def build_targets(
     if stage == "reference_batch" and len(rows) > 1:
         warnings.append(f"本批共 {len(rows)} 个{ASSET_TYPE_ZH.get(asset_type, asset_type)}，出图服务 V0 为单资产单图，将逐个提交。")
 
+    # 「按定版参考图批量出图」**只对人物开放**（分流表里的 batch_reference_allowed）：
+    # 非人物类型走这条路时明确忽略 + 如实回报，绝不静默按人物处理、也不偷偷把参考图塞进去。
+    reference_mode = stage == "reference_batch" and use_primary_reference
+    if reference_mode and not strategy.batch_reference_allowed:
+        warnings.append(strategies.describe_batch_reference_refusal(asset_type))
+        reference_mode = False
+
     references: dict[str, ReferenceImage] = {}
-    if stage == "reference_batch" and use_primary_reference:
+    if reference_mode:
         references = await resolve_references(db, asset_type=asset_type, asset_ids=[row.id for row in rows])
 
     targets: list[SubmissionTarget] = []
     for row in rows:
         description = str(getattr(row, "description", "") or "")
-        slot_category = SLOT_BY_ASSET_TYPE.get(asset_type)
-        slot_spec = IMAGE_PROMPT_SLOT_BY_CATEGORY.get(str(slot_category.value)) if slot_category else None
+        slot_category = strategy.prompt_slot
+        slot_spec = IMAGE_PROMPT_SLOT_BY_CATEGORY.get(str(slot_category.value))
+        # 注册表里没有该类型的槽位规格时（目前只有道具）用分流表里的动作姿态兜底，
+        # 而不是所有类型共用一个「自然展示」——那样等于没有按类型分流模板。
+        view_hint = slot_spec.view_hint if slot_spec else strategy.default_view_hint
         override = overrides.get(row.id) or ""
         saved = saved_image_prompt(row, slot_category)
         if override:
@@ -341,7 +374,7 @@ async def build_targets(
                     name=str(row.name or row.id),
                     asset_type=asset_type,
                     description=description,
-                    view_hint=slot_spec.view_hint if slot_spec else "",
+                    view_hint=view_hint,
                 ),
                 PROMPT_SOURCE_TEMPLATE,
             )
@@ -350,8 +383,8 @@ async def build_targets(
         reference_url = ""
         if reference is not None:
             target_warnings.extend(reference.warnings)
-            reference_url = reference.url if use_primary_reference else ""
-            if use_primary_reference and not reference_url:
+            reference_url = reference.url if reference_mode else ""
+            if reference_mode and not reference_url:
                 target_warnings.append("没有可用的定版参考图：本次为纯文本提示词生成，一致性可能下降。")
         targets.append(
             SubmissionTarget(
@@ -370,12 +403,16 @@ async def build_targets(
                 negative_prompt=negative_prompt,
                 style_tags=[str(t) for t in (getattr(row, "tags", None) or [])],
                 reference_image=reference_url,
-                generation_type=GENERATION_TYPE_BY_ASSET_TYPE.get(asset_type, ""),
-                aspect_ratio=aspect_ratio or DEFAULT_ASPECT_RATIO,
+                generation_type=strategy.generation_type or GENERATION_TYPE_BY_ASSET_TYPE.get(asset_type, ""),
+                aspect_ratio=ratio_resolution.ratio,
                 prompt_source=prompt_source,
                 image_model=resolved_image_model,
                 object_key_template=build_object_key_template(project_id=project_id, asset_type=asset_type),
                 profile_card=description,
+                result_kind=strategy.result_kind,
+                result_label=strategy.result_label,
+                aspect_ratio_source=ratio_resolution.source,
+                prompt_template=strategy.prompt_template,
                 warnings=target_warnings,
             )
         )
@@ -403,10 +440,19 @@ def _dry_run_result(target: SubmissionTarget) -> ImageTaskResultRead:
         oss_url="",
         oss_ready=False,
         message="[DRY_RUN] 未提交给出图服务；这是占位结果，不是真实图片地址。",
+        result_kind=target.result_kind,
+        result_label=target.result_label,
+        aspect_ratio=target.aspect_ratio,
+        aspect_ratio_source=target.aspect_ratio_source,
         detail={
             "error_message": "",
             "http_status": None,
             "note": "[DRY_RUN] 占位结果，未提交任何出图请求。",
+            "result_kind": target.result_kind,
+            "result_label": target.result_label,
+            "aspect_ratio": target.aspect_ratio,
+            "aspect_ratio_source": target.aspect_ratio_source,
+            "prompt_template": target.prompt_template,
         },
     )
 
@@ -522,6 +568,10 @@ def _result_from_submission(
         message=message,
         error_message=upstream_error,
         http_status=_http_status_from_text(upstream_error) if upstream_error else None,
+        result_kind=target.result_kind,
+        result_label=target.result_label,
+        aspect_ratio=target.aspect_ratio,
+        aspect_ratio_source=target.aspect_ratio_source,
         detail={
             "error_message": upstream_error,
             "http_status": _http_status_from_text(upstream_error) if upstream_error else None,
@@ -530,6 +580,11 @@ def _result_from_submission(
             "images": images,
             "status": status,
             "source_message": str(task.message or ""),
+            "result_kind": target.result_kind,
+            "result_label": target.result_label,
+            "aspect_ratio": target.aspect_ratio,
+            "aspect_ratio_source": target.aspect_ratio_source,
+            "prompt_template": target.prompt_template,
         },
     )
 

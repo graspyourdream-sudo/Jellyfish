@@ -193,10 +193,15 @@ async def test_build_targets_character_sheet_has_no_reference() -> None:
 
 @pytest.mark.asyncio
 async def test_build_targets_reference_batch_uses_primary_reference() -> None:
+    """参考图批量（**只对人物开放**）带上定版参考图；画幅固定 16:9。
+
+    用户口径（2026-09）：人物参考图（设定图）**固定 16:9**，所以即使调用方传了 9:16
+    也不会被采用 —— 但**必须如实回报**（计划级 warnings 里说明忽略了哪个值），不能静默改口。
+    """
     db, engine = await build_session()
     async with db:
         await _seed_assets(db)
-        targets, _ = await build_targets(
+        targets, warnings = await build_targets(
             db,
             project_id="proj-1",
             asset_type="character",
@@ -208,7 +213,10 @@ async def test_build_targets_reference_batch_uses_primary_reference() -> None:
     assert target.reference_image.endswith("/jellyfish/proj-1/character/char-1_front.png")
     assert target.to_asset_payload()["reference_image"] == target.reference_image
     assert target.to_asset_payload()["asset_type"] == "character"
-    assert target.aspect_ratio == "9:16"
+    # 人物参考图固定 16:9（不是项目最终视频画幅）
+    assert target.aspect_ratio == "16:9"
+    assert target.aspect_ratio_source == "character_reference_fixed"
+    assert any("16:9" in w and "9:16" in w for w in warnings), "忽略传入比例必须如实回报"
     assert not target.warnings
     await engine.dispose()
 
@@ -246,16 +254,21 @@ async def test_build_targets_rejects_costume_as_out_of_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_build_targets_warns_when_reference_missing() -> None:
+    """场景走 reference_batch：**明确忽略并如实回报**（参考图批量只对人物开放）。
+
+    用户口径：场景/道具/服装按各自的资产图口径生成，不会带上参考图，也不按人物处理。
+    """
     db, engine = await build_session()
     async with db:
         await _seed_assets(db)
-        # 场景没有图片 → reference_batch 阶段应明确提示"没有可用的定版参考图"
-        targets, _ = await build_targets(
+        targets, warnings = await build_targets(
             db, project_id="proj-1", asset_type="scene", stage="reference_batch"
         )
 
     assert targets[0].reference_image == ""
-    assert any("没有可用的定版参考图" in w for w in targets[0].warnings)
+    assert any("只对**人物**开放" in w for w in warnings), "非人物走参考图批量必须如实说明"
+    assert targets[0].result_kind == "sceneAssetImage"
+    assert "characterReference" not in targets[0].result_kind
     await engine.dispose()
 
 

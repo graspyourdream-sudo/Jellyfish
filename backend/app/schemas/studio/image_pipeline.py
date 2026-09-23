@@ -62,6 +62,24 @@ class SubmissionTargetRead(BaseModel):
         "template",
         description="提示词来源：request（调用方显式传）/ saved（已保存的 image_prompts）/ template（确定性模板）",
     )
+    result_kind: str = Field(
+        "",
+        description=(
+            "本类型的结果类型标签（新，机器可读）：characterReference（**仅人物**）/ "
+            "sceneAssetImage / propAssetImage / costumeDesignImage"
+        ),
+    )
+    result_label: str = Field(
+        "", description="结果类型的中文标签（新）：人物参考图 / 场景资产图 / 道具资产图 / 服装设定图"
+    )
+    aspect_ratio_source: str = Field(
+        "",
+        description=(
+            "本类型画幅的来源（新）：character_reference_fixed（人物参考图写死 16:9）/ "
+            "request（调用方传入）/ default（类型默认）"
+        ),
+    )
+    prompt_template: str = Field("", description="本类型使用的提示词模板名（新，审计用）")
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -98,6 +116,20 @@ class ImageTaskResultRead(BaseModel):
     image_url: str = Field("", description="出图服务的本地/临时地址（非长期资产）")
     oss_url: str = Field("", description="长期资产地址；DRY_RUN 下为空")
     oss_ready: bool = Field(False, description="是否拿到了可用作长期资产的地址（新，布尔）")
+    result_kind: str = Field(
+        "",
+        description=(
+            "结果类型标签（新，机器可读，由 asset_type 分流决定）：characterReference（**仅人物**）/ "
+            "sceneAssetImage / propAssetImage / costumeDesignImage"
+        ),
+    )
+    result_label: str = Field("", description="结果类型的中文标签（新）：人物参考图 / 场景资产图 / 道具资产图 / 服装设定图")
+    aspect_ratio: str = Field(
+        "", description="本次结果使用的画幅（新）：人物参考图固定 16:9（不是项目最终视频画幅）"
+    )
+    aspect_ratio_source: str = Field(
+        "", description="画幅来源（新）：character_reference_fixed / request / default"
+    )
     message: str = Field("", description="可展示的一句话说明（失败时优先装真实原因）")
     error_message: str = Field("", description="失败/部分失败的真实原因（新，优先取上游 error_message）")
     http_status: int | None = Field(None, description="上游报错时的 HTTP 状态码（新；取不到为空）")
@@ -186,6 +218,13 @@ class ImagePlanPreviewRead(BaseModel):
     references: list[ReferenceImageRead] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     summary: dict[str, Any] = Field(default_factory=dict)
+    strategy: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "本次按 asset_type 分流的出图口径（新）：result_kind / result_label / aspect_ratio / "
+            "aspect_ratio_fixed / aspect_ratio_note / prompt_template / batch_reference_allowed"
+        ),
+    )
     dry_run: bool = Field(True, description="当前守卫状态；preview 永远不触网")
     note: str = Field(
         "仅为提交计划预览，未调用出图服务；确认后走 POST /image-pipeline/submit。",
@@ -315,7 +354,14 @@ class ReferenceRegenerateRequest(BaseModel):
         "",
         description="显式指定已有参考图的公网地址（http/https）。与 reference_image_id 二选一",
     )
-    target_ratio: str = Field("", description="画幅比例；留空用 16:9（APIMart 只支持 1:1 / 3:4 / 16:9）")
+    target_ratio: str = Field(
+        "",
+        description=(
+            "画幅比例（APIMart 只支持 1:1 / 3:4 / 16:9）。**人物参考图固定 16:9**："
+            "人物传别的值会被忽略并如实回报（16:9 是人物参考图/设定图的画幅，不是项目最终视频画幅）；"
+            "场景/道具/服装按各自既有口径，留空=16:9 默认"
+        ),
+    )
     resolution_profile: Literal["standard", "high"] = Field("standard", description="输出分辨率档位")
     model_id: str | None = Field(None, description="图片模型 ID；留空用 DB 的默认图片模型（必须是 APIMart 供应商）")
     attempt: int = Field(
@@ -360,6 +406,17 @@ class ReferenceRegenerateRead(BaseModel):
     model_name: str = ""
     base_url: str = ""
     api_key_configured: bool = False
+    result_kind: str = Field(
+        "",
+        description=(
+            "本次结果类型标签（新，机器可读，按 asset_type 分流）：characterReference（**仅人物**）/ "
+            "sceneAssetImage / propAssetImage / costumeDesignImage"
+        ),
+    )
+    result_label: str = Field("", description="本次结果类型的中文标签（新）：人物参考图 / 场景资产图 / 道具资产图 / 服装设定图")
+    aspect_ratio: str = Field("", description="本次使用的画幅（新）：人物参考图固定 16:9（不是项目最终视频画幅）")
+    aspect_ratio_source: str = Field("", description="画幅来源（新）：character_reference_fixed / request / default")
+    prompt_template: str = Field("", description="本次使用的提示词模板名（新，审计用）")
     results: list[ImageTaskResultRead] = Field(default_factory=list, description="与默认主流程同形的单条出图结果")
     summary: dict[str, Any] = Field(default_factory=dict)
     outcome: str = ""

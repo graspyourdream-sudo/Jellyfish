@@ -45,6 +45,7 @@ from app.schemas.studio.image_pipeline import (
 from app.services import paid_outlet_guard
 from app.core.integrations.apimart.images import ApimartImageError
 from app.services.studio.image_pipeline import external_image_client as image_client
+from app.services.studio.image_pipeline import asset_strategies as image_pipeline_strategies
 from app.services.studio.image_pipeline import reference_preflight
 from app.services.studio.image_pipeline.frame_submit import (
     build_frame_submit_plan,
@@ -217,6 +218,12 @@ async def preview_image_plan(
             "with_reference": len([target for target in targets if target.reference_image]),
             "without_reference": len([target for target in targets if not target.reference_image]),
         },
+        # 按 asset_type 分流的出图口径（只增字段）：本次会生成什么类型、用什么画幅、模板名
+        strategy=(
+            image_pipeline_strategies.strategy_for(body.asset_type).to_read()
+            if body.asset_type in image_pipeline_strategies.STRATEGIES
+            else {}
+        ),
         dry_run=dry_run.dry_run_enabled(),
     )
     return success_response(data)
