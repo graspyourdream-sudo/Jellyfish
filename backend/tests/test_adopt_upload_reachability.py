@@ -11,7 +11,8 @@
    ``adopt`` 与 ``POST /studio/files/upload`` 都用它，没有第二份 HEAD/GET 探测；
 2. 上传接口响应**只增不删**地带回 ``url`` / ``url_reachable`` / ``url_probe`` / ``warnings``，
    **不可达不阻断上传**（文件照样落库），但必须如实告警 + 给修法；
-3. DRY_RUN 下**一个字节都不出站**（用「任何出网即 AssertionError」的桩证明）。
+3. DRY_RUN 下**一个字节都不出站**（用「任何出网即 AssertionError」的桩证明）；
+   并且写对象存储这一「oss」出口在演练模式下被守卫拦在**写入之前**（409，不落库）。
 
 全部不联网：探活一律注入 stub 或 ``httpx.MockTransport``，对象存储写入一律 stub 掉。
 """
@@ -24,6 +25,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
 from app.api.v1.routes.studio import files as files_route
 from app.core import storage
@@ -328,25 +330,44 @@ async def test_upload_without_public_base_reports_missing_address(
 
 
 @pytest.mark.asyncio
-async def test_upload_dry_run_never_probes(
+async def test_upload_dry_run_never_probes_and_never_uploads(
     monkeypatch: pytest.MonkeyPatch, _stored_url: dict[str, str]
 ) -> None:
-    """DRY_RUN：上传落库照旧，但**一次都不探活**。"""
+    """DRY_RUN：上传被**对象存储出口守卫**拦在写入之前 —— 不探活、不上传、不落库。
+
+    口径修正（演练验收 D2）：写对象存储是「oss」付费出口，演练模式下**一个字节都不上传**、
+    不写 ``files`` 行，返回与其它出口同一套结构化 409。此前这里断言的是「上传落库照旧、
+    只是不探活」，那正是「演练模式下仍然真实写 OSS」那个缺陷的测试化版本。
+    """
+    from app.services import paid_outlet_guard as guard
+
     monkeypatch.setenv(DRY_RUN_ENV, "1")
     monkeypatch.delenv(CONFIRM_ENV, raising=False)
     calls = _install_probe(monkeypatch, None)
     _forbid_any_outbound(monkeypatch)
+    uploaded: list[str] = []
+
+    async def _no_upload(*, key, data, content_type=None, extra_args=None):  # type: ignore[no-untyped-def]
+        uploaded.append(key)
+        raise AssertionError("演练模式下不应有人调用 storage.upload_file")
+
+    monkeypatch.setattr(storage, "upload_file", _no_upload)
 
     db, engine = await build_session()
     try:
-        outcome = await upload_file(db, file=_FakeUploadFile("封面.png"), name="封面图")
+        with pytest.raises(guard.PaidOutletBlocked) as caught:
+            await upload_file(db, file=_FakeUploadFile("封面.png"), name="封面图")
+        rows = (await db.execute(select(func.count()).select_from(FileItem))).scalar_one()
     finally:
         await engine.dispose()
 
+    assert caught.value.status_code == 409
+    assert caught.value.payload["reason"] == "dry_run"
+    assert caught.value.payload["outlet"] == "oss"
+    assert caught.value.payload["paid_call_made"] is False
+    assert uploaded == []
     assert calls == []
-    assert outcome.url_reachable is None
-    assert outcome.url_probe["result"] == "skipped"
-    assert outcome.warnings == []
+    assert rows == 0
 
 
 def test_upload_api_response_shape_carries_reachability(client: TestClient, monkeypatch) -> None:

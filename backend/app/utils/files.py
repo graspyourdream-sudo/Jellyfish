@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import storage
 from app.models.studio import FileItem, FileType
 from app.models.types import FileUsageKind
+from app.services import paid_outlet_guard
 
 
 # 后缀 → 类型。音频此前被漏掉，一律落到「默认 image」，于是声音绑定（要求
@@ -79,9 +80,21 @@ async def create_file_from_url_or_b64(
     - 若提供 b64_data：优先解析 data URL 前缀中的 MIME 类型，否则默认 image/png；
     - 始终通过 storage.upload_file 上传到对象存储，再创建 FileItem 记录并返回。
     - url_request_headers / httpx_timeout：用于需鉴权或大文件下载（如 OpenAI /videos/{id}/content）。
+
+    **付费出口守卫（oss）**：这里最终会走 ``storage.upload_file`` 真实写对象存储，
+    属于「对象存储上传」出口，与出图 / 出视频 / 大模型共用**同一套**闸门
+    （``paid_outlet_guard.require_outlet``）。演练模式（默认）下**不下载、不上传、
+    不落库**，直接结构化 409（判定在下载之前，演练模式零出站）；本地驱动
+    （``is_local_storage()``）是本地落盘而不是 OSS 上传，不走这道闸门。
     """
     if not url and not b64_data:
         raise ValueError("create_file_from_url_or_b64 需要提供 url 或 b64_data 至少其一")
+
+    if not storage.is_local_storage():
+        paid_outlet_guard.require_outlet(
+            "把远端 / 生成的素材落库到对象存储（会真实写入 OSS）",
+            outlet=paid_outlet_guard.OUTLET_OSS,
+        )
 
     content: bytes
     content_type: str | None = None

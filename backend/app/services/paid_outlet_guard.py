@@ -117,7 +117,10 @@ def blocked_payload(exc: Exception) -> dict[str, Any]:
     字段分三类：
     - 机器可读：``code``（恒定 ``paid_outlet_blocked``）、``reason``（区分两种拦截原因）；
     - 中文给用户看：``message`` / ``reason_text`` / ``how_to_enable`` / ``enable_steps``；
-    - 兼容既有前端与排查：``outlet`` / ``outlet_label`` / ``hint`` / ``guard``。
+    - 兼容既有前端与排查：``outlet`` / ``outlet_label`` / ``hint`` / ``guard`` / ``paid_call_made``。
+
+    ``paid_call_made`` 恒为 ``False``：被拦意味着**这次没有任何真实调用 / 上传发生**
+    （与 ``reference_regenerate`` 等自持 409 明细同一字段名），前端据此显示「未产生付费调用」。
     """
     d = _dry_run()
     outlet = str(getattr(exc, "outlet", OUTLET_LLM))
@@ -136,6 +139,8 @@ def blocked_payload(exc: Exception) -> dict[str, Any]:
         "restore_steps": d.restore_steps(),
         "mode": d.mode(),
         "mode_label": d.mode_label(),
+        #: 被拦 = 没有发起任何真实请求（也就没有付费 / 没有对象写入）
+        "paid_call_made": False,
         "guard": d.state(),
     }
 

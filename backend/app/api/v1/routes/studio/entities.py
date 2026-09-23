@@ -16,6 +16,7 @@ from app.schemas.studio.entity_existence import (
     EntityNameExistenceCheckResponse,
 )
 from app.services.studio import StudioEntitiesService
+from app.services.studio.entity_images import EntityImageSlotConflict
 from app.services.studio.primary_protection import PrimaryImageReplaceRequired
 
 router = APIRouter()
@@ -149,6 +150,10 @@ async def create_entity_image(
     except PrimaryImageReplaceRequired as exc:
         # 定版保护的 409：结构化明细进 meta.error（与 /image-pipeline/adopt 同形）。
         # 其余 HTTPException 照旧走全局处理器，响应形状不变。
+        return error_envelope(code=exc.status_code, detail=exc.detail)
+    except EntityImageSlotConflict as exc:
+        # 同槽位重复建图（唯一约束 (资产ID, quality_level, view_angle)）：
+        # 以前是 IntegrityError 穿透成 500，现在是同一形制的结构化 409。
         return error_envelope(code=exc.status_code, detail=exc.detail)
     return created_response(payload)
 

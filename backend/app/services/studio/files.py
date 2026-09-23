@@ -20,6 +20,7 @@ from app.core import storage
 from app.models.studio import FileItem, FileType
 from app.schemas.common import ApiResponse, PaginatedData, paginated_response
 from app.schemas.studio import FileDetailRead, FileRead, FileUpdate, FileUsageRead, FileUsageWrite
+from app.services import paid_outlet_guard
 from app.services.common import create_and_refresh, entity_not_found, flush_and_refresh, get_or_404, patch_model
 from app.services.studio.file_usages import upsert_file_usage
 
@@ -272,11 +273,23 @@ async def upload_file(
     上传成功后**追加一次**匿名可达性验证（``reference_preflight.verify_uploaded_url_reachable``
     —— 全项目唯一实现）：对象写成功 ≠ 匿名可读，真实故障 A 就是把这个地址交给上游后 404。
     **不可达不阻断上传**（文件已落库），但会如实告警并给出修法。
+
+    **付费出口守卫（oss）**：写对象存储是「对象存储上传」出口，与出图 / 出视频 / 大模型
+    走**同一套**闸门（``paid_outlet_guard.require_outlet``）。演练模式（默认）下**一个字节
+    都不上传、不写文件记录**，直接结构化 409；本地驱动（``is_local_storage()``）落盘是
+    本地存储而不是 OSS 上传，不走这道闸门，单机用法不受影响。
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="上传文件缺少文件名")
 
     file_type = _detect_file_type(file.filename)
+
+    if not storage.is_local_storage():
+        paid_outlet_guard.require_outlet(
+            "上传文件到对象存储（会真实写入 OSS 并产生公网可读对象）",
+            outlet=paid_outlet_guard.OUTLET_OSS,
+        )
+
     display_name = _build_display_name(file.filename, name)
     content = await file.read()
 
