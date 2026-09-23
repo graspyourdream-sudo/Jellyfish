@@ -457,12 +457,26 @@ CONFLICT_LABELS: dict[str, str] = {
     CONFLICT_DUPLICATE_NAME: "同一章里有两个不同类型的资产用同一个名字",
 }
 
+#: 库里有一件**名字里包含**它的资产（同类或异类）—— 这只是**提示**，不是冲突。
+#:
+#: 为什么必须单独一档：上游存在性检测 ``check_names_existence`` 用的是**子串匹配**
+#: （``name ILIKE '%查询名%'``，服务「新建资产」时的"是不是已经有了"提醒）。
+#: 于是「姜岁欢」会命中服装「姜岁欢常服」—— 那不是同一个东西，只是名字里带了这几个字。
+#: 把这种命中当冲突会**永久卡住**自动确认（验收时真实发生过：两个角色因此建不出来，
+#: 后面按资产的图片提示词直接 400）。所以：**只有归一化名称完全相等才算"同名"**，
+#: 子串命中一律降级为提示，如实点名库里的那件资产，让人看一眼即可。
+NOTICE_PARTIAL_NAME_MATCH = "partial_name_match_in_library"
+
 #: 库里同名同类型资产已有描述、但与本章资料**没有一个共同用词** —— 这只是**提示**，
 #: 不是冲突：同名同类型本身已经足够安全（会走"选用已有"，且不覆盖任何已有内容），
 #: 措辞不同不足以判定"不是同一个资产"。把它升级成冲突只会让"无冲突直接确认"变成空话。
 NOTICE_LIBRARY_PROFILE = CONFLICT_LIBRARY_PROFILE
 
 NOTICE_LABELS: dict[str, str] = {
+    NOTICE_PARTIAL_NAME_MATCH: (
+        "库里有一件**名字里包含**它的其它资产（名字里有这几个字，但不是同一样东西）："
+        "本次**不当作冲突**、也不会去关联它，只是提醒你留意"
+    ),
     NOTICE_LIBRARY_PROFILE: (
         "库里已有同名同类型资产，但它的描述与本章剧本里的资料没有共同用词；"
         "本次会选用已有且**不改动**它的描述，请顺手确认一下是不是同一个资产"
@@ -520,29 +534,41 @@ def detect_conflicts(
                 }
             )
 
-        # 同名不同类型已在库里
+        # 同名不同类型已在库里（**只认完全同名**：子串命中不算同名，见 NOTICE_PARTIAL_NAME_MATCH）
         for other_type in ASSET_TYPES:
             if other_type == asset_type:
                 continue
             hit = existing_by_type.get((other_type, name_key))
-            if hit and hit.get("exists"):
-                conflicts.append(
+            if not (hit and hit.get("exists")):
+                continue
+            if hit.get("fuzzy"):
+                notices.append(
                     {
-                        "code": CONFLICT_TYPE_MISMATCH,
-                        "reason": (
-                            f"{CONFLICT_LABELS[CONFLICT_TYPE_MISMATCH]}："
-                            f"库里「{item['name']}」已有 {type_label(other_type)}"
-                        ),
+                        "code": NOTICE_PARTIAL_NAME_MATCH,
+                        "message": NOTICE_LABELS[NOTICE_PARTIAL_NAME_MATCH],
                         "existing_asset_id": str(hit.get("asset_id") or ""),
                         "existing_asset_type": other_type,
+                        "existing_asset_name": str(hit.get("matched_name") or ""),
                     }
                 )
+                continue
+            conflicts.append(
+                {
+                    "code": CONFLICT_TYPE_MISMATCH,
+                    "reason": (
+                        f"{CONFLICT_LABELS[CONFLICT_TYPE_MISMATCH]}："
+                        f"库里「{item['name']}」已有 {type_label(other_type)}"
+                    ),
+                    "existing_asset_id": str(hit.get("asset_id") or ""),
+                    "existing_asset_type": other_type,
+                }
+            )
 
-        # 别名分别指向库里两个不同资产
+        # 别名分别指向库里两个不同资产（同样只认完全同名）
         alias_ids: dict[str, str] = {}
         for alias in [item["name"], *(item.get("aliases") or [])]:
             hit = existing_by_type.get((asset_type, normalize_name(alias)))
-            if hit and hit.get("exists") and hit.get("asset_id"):
+            if hit and hit.get("exists") and hit.get("asset_id") and not hit.get("fuzzy"):
                 alias_ids[str(hit["asset_id"])] = str(alias)
         if len(alias_ids) > 1:
             conflicts.append(
@@ -558,7 +584,19 @@ def detect_conflicts(
 
         # 库里同名同类型资产已有描述，且与本章剧本里的资料**没有一个字的共同点**
         hit = existing_by_type.get((asset_type, name_key))
-        if hit and hit.get("exists") and hit.get("asset_id"):
+        if hit and hit.get("exists") and hit.get("fuzzy"):
+            # 同类里只有"名字包含它"的资产（例如角色「姜岁欢」vs 角色「姜岁欢替身」）：
+            # 不关联、不阻塞，只提示。
+            notices.append(
+                {
+                    "code": NOTICE_PARTIAL_NAME_MATCH,
+                    "message": NOTICE_LABELS[NOTICE_PARTIAL_NAME_MATCH],
+                    "existing_asset_id": str(hit.get("asset_id") or ""),
+                    "existing_asset_type": asset_type,
+                    "existing_asset_name": str(hit.get("matched_name") or ""),
+                }
+            )
+        if hit and hit.get("exists") and hit.get("asset_id") and not hit.get("fuzzy"):
             existing_id = str(hit["asset_id"])
             existing_desc = str(existing_description_by_id.get(existing_id) or "").strip()
             item["existing_asset_id"] = existing_id
@@ -714,12 +752,52 @@ async def _match_existing(
         )
     except HTTPException:
         return {}
+    # 上游存在性检测是**子串匹配**（``name ILIKE '%查询名%'``），命中的不一定是同一个东西：
+    # 例如查询「姜岁欢」会命中服装「姜岁欢常服」。所以这里按命中的 asset_id 把**库里真实的名字**
+    # 取回来，逐条标上 ``matched_name`` 与 ``fuzzy``（fuzzy = 名字里含它、但不是完全同名）。
+    # 后面的冲突判定只认"完全同名"，fuzzy 一律降级为提示（否则会永久卡住自动确认）。
+    ids_by_type: dict[str, set[str]] = {asset_type: set() for asset_type in ASSET_TYPES}
+    for asset_type in ASSET_TYPES:
+        for hit in checked.get(f"{asset_type}s") or []:
+            if isinstance(hit, dict) and hit.get("exists") and hit.get("asset_id"):
+                ids_by_type[asset_type].add(str(hit["asset_id"]))
+    actual_names = await _load_asset_names(db, ids_by_type=ids_by_type)
+
     result: dict[tuple[str, str], dict[str, Any]] = {}
     for asset_type in ASSET_TYPES:
         for hit in checked.get(f"{asset_type}s") or []:
-            if isinstance(hit, dict):
-                result[(asset_type, normalize_name(hit.get("name")))] = hit
+            if not isinstance(hit, dict):
+                continue
+            key = normalize_name(hit.get("name"))
+            asset_id = str(hit.get("asset_id") or "")
+            matched_name = actual_names.get(asset_id, "") if asset_id else ""
+            exists = bool(hit.get("exists"))
+            result[(asset_type, key)] = {
+                **hit,
+                "matched_name": matched_name,
+                "fuzzy": bool(exists and asset_id and normalize_name(matched_name) != key),
+            }
     return result
+
+
+async def _load_asset_names(
+    db: AsyncSession,
+    *,
+    ids_by_type: dict[str, set[str]],
+) -> dict[str, str]:
+    """按 id 取回库里资产的**真实名称**（用于区分"完全同名"与"名字里含它"）。"""
+    from app.models.studio import Character, Costume, Prop, Scene
+
+    models: dict[str, Any] = {"character": Character, "scene": Scene, "prop": Prop, "costume": Costume}
+    names: dict[str, str] = {}
+    for asset_type, ids in ids_by_type.items():
+        if not ids or asset_type not in models:
+            continue
+        model = models[asset_type]
+        rows = (await db.execute(select(model.id, model.name).where(model.id.in_(sorted(ids))))).all()
+        for row in rows:
+            names[str(row[0])] = str(row[1] or "")
+    return names
 
 
 async def _finalize_items(

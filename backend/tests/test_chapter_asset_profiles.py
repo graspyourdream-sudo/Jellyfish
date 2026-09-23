@@ -754,3 +754,95 @@ async def test_created_global_assets_only_carry_general_fields() -> None:
     assert "状态：" not in prop_description
     # 资产确实建出来了、四类齐全
     assert result["summary"]["created"] == 5
+
+
+# ---------------------------------------------------------------------------
+# 「同名」只能是**完全同名**：上游存在性检测是子串匹配，子串命中不得当成冲突
+# ---------------------------------------------------------------------------
+
+PARTIAL_MATCH_NOTICE = "partial_name_match_in_library"
+
+
+@pytest.mark.asyncio
+async def test_partial_name_match_is_a_notice_not_a_conflict() -> None:
+    """库里服装「姜岁欢常服」不该让角色「姜岁欢」变成"必须人工处理"（真实踩过的坑）。
+
+    上游 ``check_names_existence`` 用 ``name ILIKE '%查询名%'`` 做子串匹配（服务于
+    「新建资产」时的"是不是已经有了"提醒），于是「姜岁欢」会命中「姜岁欢常服」。
+    改造前这里被当成 ``same_name_other_type`` 冲突 → 角色**永远建不出来**、也不给关联，
+    后面按资产的图片提示词直接 400（验收时真实发生）。
+    正确行为：不冲突、不关联、无冲突可直接确认，只用提示如实点名库里那件资产。
+    """
+    from app.models.studio import Costume
+
+    db, engine = await build_session()
+    async with db:
+        await _seed(db)
+        await _seed_candidates(db)
+        db.add(Costume(id="costume-yc", name="姜岁欢常服", description="", style="真人古装"))
+        await db.flush()
+        clear_chapter_profile_cache()
+        caller, _ = make_recording_stub_caller(_model_payload())
+        result = await build_chapter_asset_profiles(db, chapter_id="chap-1", llm_caller=caller)
+    await engine.dispose()
+
+    girl = next(item for item in result["user_flow"]["items"] if item["name"] == "姜岁欢")
+    assert girl["auto_confirmable"] is True, "子串命中不得阻塞自动确认"
+    assert girl["conflict"] is None
+    assert girl["existing_asset_id"] is None, "不能把角色关联到一件服装上"
+    assert girl["suggested_action"] == "create_new"
+    assert [notice["code"] for notice in girl["notices"]] == [PARTIAL_MATCH_NOTICE]
+    assert girl["notices"][0]["existing_asset_name"] == "姜岁欢常服"
+    assert girl["notices"][0]["existing_asset_type"] == "costume"
+    assert not result["user_flow"]["needs_review"]
+
+
+@pytest.mark.asyncio
+async def test_exact_same_name_other_type_is_still_a_conflict() -> None:
+    """完全同名（异类型）仍然是冲突 —— 修复不能顺手把真冲突也放过去。"""
+    db, engine = await build_session()
+    async with db:
+        await _seed(db)
+        await _seed_candidates(db)
+        db.add(Prop(id="prop-exact", name="姜岁欢", description="", style="真人古装"))
+        await db.flush()
+        clear_chapter_profile_cache()
+        caller, _ = make_recording_stub_caller(_model_payload())
+        result = await build_chapter_asset_profiles(db, chapter_id="chap-1", llm_caller=caller)
+    await engine.dispose()
+
+    girl = next(item for item in result["user_flow"]["items"] if item["name"] == "姜岁欢")
+    assert girl["auto_confirmable"] is False
+    assert girl["conflict"]["code"] == "same_name_other_type"
+
+
+@pytest.mark.asyncio
+async def test_partial_same_type_match_does_not_link() -> None:
+    """同类里只有"名字包含它"的资产（角色「姜岁欢」vs 角色「姜岁欢替身」）→ 不关联、只提示。"""
+    from app.models.studio import Character
+
+    db, engine = await build_session()
+    async with db:
+        await _seed(db)
+        await _seed_candidates(db)
+        db.add(
+            Character(
+                id="char-double",
+                project_id="proj-1",
+                name="姜岁欢替身",
+                description="替身演员",
+                style="真人古装",
+                visual_style="现实",
+            )
+        )
+        await db.flush()
+        clear_chapter_profile_cache()
+        caller, _ = make_recording_stub_caller(_model_payload())
+        result = await build_chapter_asset_profiles(db, chapter_id="chap-1", llm_caller=caller)
+    await engine.dispose()
+
+    girl = next(item for item in result["user_flow"]["items"] if item["name"] == "姜岁欢")
+    assert girl["existing_asset_id"] is None, "名字里含它 ≠ 同一样东西，不能自动关联"
+    assert girl["auto_confirmable"] is True
+    assert girl["suggested_action"] == "create_new"
+    assert [notice["code"] for notice in girl["notices"]] == [PARTIAL_MATCH_NOTICE]

@@ -34,6 +34,18 @@
         --out /tmp/acceptance_real_llm_report.json
 
 ``--print-plan`` 只打印这 5 次调用会发什么（**不调用**），用于先给我看方案。
+
+``--skip-analysis``（续跑，**不重复花钱**）
+==========================================
+
+第 1 次分析的结果现在**持久化在数据库**里（``chapter_asset_profiles`` /
+``chapter_asset_profile_runs``，按项目 + 章节隔离）。所以某次调用失败后重启进程/重启后端，
+可以带 ``--skip-analysis`` 直接从"确认落库 + 逐资产图片提示词"继续：
+
+- 脚本先 ``GET .../asset-profiles``（**只读**）并断言库里确实有这份清单、
+  且这次读取 ``persistence.llm_called == false``（证明用的是库、没有再调模型）；
+- 库里没有 → **直接退出**，绝不偷偷把第 1 次调用再跑一遍（那就超预算了）；
+- 每次调用仍逐次计数、失败即停、报告里如实写明"本次跳过第 1 次调用"及其证据。
 """
 
 from __future__ import annotations
@@ -163,6 +175,14 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - 单次流程脚�
         help="硬闸门：必须显式带上，才允许真的发出这 5 次调用（防止误跑花钱）",
     )
     parser.add_argument("--keep-real-mode", action="store_true", help="跑完不把 .env 写回演练模式")
+    parser.add_argument(
+        "--skip-analysis",
+        action="store_true",
+        help=(
+            "续跑模式：第 1 次整章分析的结果已在库里（持久化）时跳过它，"
+            "直接从确认 + 逐资产图片提示词继续（不重复花钱）。库里没有则直接退出。"
+        ),
+    )
     args = parser.parse_args(argv)
 
     names = [item.strip() for item in args.entity_names.split(",") if item.strip()]
@@ -214,21 +234,59 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - 单次流程脚�
             print(f"[验收] {report['abort_reason']}")
             return _finish(report, args)
 
-        # ---- call 1/5：整章剧本分析 ----
-        print("[验收] [call 1/5] 整章剧本分析 …")
-        first = client.post(
-            f"/api/v1/studio/chapters/{args.chapter_id}/asset-profiles",
-            json={"extra_instructions": ""},
-        )
-        report["calls"].append(_record_call(plan[0], first))
-        if first.status_code != 200:
-            report["result"] = "aborted"
-            report["abort_reason"] = f"第 1 次调用失败（HTTP {first.status_code}）→ 立即停止、不重试。"
-            return _finish(report, args)
+        # ---- call 1/5：整章剧本分析（或 --skip-analysis 时从库里直读） ----
+        if args.skip_analysis:
+            print("[验收] --skip-analysis：先从库里**只读**取回已持久化的清单（不调用模型）…")
+            persisted = client.get(f"/api/v1/studio/chapters/{args.chapter_id}/asset-profiles")
+            if persisted.status_code != 200:
+                report["result"] = "aborted"
+                report["abort_reason"] = (
+                    f"读取已持久化清单失败（HTTP {persisted.status_code}）→ 立即停止。"
+                )
+                return _finish(report, args)
+            data = persisted.json().get("data") or {}
+            persistence = data.get("persistence") or {}
+            if not persistence.get("generated"):
+                report["result"] = "aborted"
+                report["abort_reason"] = (
+                    "库里没有已持久化的清单（persistence.generated=false）→ **一次调用都不发**。"
+                    "请去掉 --skip-analysis，让脚本从头跑（第 1 次整章分析）。"
+                )
+                return _finish(report, args)
+            report["skipped_analysis"] = {
+                "reason": "第 1 次分析结果已持久化在数据库（按项目 + 章节隔离），续跑不重复分析。",
+                "read_http_status": persisted.status_code,
+                "read_llm_called": bool(persistence.get("llm_called")),
+                "generated_by_llm": bool(persistence.get("generated_by_llm")),
+                "run_id": persistence.get("run_id"),
+                "records_total": persistence.get("records_total"),
+                "content_changed": bool(persistence.get("content_changed")),
+                "status": persistence.get("status"),
+                "note": "只读接口回 llm_called=false 即证明这次取清单**没有**调用模型。",
+            }
+            print(
+                "[验收] 已从数据库取回清单："
+                f"run_id={persistence.get('run_id')} records={persistence.get('records_total')} "
+                f"本次调用模型={persistence.get('llm_called')}（原始分析由模型产生="
+                f"{persistence.get('generated_by_llm')}）"
+            )
+            user_flow = data.get("user_flow") or {}
+            items = user_flow.get("items") or []
+        else:
+            print("[验收] [call 1/5] 整章剧本分析 …")
+            first = client.post(
+                f"/api/v1/studio/chapters/{args.chapter_id}/asset-profiles",
+                json={"extra_instructions": ""},
+            )
+            report["calls"].append(_record_call(plan[0], first))
+            if first.status_code != 200:
+                report["result"] = "aborted"
+                report["abort_reason"] = f"第 1 次调用失败（HTTP {first.status_code}）→ 立即停止、不重试。"
+                return _finish(report, args)
 
-        user_flow = (first.json().get("data") or {}).get("user_flow") or {}
-        items = user_flow.get("items") or []
-        print(f"[验收] [call 1/5] 成功：{len(items)} 项资产；summary={user_flow.get('summary')}")
+            user_flow = (first.json().get("data") or {}).get("user_flow") or {}
+            items = user_flow.get("items") or []
+            print(f"[验收] [call 1/5] 成功：{len(items)} 项资产；summary={user_flow.get('summary')}")
 
         resolved_names = names or [str(item.get("name") or "") for item in items[:4]]
         report["resolved_entity_names"] = resolved_names
@@ -307,6 +365,10 @@ def _finish(report: dict[str, Any], args: argparse.Namespace) -> int:
     from fastapi.testclient import TestClient
 
     from app.main import app
+
+    # 如实记录"本次真正发出几次调用"（续跑时不是 5 次；报告里必须一眼看得出来）
+    report["calls_issued"] = len(report.get("calls") or [])
+    report["authorized_total"] = MAX_CALLS
 
     if not args.keep_real_mode:
         report["restore"] = _restore_env()

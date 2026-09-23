@@ -129,3 +129,59 @@ def test_status_summary_only_keeps_safe_fields() -> None:
     assert set(summary["outlet_states"]) >= {"llm", "image", "video", "oss"}
     blob = json.dumps(summary, ensure_ascii=False).lower()
     assert "api_key" not in blob
+
+
+def test_resume_mode_refuses_before_any_call_without_gate(tmp_path: Path) -> None:
+    """``--skip-analysis`` 也不绕过硬闸门：没有 --confirm-authorized 就一次都不发。"""
+    out = tmp_path / "report.json"
+    code = runner.main(
+        [
+            "--project-id",
+            "acc",
+            "--chapter-id",
+            "acc-ep1",
+            "--out",
+            str(out),
+            "--skip-analysis",
+            "--keep-real-mode",
+        ]
+    )
+    assert code == 1
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["result"] == "aborted"
+    assert report["calls"] == []
+    assert "--confirm-authorized" in report["abort_reason"]
+    assert "skipped_analysis" not in report
+
+
+def test_resume_mode_aborts_when_nothing_persisted(tmp_path: Path) -> None:
+    """续跑模式在真实模式下也必须先确认"库里真有持久化清单"，没有就一次都不发。"""
+    out = tmp_path / "report.json"
+    code = runner.main(
+        [
+            "--project-id",
+            "no-such-project",
+            "--chapter-id",
+            "no-such-chapter",
+            "--out",
+            str(out),
+            "--skip-analysis",
+            "--confirm-authorized",
+            "--keep-real-mode",
+        ]
+    )
+    report = json.loads(out.read_text(encoding="utf-8"))
+    # 演练模式下第一道闸就会拦（非真实模式），所以这里断言的是"一次调用都没发"
+    assert report["calls"] == []
+    assert code == 1
+
+
+def test_report_counts_issued_calls(tmp_path: Path) -> None:
+    """报告必须如实写"本次真正发出几次调用"，避免把续跑误读成又花了 5 次。"""
+    out = tmp_path / "report.json"
+    runner.main(
+        ["--project-id", "acc", "--chapter-id", "acc-ep1", "--out", str(out), "--keep-real-mode"]
+    )
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["calls_issued"] == 0
+    assert report["authorized_total"] == 5
