@@ -214,6 +214,35 @@ cd backend && grep -nE 'JELLYFISH_(DRY_RUN|REAL_LLM_CONFIRMED)' .env || echo "�
 
 > 结论：真实模式 ≠ 免确认。它只是让你能成功调用；确认、限额、去重三件事照旧。
 
+### 5.1 只授权**部分出口**：`JELLYFISH_ALLOWED_OUTLETS`（2026-09 新增）
+
+两个开关只能表达"整体开 / 整体关"，表达不了"**只授权文本模型**、不授权出图 / 出视频 / 上传"。
+验收场景（用户只授权 5 次文本调用）就需要后者，所以多了一道**出口白名单**：
+
+```bash
+# 只允许文本模型真实调用；图片 / 视频 / OSS 三个出口在**代码层面**被拦（409 outlet_not_allowed）
+JELLYFISH_DRY_RUN=0 JELLYFISH_REAL_LLM_CONFIRMED=1 JELLYFISH_ALLOWED_OUTLETS=llm \
+  uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+- 取值：`,` 分隔的出口名（`llm` / `image` / `video` / `oss`，容忍中文逗号与空格、大小写）；
+- 写成 `none` / `off` / `0` → **四个出口全部禁止**（"临时全停"）；
+- **未设置**（默认）→ 不额外限制，行为与加这个功能之前完全一致；
+- 空值 / 读不懂 → 按"未设置"处理（fail-safe：与守卫其余部分同口径，不会因为写法怪就误放开）；
+- 判定顺序：**先看是不是真实模式，再看出口白名单**。所以白名单只在真实模式下有意义，
+  演练模式下四个出口本来就全禁。
+
+状态接口如实回报：
+
+```bash
+curl -s http://localhost:8000/api/v1/studio/llm/orchestration/status \
+  | python -c "import json,sys;d=json.load(sys.stdin)['data']['real_run_mode'];print(d['allowed_outlets']);[print(o['outlet'],o['allowed'],o['reason']) for o in d['outlets']]"
+# 期望（白名单=llm 时）：['llm']；llm True / image False outlet_not_allowed / video False … / oss False …
+```
+
+被拦时返回结构化 **409**（`code=paid_outlet_blocked`、`reason=outlet_not_allowed`），
+`paid_call_made` 恒为 `false` —— 也就是"**没有发出任何真实请求**"。
+
 ---
 
 ## 6. 常见坑

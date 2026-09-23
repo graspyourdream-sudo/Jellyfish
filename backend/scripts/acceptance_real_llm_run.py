@@ -52,7 +52,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -158,6 +157,7 @@ def _plan(*, project_id: str, chapter_id: str, entity_names: list[str]) -> list[
     return plan
 
 
+# pylint: disable=too-many-return-statements  # 单次流程脚本：每个失败分支都如实 return，可读性优先
 def main(argv: list[str] | None = None) -> int:  # noqa: C901 - 单次流程脚本，分支就是它的可读性
     parser = argparse.ArgumentParser(description="真实大模型验收（恰好 5 次、单次尝试、失败即停）")
     parser.add_argument("--project-id", required=True)
@@ -195,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901 - 单次流程脚�
     from fastapi.testclient import TestClient
 
     from app.main import app
-    from app.services import paid_outlet_guard  # noqa: F401 - 触发守卫注册
+    from app.services import paid_outlet_guard  # noqa: F401  # pylint: disable=unused-import
 
     report: dict[str, Any] = {
         "project_id": args.project_id,
