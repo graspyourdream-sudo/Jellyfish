@@ -19,7 +19,13 @@
 - 进程重启 → 缓存自然失效，``confirm`` 会明确告诉用户"请先重新生成清单"，
   而不是悄悄用一份空清单建出一堆空资产。
 
-刻意不落库：不新增表、不加列（任务硬约束），也不把大模型原始输出写进产品字段。
+至于"落库"，2026-09 已按用户要求改为**专用表持久化**
+（``chapter_asset_profiles`` / ``chapter_asset_profile_runs``，见
+:mod:`app.services.studio.chapter_asset_record_store`）：
+
+- **数据库是事实来源**：重启后直接读库，不会再花钱、也不会出现"请先重新生成清单"；
+- 本模块的进程内缓存**降级为纯性能优化**（同一进程内重复读时省一次 JSON 深拷贝），
+  清空它不影响任何结论 —— 因为确认动作读的是库，不再只认缓存。
 """
 
 from __future__ import annotations
@@ -36,6 +42,33 @@ _CHAPTER_PROFILE_CACHE: dict[str, dict[str, Any]] = {}
 MAX_CACHED_CHAPTER_PROFILES = 32
 
 
+def _shots_payload(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "shot_id": str(shot.get("shot_id") or ""),
+            "index": int(shot.get("index") or 0),
+            "script_excerpt": str(shot.get("script_excerpt") or ""),
+        }
+        for shot in shots
+    ]
+
+
+def build_chapter_source_hash(*, chapter_text: str, shots: list[dict[str, Any]]) -> str:
+    """**剧本 + 分镜**的内容签名（不含附加要求）。
+
+    这是"这份清单对应哪一版剧本"的判据：``chapter_asset_profiles.source_hash``
+    存的是它；与当前算出来的值不一致 → 标记「内容已变化，建议重新分析」。
+    刻意**不含**附带要求：改了附加要求只说明"这次的提问方式变了"，
+    剧本本身没变，不该把已有资料标成过期。
+    """
+    payload = {
+        "chapter_text": str(chapter_text or ""),
+        "shots": _shots_payload(shots),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def build_chapter_profile_cache_key(
     *,
     project_id: str,
@@ -49,14 +82,7 @@ def build_chapter_profile_cache_key(
         "project_id": project_id,
         "chapter_id": chapter_id,
         "chapter_text": str(chapter_text or ""),
-        "shots": [
-            {
-                "shot_id": str(shot.get("shot_id") or ""),
-                "index": int(shot.get("index") or 0),
-                "script_excerpt": str(shot.get("script_excerpt") or ""),
-            }
-            for shot in shots
-        ],
+        "shots": _shots_payload(shots),
         "extra_instructions": str(extra_instructions or ""),
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -105,6 +131,7 @@ def clear_chapter_profile_cache() -> None:
 __all__ = [
     "MAX_CACHED_CHAPTER_PROFILES",
     "build_chapter_profile_cache_key",
+    "build_chapter_source_hash",
     "clear_chapter_profile_cache",
     "get_cached_chapter_profile",
     "set_cached_chapter_profile",

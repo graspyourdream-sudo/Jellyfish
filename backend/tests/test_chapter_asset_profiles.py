@@ -624,9 +624,11 @@ async def test_image_prompt_gets_structured_profile_after_confirm() -> None:
     assert "鹅蛋脸杏眼" in girl.canonical_subject
     assert "双环髻" in girl.canonical_subject
     assert girl.has_structured_profile is True
-    # 来源标签如实反映"这段资料是从哪来的"：本章 overlay 优先，候选结构化资料兜底
+    # 来源标签如实反映"这段资料是从哪来的"：本章**持久化资料行**优先
+    # （2026-09 起章节资料落在专用表 chapter_asset_profiles，
+    #   不再是候选 payload 的 chapter_overlay），候选结构化资料与剧本片段仍是兜底。
     assert girl.profile_source.startswith("asset_description+")
-    assert "chapter_overlay" in girl.profile_source
+    assert "chapter_record" in girl.profile_source
 
 
 @pytest.mark.asyncio

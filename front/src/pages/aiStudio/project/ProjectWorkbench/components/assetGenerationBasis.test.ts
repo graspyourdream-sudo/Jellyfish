@@ -21,6 +21,7 @@ import {
   buildRequestStructureText,
   describeBasisAvailability,
   describeBasisFieldNames,
+  describeStructuredSource,
   readGenerationBasis,
   summarizeGenerationBasis,
 } from './assetGenerationBasis.ts'
@@ -272,4 +273,23 @@ test('未提供的项一律显示「本次未提供」（缺一项就只占位�
   assert.equal(byKey.get('projectStyle')?.provided, true)
   // 缺项清单如实列出（页面据此写"本次未提供的：…"）
   assert.ok(describeBasisAvailability(basis).includes('本次未提供的：'))
+})
+
+
+test('来源码翻译：后端新增的 chapter_record 系列必须说人话，未登记的码不许摊内部标识', () => {
+  // 2026-09 章节资料改存专用表后，后端回的是 chapter_record 这一档
+  assert.match(describeStructuredSource('chapter_record'), /本章资产资料/)
+  assert.match(describeStructuredSource('chapter_record'), /重启/)
+  assert.match(describeStructuredSource('asset_description+chapter_record'), /资产描述/)
+  // 旧结构（历史数据）也要能说清楚，而不是把码直接摊给用户
+  assert.match(describeStructuredSource('chapter_overlay'), /章节隔离/)
+  assert.match(describeStructuredSource('asset_description+chapter_overlay+candidate_profile'), /资产描述/)
+  assert.match(describeStructuredSource('candidate_profile'), /候选结构化资料/)
+  assert.match(describeStructuredSource('script_window'), /剧本/)
+  // 未登记的**内部标识**：给中文兜底，不能把 `some_new_code` 原样显示
+  const unknown = describeStructuredSource('some_new_code')
+  assert.doesNotMatch(unknown, /some_new_code/)
+  assert.match(unknown, /本章资产资料/)
+  // 空码就是空（页面据此显示「本次未提供」）
+  assert.equal(describeStructuredSource(''), '')
 })

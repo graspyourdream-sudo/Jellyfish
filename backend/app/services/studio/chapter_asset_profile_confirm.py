@@ -41,11 +41,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.studio import Chapter, Project, Shot
 from app.services.common import entity_not_found
 from app.services.studio.asset_overlays import (
-    ChapterAssetOverlay,
     build_overlay_from_item,
     is_global_asset,
     overlay_to_profile_text,
-    persist_overlay,
 )
 from app.services.studio.asset_profiles import (
     ASSET_TYPES,
@@ -54,9 +52,9 @@ from app.services.studio.asset_profiles import (
     render_profile_text,
     type_label,
 )
-from app.services.studio.chapter_asset_profile_cache import (
-    build_chapter_profile_cache_key,
-    get_cached_chapter_profile,
+from app.services.studio.chapter_asset_record_store import (
+    list_chapter_records,
+    mark_confirmed,
 )
 from app.services.studio.entity_crud import create_entity
 from app.services.studio.project_asset_readiness import build_project_asset_readiness
@@ -134,45 +132,46 @@ async def _resolve_profile_payload(
     ctx: _ChapterContext,
     extra_instructions: str,
 ) -> dict[str, Any]:
-    """取本次要确认的清单：只认"内容签名一致"的那份缓存。
+    """取本次要确认的清单：**直接读数据库**（数据库是事实来源）。
 
-    签名对不上（剧本改过 / 进程重启）时**明确拒绝**，而不是拿一份过期的或空的清单去建资产。
+    改造前这里只认"进程内缓存里签名一致的那一份"，于是后端一重启就再也确认不了
+    （409 ``asset_profile_not_generated``），用户只能**再花一次钱**重新分析 —— 正式使用不可接受。
+
+    现在：
+
+    - 库里有资料行 → 用它组装清单（``build_chapter_asset_profiles(refresh=False,
+      allow_generate=False)``，**一次模型调用都不会发**）；
+    - 库里一行都没有 → 才如实报 409，并明确告诉用户该先调用哪个接口生成。
+
+    ``use_cache=False``：确认动作必须基于**库里当下的行**（包括刚做过的人工修改），
+    不能吃"同进程里的旧副本"。
     """
-    from app.services.studio.llm_orchestration.context import load_chapter_source
+    from app.services.studio.chapter_asset_profiles import build_chapter_asset_profiles
 
-    source = await load_chapter_source(db, ctx.chapter.id)
-    shots_payload = [
-        {
-            "shot_id": str(shot.id),
-            "index": int(shot.index or 0),
-            "script_excerpt": str(shot.script_excerpt or ""),
-        }
-        for shot in ctx.shots
-    ]
-    cache_key = build_chapter_profile_cache_key(
-        project_id=ctx.project_id,
+    payload = await build_chapter_asset_profiles(
+        db,
         chapter_id=ctx.chapter.id,
-        chapter_text=source.text,
-        shots=shots_payload,
         extra_instructions=extra_instructions,
+        refresh=False,
+        allow_generate=False,
+        use_cache=False,
     )
-    cached = get_cached_chapter_profile(cache_key)
-    if cached is None:
+    if not (payload.get("persistence") or {}).get("generated"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "asset_profile_not_generated",
                 "message": (
-                    "还没有生成（或剧本已改动）本章的结构化资产清单，无法确认落库。"
-                    "确认动作必须基于最新清单，否则会把过期的资料写进资产。"
+                    "本章还没有生成过结构化资产清单，无法确认落库。"
+                    "确认动作必须基于已保存的清单，否则会把空资料写进资产。"
                 ),
                 "fix": (
-                    f"请先调用 GET /api/v1/studio/chapters/{ctx.chapter.id}/asset-profiles "
-                    "生成清单，再调用本接口确认。"
+                    f"请先调用 POST /api/v1/studio/chapters/{ctx.chapter.id}/asset-profiles "
+                    "生成清单（会按需调用一次文本模型；若库里已有则直接读取、不再调用），再调用本接口确认。"
                 ),
             },
         )
-    return cached
+    return payload
 
 
 def _selections_by_group(raw: Any) -> dict[str, dict[str, Any]]:
@@ -336,6 +335,14 @@ async def confirm_chapter_asset_profiles(
             },
         )
 
+    # 持久化行（按 group_key 索引）：确认成功后要把"已关联的真实资产 ID"与确认时间写回它。
+    from app.services.studio.chapter_asset_record_store import group_key as record_group_key
+
+    records_by_group = {
+        record_group_key(record): record
+        for record in await list_chapter_records(db, chapter_id=chapter_id)
+    }
+
     # ---- 预检：link_existing 的目标资产必须存在（任何一项不合法 → 整批不改） ----
     planned: list[tuple[dict[str, Any], str, str, dict[str, Any] | None]] = []
     for item in items:
@@ -422,11 +429,12 @@ async def confirm_chapter_asset_profiles(
                 evidence=evidence,
                 asset_id=asset_id,
             )
-            overlay_result = await _persist_overlay_for_item(
+            record_result = await _mark_record_confirmed(
                 db,
-                ctx=ctx,
                 item=item,
+                records_by_group=records_by_group,
                 asset_id=asset_id,
+                action=ACTION_LINK,
             )
             results.append(
                 {
@@ -443,7 +451,7 @@ async def confirm_chapter_asset_profiles(
                     "reason": reason,
                     "linked_candidates": marked,
                     "evidence_rows": evidence_rows,
-                    "chapter_overlay": overlay_result,
+                    "chapter_record": record_result,
                 }
             )
             continue
@@ -478,7 +486,13 @@ async def confirm_chapter_asset_profiles(
             evidence=evidence,
             asset_id=new_id,
         )
-        overlay_result = await _persist_overlay_for_item(db, ctx=ctx, item=item, asset_id=new_id)
+        record_result = await _mark_record_confirmed(
+            db,
+            item=item,
+            records_by_group=records_by_group,
+            asset_id=new_id,
+            action=ACTION_CREATE,
+        )
         results.append(
             {
                 "group_key": item.get("group_key"),
@@ -492,7 +506,7 @@ async def confirm_chapter_asset_profiles(
                 "reason": reason,
                 "linked_candidates": marked,
                 "evidence_rows": evidence_rows,
-                "chapter_overlay": overlay_result,
+                "chapter_record": record_result,
             }
         )
 
@@ -512,8 +526,11 @@ async def confirm_chapter_asset_profiles(
             "skipped": len(skipped),
             "chapter_scoped": len([item for item in results if item.get("chapter_scoped")]),
             "global_write_skipped": len([item for item in results if item.get("global_write_skipped")]),
-            "overlay_persisted": len(
-                [item for item in results if (item.get("chapter_overlay") or {}).get("persisted")]
+            "chapter_records_bound": len(
+                [item for item in results if (item.get("chapter_record") or {}).get("bound")]
+            ),
+            "pending_change_remaining": len(
+                [item for item in results if (item.get("chapter_record") or {}).get("pending_change")]
             ),
             "needs_review_remaining": len(
                 [item for item in skipped if str(item.get("reason") or "").startswith("冲突项需人工处理")]
@@ -523,8 +540,10 @@ async def confirm_chapter_asset_profiles(
         "asset_readiness": readiness,
         "note": (
             "无冲突项已直接确认；冲突项未处理（见 skipped 的 reason）。"
-            "结构化资料已写入资产描述与候选 payload，生产区读同一份 asset_readiness，"
-            "图片提示词生成会直接读到这些资料。"
+            "结构化资料保存在**按项目 + 章节隔离**的 chapter_asset_profiles 表里"
+            "（后端重启后直接读，不重复调用模型）；候选 payload 同步保留证据。"
+            "已关联的真实资产 ID 与确认时间已写回该表，生产区读同一份 asset_readiness。"
+            "**没有**写全局资产（场景/道具/服装）的通用资料、image_prompts、图片与定版图。"
         ),
     }
 
@@ -639,32 +658,42 @@ async def _link_existing(
     }
 
 
-async def _persist_overlay_for_item(
+async def _mark_record_confirmed(
     db: AsyncSession,
     *,
-    ctx: _ChapterContext,
     item: dict[str, Any],
+    records_by_group: dict[str, Any],
     asset_id: str,
+    action: str,
 ) -> dict[str, Any]:
-    """把本章资料按项目/章节隔离保存（overlay）。
+    """确认成功后把"已关联的真实资产 ID + 确认时间"写回持久化行。
 
-    四类资产都写：角色的 overlay 记"剧情身份 + 出场依据"；全局资产（场景/道具/服装）
-    的 overlay 才是它们**唯一的**章节资料载体（全局列一个字都不写）。
+    这是"付费生成并人工确认过的结构资产生效于真实资产"的最后一环：
+
+    - 资料本体（``chapter_asset_profiles``）**不重写**：确认动作只补 ``asset_id`` /
+      ``link_action`` / ``confirmed_at`` 与状态，人工修改与用户补充一个字都不动；
+    - 行上若挂着"内容已变化，待用户决定"的新结果，确认**不会**顺手把它落下来，
+      也不会把它丢掉 —— 仍然挂着，等用户显式选择覆盖 / 合并 / 保留；
+    - 全局资产（场景/道具/服装）的通用资料依旧一个字都不写（见 :func:`_link_existing`）。
     """
-    overlay: ChapterAssetOverlay = build_overlay_from_item(
-        item=item,
-        chapter_id=ctx.chapter.id,
-        project_id=ctx.project_id,
-        asset_id=asset_id,
-    )
-    result = await persist_overlay(db, overlay=overlay)
+    record = records_by_group.get(str(item.get("group_key") or ""))
+    if record is None:
+        return {
+            "bound": False,
+            "reason": "库里没有对应的章节资料行（可能是确认前清单被外部改动过），已跳过写回。",
+        }
+    pending = bool(getattr(record, "pending_profile", None))
+    await mark_confirmed(db, record=record, asset_id=asset_id, action=action)
     return {
-        **result,
+        "bound": True,
+        "record_id": int(record.id),
+        "asset_id": asset_id,
+        "link_action": action,
+        "status": str(record.status or ""),
+        "pending_change": pending,
+        "manual_preserved": bool(record.manual_overrides or record.user_notes),
         "scope": "chapter",
-        "asset_type": overlay.asset_type,
-        "is_global_asset": overlay.global_asset,
-        "plot_identity": overlay.plot_identity,
-        "temporary_notes": overlay.temporary_notes,
+        "is_global_asset": is_global_asset(str(item.get("asset_type") or "")),
     }
 
 

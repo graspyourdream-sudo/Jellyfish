@@ -113,10 +113,15 @@ _MODE_LABELS: dict[str, str] = {
 
 # 拦截原因（机器可读）：必须区分「演练模式所以不发真实请求」与「真实模式已开但没确认」。
 BLOCKED_REASON_DRY_RUN = "dry_run"
+#: 真实模式已开，但该出口不在**本次授权的出口白名单**里（见 ``ALLOWED_OUTLETS_ENV``）
+BLOCKED_REASON_OUTLET_NOT_ALLOWED = "outlet_not_allowed"
 BLOCKED_REASON_NOT_CONFIRMED = "real_call_not_confirmed"
 
 _BLOCKED_REASON_TEXTS: dict[str, str] = {
     BLOCKED_REASON_DRY_RUN: f"当前是演练模式（{DRY_RUN_ENV} 未显式设为 0）：不会发起真实请求，也不会产生费用。",
+    BLOCKED_REASON_OUTLET_NOT_ALLOWED: (
+        "真实模式已开，但本次授权的**出口白名单**没有把这个出口列进去：不会发起真实请求。"
+    ),
     BLOCKED_REASON_NOT_CONFIRMED: (
         f"真实模式开关已开，但缺少付费确认（{CONFIRM_ENV} 不是 1）：仍然不会发起真实请求。"
     ),
@@ -185,6 +190,50 @@ class RealCallNotConfirmed(RuntimeError):
     def enable_steps(self) -> list[str]:
         """中文「怎么开真实模式」的分步说明（少一个确认变量）。"""
         return enable_steps()
+
+
+class OutletNotAllowed(RealCallNotConfirmed):
+    """真实模式已开，但**这个出口不在白名单里**（``JELLYFISH_ALLOWED_OUTLETS``）。
+
+    为什么需要它：两个开关只能表达"整体开/关"，没法表达"只允许文本模型、不许出图/出视频/上传"
+    这种**按出口授权**。验收（用户只授权 5 次文本调用，不授权出图/视频/OSS 写入）就需要它：
+    白名单设成 ``llm`` 之后，图片 / 视频 / OSS 三个出口在**代码层面**就被挡住，
+    不依赖"记得别点那个按钮"。
+
+    直接继承 :class:`RealCallNotConfirmed`：既有的 ``except RealCallNotConfirmed`` /
+    ``isinstance(..., (DryRunBlocked, RealCallNotConfirmed))`` 站点无需逐个改动，
+    而机器可读的 ``reason_code`` 与中文说明由本类覆盖，不会与"没确认"混淆。
+    """
+
+    reason_code = BLOCKED_REASON_OUTLET_NOT_ALLOWED
+
+    def __init__(self, detail: str = "", outlet: str = OUTLET_LLM) -> None:
+        label = _OUTLET_LABELS.get(outlet, outlet)
+        message = (
+            f"真实模式已开，但「{label}」出口不在本次授权的出口白名单里"
+            f"（{ALLOWED_OUTLETS_ENV}）：未发起任何真实请求"
+        )
+        if detail:
+            message += f"（{detail}）"
+        # 显式调用父类初始化（保持"子类"这一事实在构造链上也是真的），再覆盖面向用户的那句话
+        super().__init__(detail, outlet=outlet)
+        self.args = (message,)
+        self.detail = detail
+        self.outlet = outlet
+
+    @property
+    def reason_text(self) -> str:
+        """这个出口被拦的中文说明（白名单没列它）。"""
+        return _BLOCKED_REASON_TEXTS[BLOCKED_REASON_OUTLET_NOT_ALLOWED]
+
+    @property
+    def how_to_enable(self) -> str:
+        """中文「怎么放开这个出口」：说明要显式加进白名单。"""
+        return (
+            f"在启动后端的终端（或 backend/.env）里把 {ALLOWED_OUTLETS_ENV} 显式设成包含该出口的值"
+            f"（例如 {ALLOWED_OUTLETS_ENV}=llm,image），然后重启后端进程；"
+            f"当前白名单：{allowed_outlets() if allowed_outlets() is not None else '未设置（等于不额外限制）'}。"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -448,6 +497,43 @@ def how_to_restore_text() -> str:
     )
 
 
+def allowed_outlets() -> tuple[str, ...] | None:
+    """**出口白名单**：只有列出的出口允许真实调用。
+
+    - 未设置（默认）→ ``None``：不额外限制（与加这个功能之前完全一致）；
+    - 显式设置 → 元组；写成 ``none`` / ``off`` / ``0`` 表示**四个出口全部禁止**；
+    - 空值 / 读不懂 → 按"未设置"处理（fail-safe：与守卫其余部分同口径 —— 空值一律等同未设置，
+      不会因为写法怪就误放开出口；要全禁请显式写 ``none``）。
+    """
+    if flag_source(ALLOWED_OUTLETS_ENV) == SOURCE_DEFAULT:
+        return None
+    raw = str(flag_raw(ALLOWED_OUTLETS_ENV) or "").strip().replace("，", ",")
+    if not raw:
+        return None
+    if raw.lower() in {"none", "off", "0"}:
+        return ()
+    return tuple(item.strip().lower() for item in raw.split(",") if item.strip())
+
+
+def outlet_allowed(outlet: str) -> bool:
+    """这个出口**现在**是否允许真实调用（真实模式 + 白名单两条都要满足）。"""
+    if not is_real_mode():
+        return False
+    allowed = allowed_outlets()
+    if allowed is None:
+        return True
+    return str(outlet or "").strip().lower() in allowed
+
+
+def outlet_blocked_reason_code(outlet: str) -> str | None:
+    """单个出口被拦的机器可读原因；允许时返回 ``None``。"""
+    if not is_real_mode():
+        return blocked_reason_code()
+    if outlet_allowed(outlet):
+        return None
+    return BLOCKED_REASON_OUTLET_NOT_ALLOWED
+
+
 def blocked_reason_code() -> str | None:
     """被拦截原因的机器可读代号；允许真实调用时返回 ``None``。
 
@@ -472,15 +558,14 @@ def blocked_reason_text() -> str | None:
 
 
 def outlet_state(outlet: str) -> dict[str, Any]:
-    """单个出口的放行状态（前端逐出口渲染用）。"""
-    allowed = is_real_mode()
-    code = None if allowed else blocked_reason_code()
-    if allowed:
-        reason_text = "允许真实调用（会产生真实费用）。"
-    elif code == BLOCKED_REASON_DRY_RUN:
-        reason_text = _BLOCKED_REASON_TEXTS[BLOCKED_REASON_DRY_RUN]
-    else:
-        reason_text = _BLOCKED_REASON_TEXTS[BLOCKED_REASON_NOT_CONFIRMED]
+    """单个出口的放行状态（前端逐出口渲染用）。
+
+    判定顺序：真实模式 → 出口白名单。所以"只允许文本模型"时，图片/视频/OSS 三个出口
+    会如实显示 ``allowed=false, reason="outlet_not_allowed"``，而不是笼统地说"演练模式"。
+    """
+    code = outlet_blocked_reason_code(outlet)
+    allowed = code is None
+    reason_text = "允许真实调用（会产生真实费用）。" if allowed else _BLOCKED_REASON_TEXTS[code]
     return {
         "outlet": outlet,
         "label": outlet_label(outlet),
@@ -522,6 +607,10 @@ def mode_details() -> dict[str, Any]:
         "dotenv_real_mode": is_dotenv_real_mode(),
         "startup_warning": startup_warning(),
         "outlets": outlet_states(),
+        #: 出口白名单（``None`` = 未设置，等于不额外限制）
+        "allowed_outlets": (list(allowed_outlets()) if allowed_outlets() is not None else None),
+        "allowed_outlets_env": ALLOWED_OUTLETS_ENV,
+        "allowed_outlets_source": flag_source(ALLOWED_OUTLETS_ENV),
         "enable_steps": enable_steps(),
         "how_to_enable": how_to_enable_text(),
         "restore_steps": restore_steps(),
@@ -538,6 +627,10 @@ def assert_outbound_allowed(detail: str = "", *, outlet: str = OUTLET_LLM) -> No
     if not real_call_confirmed():
         _record("blocked_unconfirmed", detail, target=outlet)
         raise RealCallNotConfirmed(detail, outlet=outlet)
+    if not outlet_allowed(outlet):
+        # 真实模式已开，但这个出口不在白名单里：同样**一行请求都不发**
+        _record("blocked_outlet_not_allowed", detail, target=outlet)
+        raise OutletNotAllowed(detail, outlet=outlet)
     _record("allowed_real", detail, target=outlet)
 
 
@@ -635,6 +728,13 @@ _guard_state: dict[str, Any] = {"installed": False, "patched": {}}
 #: 需要更强防护的环境（CI、演示环境、多人共用的机器）显式打开；测试里按需直接调用
 #: :func:`install_network_guard`。状态接口会如实回报是否已装（``guard.network_guard``）。
 NETWORK_GUARD_ENV = "JELLYFISH_NETWORK_GUARD"
+
+#: **出口白名单**（进程环境变量或 ``backend/.env``）：``JELLYFISH_ALLOWED_OUTLETS=llm``。
+#:
+#: 存在的理由：两个开关只能"整体开/关"，表达不了"只授权文本模型、不授权出图/出视频/上传"。
+#: 验收时设成 ``llm`` 之后，图片 / 视频 / OSS 三个出口在代码层面直接被拦（409
+#: ``outlet_not_allowed``），不依赖操作者的自觉。未设置 = 不额外限制（默认行为不变）。
+ALLOWED_OUTLETS_ENV = "JELLYFISH_ALLOWED_OUTLETS"
 
 
 def network_guard_requested() -> bool:

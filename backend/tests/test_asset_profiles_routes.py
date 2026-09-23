@@ -619,3 +619,128 @@ def test_global_updates_apply_rejects_non_whitelisted_field(routed_client) -> No
     )
     assert response.status_code == 422
     assert "chapter_fields" in json.dumps(response.json()["meta"]["error"], ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# 持久化：专用表读写 / 人工修改 / 内容变化的处置
+# ---------------------------------------------------------------------------
+
+RECORDS_URL = f"{BUILD_URL}/records"
+DECISIONS_URL = f"{BUILD_URL}/decisions"
+
+
+def test_records_route_serves_database_rows(routed_client) -> None:
+    """``GET .../asset-profiles/records`` 直接读专用表：类型/名称/资料/依据/状态/来源签名。"""
+    client, _factory = routed_client
+    assert client.post(BUILD_URL, json={}).status_code == 200
+
+    response = client.get(RECORDS_URL)
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["summary"]["records_total"] == 5
+    assert data["run"] is not None and data["run"]["status"] == "generated"
+    assert data["current_source_hash"] and data["run"]["source_hash"] == data["current_source_hash"]
+    assert data["content_changed"] is False
+
+    girl = next(item for item in data["items"] if item["name"] == "姜岁欢")
+    assert girl["asset_type"] == "character"
+    assert girl["fields"]["appearance"]
+    assert girl["shot_refs"], "分镜依据必须落库"
+    assert girl["source_summary"]["script_chars"] > 0
+    assert girl["status"] == "generated"
+    assert girl["manual_overrides"] == {} and girl["user_notes"] == []
+    assert girl["has_pending_change"] is False
+    # 记录里不出现在何密钥/本机路径字段
+    blob = json.dumps(data, ensure_ascii=False)
+    for forbidden in ("api_key", "LTAI", "/Users/", "secret"):
+        assert forbidden not in blob
+
+
+def test_manual_edit_route_keeps_human_fields_separate_from_model(routed_client) -> None:
+    """人工修改写进 ``manual_overrides`` / ``user_notes``，模型侧资料一个字不动。"""
+    client, _factory = routed_client
+    assert client.post(BUILD_URL, json={}).status_code == 200
+    records = client.get(RECORDS_URL).json()["data"]["items"]
+    girl = next(item for item in records if item["name"] == "姜岁欢")
+    model_fields_before = dict(girl["fields"])
+
+    response = client.patch(
+        f"{RECORDS_URL}/{girl['id']}",
+        json={"fields": {"hairstyle": "人工指定：垂挂双环髻"}, "notes": ["导演要求改成素银簪"]},
+    )
+    assert response.status_code == 200, response.text
+    updated = response.json()["data"]
+    assert updated["manual_overrides"] == {"hairstyle": "人工指定：垂挂双环髻"}
+    assert updated["user_notes"] == ["导演要求改成素银簪"]
+    assert updated["profile_source"] == "model+manual"
+    assert updated["fields"]["hairstyle"] == "人工指定：垂挂双环髻"
+    # 模型侧那份没有被改写（只是被人工覆盖生效）
+    assert girl["profile_text"] != updated["profile_text"]
+    del model_fields_before
+
+    # 清单（GET 只读）必须立刻看到人工修改 —— 数据库是事实来源
+    after = client.get(BUILD_URL).json()["data"]
+    girl_item = next(item for item in after["user_flow"]["items"] if item["name"] == "姜岁欢")
+    assert girl_item["fields"]["hairstyle"] == "人工指定：垂挂双环髻"
+    assert girl_item["manual_edited"] is True
+
+
+def test_manual_edit_route_404_for_other_chapter(routed_client) -> None:
+    """记录不属于本章 → 404（章节隔离不能被 id 猜出来绕过）。"""
+    client, _factory = routed_client
+    assert client.post(BUILD_URL, json={}).status_code == 200
+    response = client.patch(f"{RECORDS_URL}/999999", json={"fields": {"appearance": "x"}})
+    assert response.status_code == 404
+
+
+def test_decisions_route_validates_action_and_group_key(routed_client) -> None:
+    client, _factory = routed_client
+    assert client.post(BUILD_URL, json={}).status_code == 200
+    bad_action = client.post(DECISIONS_URL, json={"decisions": [{"group_key": "character:姜岁欢", "action": "删掉"}]})
+    assert bad_action.status_code == 422
+    assert "action" in json.dumps(bad_action.json()["meta"]["error"], ensure_ascii=False)
+
+    unknown = client.post(DECISIONS_URL, json={"decisions": [{"group_key": "character:不存在", "action": "keep"}]})
+    assert unknown.status_code == 422
+    assert unknown.json()["meta"]["error"]["code"] == "unknown_group_key"
+
+
+def test_get_route_is_read_only_when_nothing_is_persisted(routed_client) -> None:
+    """GET 只读入口：库里没有清单时**一次模型调用都不发**，如实给中文引导。"""
+    client, _factory = routed_client
+    clear_chapter_profile_cache()
+    response = client.get(BUILD_URL)
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["persistence"]["generated"] is False
+    assert data["persistence"]["status"] == "not_generated"
+    assert data["user_flow"]["items"] == []
+    assert data["meta"]["llm_called"] is False
+
+    # 确认接口在没有清单时如实 409（不会拿空清单建资产）
+    confirm = client.post(CONFIRM_URL, json={})
+    assert confirm.status_code == 409
+    assert confirm.json()["meta"]["error"]["code"] == "asset_profile_not_generated"
+
+
+def test_post_route_without_refresh_reuses_persisted_list(routed_client, monkeypatch) -> None:
+    """``refresh=false``（默认）再次 POST：读库返回，**不再调用模型**。"""
+    client, _factory = routed_client
+    from app.services.studio import chapter_asset_profiles as service
+
+    assert client.post(BUILD_URL, json={}).status_code == 200
+    clear_chapter_profile_cache()
+
+    async def _explode(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("库里已有清单时不得再调用模型")
+
+    monkeypatch.setattr(service, "call_text_llm", _explode)
+    monkeypatch.setattr(service, "_make_target_caller", lambda _target: _explode)
+
+    again = client.post(BUILD_URL, json={"extra_instructions": ""})
+    assert again.status_code == 200, again.text
+    data = again.json()["data"]
+    assert data["persistence"]["source"] == "database"
+    assert data["persistence"]["llm_called"] is False
+    assert data["persistence"]["generated_by_llm"] is True
+    assert data["persistence"]["content_changed"] is False

@@ -373,13 +373,16 @@ async def load_asset_profile_enrichments(
 
     来源标签（供页面「生成依据」如实显示这段资料是从哪来的）：
 
-    - ``chapter_overlay``：本章按项目/章节隔离保存的资料（全局资产的唯一章节载体）；
-    - ``chapter_overlay+candidate_profile``：overlay 与候选结构化资料都有；
+    - ``chapter_record``：**专用表** ``chapter_asset_profiles`` 里按项目 + 章节持久化保存的
+      本章资料（数据库是事实来源：重启不丢、重新提取候选也不丢）；
+    - ``chapter_overlay``：旧结构（候选 ``payload.chapter_overlay``，迁移前的历史数据）；
+    - ``chapter_overlay+candidate_profile``：旧结构里 overlay 与候选结构化资料都有；
     - ``candidate_profile``：候选 payload 里的结构化资料；
     - ``script_window``：只从剧本摘录/章节原文取的上下文窗口（最弱的兜底）。
 
-    数据来源（都是既有列，不新增字段）：
+    数据来源（先读专用表，再回退既有列）：
 
+    - ``chapter_asset_profiles``（**优先**）：结构化字段、出场镜头、剧本依据、人工修改；
     - ``shot_extracted_candidates.payload.asset_profile``（结构化字段，dict）
       → 由 :mod:`app.services.studio.asset_profiles` 的字段表渲染成 ``字段标签：值``；
     - ``payload.shot_refs`` → ``出场镜头 #1、#3``（"哪一段原文、哪个镜头"的直接体现）；
@@ -431,6 +434,27 @@ async def load_asset_profile_enrichments(
     }
 
     result: dict[tuple[str, str], tuple[str, str]] = {}
+
+    # ⓪ **专用表优先**（数据库是事实来源）：章节资产资料按项目 + 章节持久化保存，
+    #    后端重启、重新提取候选都不会让它消失 —— 这是"图片提示词拿得到剧本资料"的主路径。
+    #    旧结构（候选 payload）留作兜底，见下面 ① ②。
+    from app.services.studio.chapter_asset_record_store import list_records_for_scope
+
+    for record in await list_records_for_scope(db, project_id=project_id, chapter_id=chapter_id):
+        entity_type = normalize_asset_type(record.asset_type)
+        if entity_type is None:
+            continue
+        key = (entity_type, record.name_key or normalize_name(record.name))
+        if key in result:
+            continue
+        text = _enrichment_from_record(
+            record,
+            shots_by_id=shots_by_id,
+            chapter_text_by_id=chapter_text_by_id,
+        )
+        if text:
+            result[key] = (text, "chapter_record")
+
     for row in candidate_rows:
         entity_type = normalize_asset_type(getattr(row.candidate_type, "value", row.candidate_type))
         name = str(row.candidate_name or "").strip()
@@ -532,6 +556,89 @@ async def load_asset_profile_enrichments(
             result[key] = (_clip(merged, MAX_PROFILE_CHARS), source)
 
     return result
+
+
+def _enrichment_from_record(
+    record: Any,
+    *,
+    shots_by_id: dict[str, Any],
+    chapter_text_by_id: dict[str, str],
+) -> str:
+    """把一条**持久化章节资料行**渲染成资产画像补充文本（与旧口径同形）。
+
+    组成：结构化资料（含本章特有字段与剧情向字段）＋「本章剧情身份」＋「出场镜头」
+    ＋「剧本依据」。空话（``is_vague_text``）一律不采用，交给下面的兜底路径。
+
+    为什么单独一个函数：这段文本既进图片提示词，也是页面「生成依据」里"资料来源"
+    那一行的依据，两处必须完全一致，所以只允许有一个实现。
+    """
+    from app.services.studio.asset_profiles import (
+        is_vague_text,
+        normalize_asset_type,
+        render_profile_text,
+    )
+    from app.services.studio.chapter_asset_record_store import effective_profile
+
+    entity_type = normalize_asset_type(record.asset_type)
+    if entity_type is None:
+        return ""
+    asset_type = entity_type
+    parts: list[str] = []
+    rendered = render_profile_text(
+        asset_type,
+        effective_profile(record),
+        include_evidence_fields=True,
+    )
+    if rendered and not is_vague_text(rendered):
+        parts.append(rendered)
+    identity = str(getattr(record, "plot_identity", "") or "").strip()
+    if identity:
+        parts.append(f"本章剧情身份：{identity}")
+
+    labels: list[str] = []
+    excerpts: list[str] = []
+    for ref in list(getattr(record, "shot_refs", None) or []):
+        if not isinstance(ref, dict):
+            continue
+        index = ref.get("shot_index")
+        if index:
+            labels.append(f"#{index}")
+        excerpt = str(ref.get("script_excerpt") or "").strip()
+        if excerpt and excerpt not in excerpts:
+            excerpts.append(excerpt)
+    if not labels:
+        target = normalize_name(record.name)
+        for shot in shots_by_id.values():
+            haystack = normalize_name(getattr(shot, "script_excerpt", "") or "")
+            if haystack and target and target in haystack:
+                labels.append(f"#{getattr(shot, 'index', 0)}")
+                excerpt = str(getattr(shot, "script_excerpt", "") or "").strip()
+                if excerpt and excerpt not in excerpts:
+                    excerpts.append(excerpt)
+    if labels:
+        parts.append("出场镜头：" + "、".join(labels[:12]))
+
+    for entry in list(getattr(record, "evidence", None) or []):
+        snippet = ""
+        if isinstance(entry, dict):
+            snippet = str(entry.get("snippet") or "").strip()
+        elif isinstance(entry, str):
+            snippet = entry.strip()
+        if snippet and snippet not in excerpts:
+            excerpts.append(snippet)
+    if not excerpts:
+        for text in chapter_text_by_id.values():
+            window = _script_window(text, str(record.name or ""))
+            if window:
+                excerpts.append(window)
+                break
+    if excerpts:
+        parts.append("剧本依据：" + _clip("；".join(excerpts[:3]), SCRIPT_WINDOW_CHARS))
+
+    merged = "；".join(part for part in parts if part)
+    if not merged or is_vague_text(merged):
+        return ""
+    return _clip(merged, MAX_PROFILE_CHARS)
 
 
 def _script_window(text: str, needle: str) -> str:

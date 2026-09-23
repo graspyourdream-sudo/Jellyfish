@@ -299,3 +299,90 @@ def test_blocked_envelope_shape() -> None:
     assert payload["outlet_label"] == "出图"
     assert payload["guard"]["dry_run"] is True
     assert "api_key" not in str(payload)
+
+
+# --------------------------------------------------------------------------
+# 出口白名单（JELLYFISH_ALLOWED_OUTLETS）：按出口授权，而不是只有"整体开关"
+# --------------------------------------------------------------------------
+
+
+def test_allowed_outlets_defaults_to_no_extra_restriction() -> None:
+    """未设置白名单 → 行为与加这个功能之前完全一致（真实模式下四个出口都放行）。"""
+    assert dry_run.allowed_outlets() is None
+    assert dry_run.outlet_allowed(dry_run.OUTLET_LLM) is False  # 演练模式下仍然全禁
+
+
+def test_allowed_outlets_restricts_image_video_oss_but_keeps_llm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``=llm``：文本模型放行，出图 / 出视频 / 上传三个出口**在代码层面**被拦。"""
+    monkeypatch.setenv(dry_run.DRY_RUN_ENV, "0")
+    monkeypatch.setenv(dry_run.CONFIRM_ENV, "1")
+    monkeypatch.setenv(dry_run.ALLOWED_OUTLETS_ENV, "llm")
+
+    assert dry_run.is_real_mode() is True
+    assert dry_run.allowed_outlets() == ("llm",)
+    states = {item["outlet"]: item for item in dry_run.outlet_states()}
+    assert states[dry_run.OUTLET_LLM]["allowed"] is True
+    for outlet in (dry_run.OUTLET_IMAGE, dry_run.OUTLET_VIDEO, dry_run.OUTLET_OSS):
+        assert states[outlet]["allowed"] is False
+        assert states[outlet]["reason"] == dry_run.BLOCKED_REASON_OUTLET_NOT_ALLOWED
+        assert "白名单" in states[outlet]["reason_text"]
+
+    # 真发起时抛的是"出口不在白名单"，不是"演练模式"
+    with pytest.raises(dry_run.OutletNotAllowed) as caught:
+        dry_run.assert_outbound_allowed("上传验收图", outlet=dry_run.OUTLET_OSS)
+    assert caught.value.reason_code == dry_run.BLOCKED_REASON_OUTLET_NOT_ALLOWED
+    assert caught.value.outlet == dry_run.OUTLET_OSS
+    payload = guard.blocked_payload(caught.value)
+    assert payload["reason"] == dry_run.BLOCKED_REASON_OUTLET_NOT_ALLOWED
+    assert payload["paid_call_made"] is False
+    assert payload["reason_text"] and "白名单" in payload["reason_text"]
+    # 文本模型出口仍然畅通（真实模式 + 在白名单里）
+    dry_run.assert_outbound_allowed("整章剧本分析", outlet=dry_run.OUTLET_LLM)
+
+
+def test_allowed_outlets_explicit_none_blocks_every_outlet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """显式写 ``none`` = 四个出口全禁（"临时全停"用；空值等同未设置，与守卫其余口径一致）。"""
+    monkeypatch.setenv(dry_run.DRY_RUN_ENV, "0")
+    monkeypatch.setenv(dry_run.CONFIRM_ENV, "1")
+    monkeypatch.setenv(dry_run.ALLOWED_OUTLETS_ENV, "none")
+
+    assert dry_run.allowed_outlets() == ()
+    for outlet in dry_run.OUTLETS:
+        assert dry_run.outlet_allowed(outlet) is False
+
+    # 空值 = 未设置（fail-safe，不会误放开，也不会误全禁）
+    monkeypatch.setenv(dry_run.ALLOWED_OUTLETS_ENV, "")
+    assert dry_run.allowed_outlets() is None
+
+
+def test_allowed_outlets_accepts_chinese_comma_and_spaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    """白名单写法容错：中文逗号、空格、大小写都不影响判定（读不懂则按未设置处理）。"""
+    monkeypatch.setenv(dry_run.DRY_RUN_ENV, "0")
+    monkeypatch.setenv(dry_run.CONFIRM_ENV, "1")
+    monkeypatch.setenv(dry_run.ALLOWED_OUTLETS_ENV, " LLM，image ")
+
+    assert dry_run.allowed_outlets() == ("llm", "image")
+    assert dry_run.outlet_allowed("IMAGE") is True
+    assert dry_run.outlet_allowed(dry_run.OUTLET_VIDEO) is False
+
+
+def test_mode_details_reports_allowed_outlets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/orchestration/status 必须能如实回报"按出口授权"的状态（验收时靠它取证）。"""
+    monkeypatch.setenv(dry_run.ALLOWED_OUTLETS_ENV, "llm")
+    details = dry_run.mode_details()
+    assert details["allowed_outlets"] == ["llm"]
+    assert details["allowed_outlets_env"] == dry_run.ALLOWED_OUTLETS_ENV
+    assert details["allowed_outlets_source"] == dry_run.SOURCE_ENV
+    assert [item["outlet"] for item in details["outlets"]] == list(dry_run.OUTLETS)
+
+
+def test_outlet_not_allowed_is_still_caught_as_blocked_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """新异常必须落在既有"被拦异常"判定里，否则既有路由会把它当 500。"""
+    monkeypatch.setenv(dry_run.DRY_RUN_ENV, "0")
+    monkeypatch.setenv(dry_run.CONFIRM_ENV, "1")
+    monkeypatch.setenv(dry_run.ALLOWED_OUTLETS_ENV, "llm")
+    exc = dry_run.OutletNotAllowed("上传", outlet=dry_run.OUTLET_OSS)
+    assert guard.is_blocked_exception(exc) is True
+    assert isinstance(exc, dry_run.RealCallNotConfirmed)

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.utils import apply_keyword_filter, apply_order, error_envelope, paginate
 from app.dependencies import get_db
-from app.models.studio import Chapter, Project, Shot
+from app.models.studio import Chapter, ChapterAssetProfile, Project, Shot
 from app.schemas.common import ApiResponse, PaginatedData, created_response, empty_response, paginated_response, success_response
 from app.services.common import (
     create_and_refresh,
@@ -28,7 +28,15 @@ from app.schemas.studio.projects import ChapterCreate, ChapterRead, ChapterUpdat
 from app.services.studio.chapter_asset_candidates import build_chapter_asset_candidates
 from app.services.studio.asset_overlays import load_chapter_overlays
 from app.services.studio.chapter_asset_profile_confirm import confirm_chapter_asset_profiles
-from app.services.studio.chapter_asset_profiles import build_chapter_asset_profiles
+from app.services.studio.chapter_asset_profiles import (
+    build_chapter_asset_profiles,
+    load_chapter_asset_records,
+)
+from app.services.studio.chapter_asset_record_store import (
+    apply_manual_edit,
+    record_to_read,
+    resolve_pending_changes,
+)
 from app.services.studio.global_asset_updates import apply_global_updates, preview_global_updates
 
 router = APIRouter()
@@ -40,6 +48,38 @@ class ChapterAssetProfileBuildRequest(BaseModel):
     """结构化资产清单的生成请求（全部可空：默认只用本章剧本 + 分镜 + 模型配置）。"""
 
     extra_instructions: str = Field("", description="附加要求（可选；会进提示词的「附加要求」段）")
+    refresh: bool = Field(
+        False,
+        description=(
+            "是否**强制重新分析**。默认 false：库里有这份清单就直接读库返回（不调用模型、不花钱）；"
+            "true 才会重新调用文本模型，并把新结果逐条对账入库"
+            "（已确认/人工改过的行只记待决定，不覆盖）。"
+        ),
+    )
+
+
+class ChapterAssetProfileEditRequest(BaseModel):
+    """人工修改 / 用户补充（写进 ``manual_overrides`` 与 ``user_notes``，模型结果永不覆盖）。"""
+
+    fields: dict[str, Any] = Field(
+        default_factory=dict,
+        description="按字段键覆盖的结构化资料（键见清单的 field_labels；只覆盖给出的键）",
+    )
+    notes: list[str] = Field(default_factory=list, description="用户补充条目（追加，自动去重）")
+    aliases: list[str] = Field(default_factory=list, description="补充别名（并入现有别名集合）")
+
+
+class ChapterAssetProfileDecision(BaseModel):
+    """单条"内容已变化"的处置决定。"""
+
+    group_key: str = Field(..., description="资料行的 group_key（格式 类型:归一化名称）")
+    action: str = Field(..., description="overwrite（覆盖）/ merge（合并）/ keep（保留）")
+
+
+class ChapterAssetProfileDecisionsRequest(BaseModel):
+    """批量处置"内容已变化"的资料行（对应用户点名的：由用户决定覆盖、合并或保留）。"""
+
+    decisions: list[ChapterAssetProfileDecision] = Field(default_factory=list)
 
 
 class ChapterAssetProfileSelection(BaseModel):
@@ -238,11 +278,19 @@ async def post_chapter_asset_profiles(
       场景：空间结构/陈设/光线色调… 道具：材质/颜色/形状/尺寸… 服装：款式/颜色/材质/配饰…），
       并保留"哪一段原文、哪个镜头"的依据。
 
-    ``user_flow`` 是用户主流程要看的（一项资产一行，含资料、缺什么、出场镜头、
-    建议动作、要不要人工处理）；``technical_detail`` 是默认收起的
-    （原始候选 / 聚合组 / 内部匹配状态 / 别名合并过程 / 被丢弃条目 / LLM 元信息）。
+    **数据库是事实来源**（2026-09 持久化改造）：
 
-    **本接口只读 + 只预览**：不建资产、不写库、不出图；确认请调用同章的
+    - ``refresh=false``（默认）且库里已有这份清单 → **直接读库返回**，不调用任何模型
+      （后端重启后同样如此），返回值与"刚生成时"逐字段同形；剧本/分镜变了会带
+      ``persistence.content_changed=true`` 与中文提示「内容已变化，建议重新分析」，
+      **不覆盖任何资料**；
+    - ``refresh=true`` → 重新分析，并把结果逐条对账入库：未确认且未人工改过的行更新；
+      已确认 / 人工改过的行只在 ``pending_*`` 记录新结果并标 ``pending_change``，
+      等用户决定覆盖 / 合并 / 保留；本次没再提到的行**不删除**；
+    - ``user_flow`` 是用户主流程要看的（一项资产一行，含资料、缺什么、出场镜头、
+      建议动作、要不要人工处理）；``technical_detail`` 是默认收起的。
+
+    **本接口不建资产、不出图**；确认请调用同章的
     ``POST /{chapter_id}/asset-profiles/confirm``。
     """
     try:
@@ -250,6 +298,7 @@ async def post_chapter_asset_profiles(
             db,
             chapter_id=chapter_id,
             extra_instructions=(body.extra_instructions if body else ""),
+            refresh=bool(body.refresh) if body else False,
         )
     except HTTPException as exc:
         # 结构化明细（code / fix / issues）放进 meta.error，而不是被全局处理器压成一行字符串
@@ -260,15 +309,22 @@ async def post_chapter_asset_profiles(
 @router.get(
     "/{chapter_id}/asset-profiles",
     response_model=ApiResponse[dict[str, Any]],
-    summary="结构化资产清单（GET 便捷入口：与你上次 POST 的请求等价，不带附加要求）",
+    summary="结构化资产清单（GET 只读入口：只读库，绝不调用模型）",
 )
 async def get_chapter_asset_profiles(
     chapter_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[dict[str, Any]]:
-    """GET 便捷入口（便于浏览器/调试直接打开）。语义与 POST 完全一致。"""
+    """**只读**入口：把库里保存的清单读出来，一次模型调用都不发。
+
+    与 POST 的区别（这是刻意的不对称）：
+
+    - GET 永远不花钱：库里没有这份清单时返回空清单 +
+      ``persistence.status="not_generated"`` 的中文引导，而不是偷偷生成；
+    - 要生成（或强制重新分析）请用 ``POST`` 且带 ``refresh=true``。
+    """
     try:
-        data = await build_chapter_asset_profiles(db, chapter_id=chapter_id)
+        data = await build_chapter_asset_profiles(db, chapter_id=chapter_id, allow_generate=False)
     except HTTPException as exc:
         return error_envelope(code=exc.status_code, detail=exc.detail)
     return success_response(data)
@@ -310,6 +366,97 @@ async def post_chapter_asset_profiles_confirm(
             confirm_conflict=payload.confirm_conflict,
             extra_instructions=payload.extra_instructions,
         )
+    except HTTPException as exc:
+        return error_envelope(code=exc.status_code, detail=exc.detail)
+    return success_response(data)
+
+
+@router.get(
+    "/{chapter_id}/asset-profiles/records",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="本章持久化资产资料（数据库是事实来源的读入口：重启不丢、重新提取不丢）",
+)
+async def get_chapter_asset_profile_records(
+    chapter_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[dict[str, Any]]:
+    """直接读**专用表**里本章的资产资料（`chapter_asset_profiles`）。
+
+    每条记录都带：资产类型 / 规范名称 / 别名 / 结构化资料（**已合并人工修改**）/
+    人工修改与用户补充（分开存） / 剧本片段与分镜依据 / 已关联的真实资产 ID /
+    剧本来源签名（``source_hash``）与来源摘要 / 状态与时间。
+
+    ``summary.pending_change`` 不为 0 时，说明有行的资料"内容已变化"，
+    请用 ``POST .../asset-profiles/decisions`` 决定覆盖 / 合并 / 保留。
+    """
+    try:
+        data = await load_chapter_asset_records(db, chapter_id=chapter_id)
+    except HTTPException as exc:
+        return error_envelope(code=exc.status_code, detail=exc.detail)
+    return success_response(data)
+
+
+@router.patch(
+    "/{chapter_id}/asset-profiles/records/{record_id}",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="人工修改本章资产资料（写进 manual_overrides / user_notes，模型结果永不覆盖）",
+)
+async def patch_chapter_asset_profile_record(
+    chapter_id: str,
+    record_id: int,
+    body: ChapterAssetProfileEditRequest,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[dict[str, Any]]:
+    """人工修改 / 用户补充（这是"重新提取不丢人工修改"的写入端）。
+
+    - 给出的字段写进 ``manual_overrides``（字段级覆盖），**不动**模型侧的 ``profile``；
+    - ``notes`` 追加进 ``user_notes``；``aliases`` 并入别名集合；
+    - 写入后这一行即视为**受保护**：后续任何一次重新分析都不会覆盖它，
+      只会把新结果记到 ``pending_*`` 等用户决定。
+    """
+    record = await db.get(ChapterAssetProfile, record_id)
+    if record is None or str(record.chapter_id) != chapter_id:
+        return error_envelope(code=404, detail=entity_not_found("ChapterAssetProfile"))
+    try:
+        updated = await apply_manual_edit(
+            db,
+            record=record,
+            fields=body.fields,
+            notes=body.notes,
+            aliases=body.aliases,
+        )
+    except HTTPException as exc:
+        return error_envelope(code=exc.status_code, detail=exc.detail)
+    # 事务由 get_db 依赖在请求结束时统一提交；刷新一次再组装响应，
+    # 免得 onupdate 列在 UPDATE 之后处于"过期"状态（async 会话里会抛 MissingGreenlet）。
+    await db.refresh(updated)
+    data = record_to_read(updated)
+    data["note"] = (
+        "人工修改已保存在 manual_overrides / user_notes：模型结果不会覆盖它们；"
+        "本接口不写全局资产的通用资料、不写 image_prompts、不碰图片与定版图。"
+    )
+    return success_response(data)
+
+
+@router.post(
+    "/{chapter_id}/asset-profiles/decisions",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="处置「内容已变化」的资产资料：覆盖 / 合并 / 保留（用户显式决定）",
+)
+async def post_chapter_asset_profile_decisions(
+    chapter_id: str,
+    body: ChapterAssetProfileDecisionsRequest,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[dict[str, Any]]:
+    """剧本/分镜变化后重新分析，**受保护行**（已确认或人工改过）不自动覆盖；
+    用户在这里显式决定怎么处置：
+
+    - ``overwrite``（覆盖）：用新分析结果替换模型侧资料；**人工修改与用户补充保留**；
+    - ``merge``（合并）：以现有资料为准，只补上还没有的字段，依据取并集；
+    - ``keep``（保留）：丢弃本次新结果，现有资料一个字都不动。
+    """
+    try:
+        data = await resolve_pending_changes(db, chapter_id=chapter_id, decisions=[item.model_dump() for item in body.decisions])
     except HTTPException as exc:
         return error_envelope(code=exc.status_code, detail=exc.detail)
     return success_response(data)

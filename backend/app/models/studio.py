@@ -15,6 +15,7 @@ from app.models.studio_asset_images import (
     PropImage,
     SceneImage,
 )
+from app.models.studio_asset_profiles import ChapterAssetProfile, ChapterAssetProfileRun
 from app.models.studio_prompts_files_timeline import FileItem, PromptTemplate, TimelineClip
 from app.models.studio_file_usages import FileUsage
 from app.models.studio_projects import (
@@ -85,6 +86,8 @@ __all__ = [
     # Models
     "Project",
     "Chapter",
+    "ChapterAssetProfile",
+    "ChapterAssetProfileRun",
     "Scene",
     "Prop",
     "Costume",

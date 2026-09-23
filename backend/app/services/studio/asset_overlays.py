@@ -10,25 +10,29 @@
   **不得静默覆盖全局资产的通用资料或图片提示词**；
 - 确实要更新全局资产时，必须**明确展示差异 + 由用户显式确认**才写回。
 
-存储位置（**零数据库结构改动**）
+存储位置（2026-09 持久化改造后）
 ================================
 
-三张 ``project_*_links`` 表只有 ``project_id / chapter_id / shot_id / <asset>_id``，
-**没有可放文本的列**；角色也没有链接表。四类资产唯一**天然按章节隔离**、
-且**已有 JSON 列**的地方是 ``shot_extracted_candidates``：
+改造前的载体是"该资产在本章出场的那几个镜头的候选行"的 ``payload.chapter_overlay``，
+代价是 ``/script-processing/extract`` 一重跑（``replace_for_shot`` 先删后建）就把
+人工确认过的章节资料一起清空 —— 正式使用不可接受。
 
-- ``shot_id`` → ``shots.chapter_id`` → 章节（隔离维度）；
-- ``payload``（既有 JSON 列）→ 放 ``chapter_overlay``。
+现在章节资料落在**专用表** ``chapter_asset_profiles``
+（见 :mod:`app.services.studio.chapter_asset_record_store`）：
 
-所以本章资料以"**该资产在本章出场的那几个镜头上**的候选行"为载体落库：
+- 按 ``project_id`` + ``chapter_id`` 隔离，与镜头/候选的增删**无关**；
+- 后端重启后直接读，不需要重新调用模型；
+- 已确认 / 人工修改过的行在重新分析时**不会被覆盖**（新结果进 ``pending_*`` 等用户决定）。
 
-- 一个资产在本章出场 k 个镜头 → 在这些行上写同一份 overlay（这是它"出场依据"的自然形态）；
-- 一个镜头**都没有**提到它 → **不伪造**：overlay 只留在确认响应里并如实回报
-  ``overlay_persisted=false``（"本章没有镜头提到它，无法落出场依据"）。
+本模块保留的价值：
 
-已知取舍（如实记录）：``/script-processing/extract`` 重跑时会
-``replace_for_shot`` **删掉该镜头的全部候选再重建**，overlay 行会随之消失 ——
-此时重新确认一次本章清单即可重建。这是"不加列"换来的代价，需要加持久列时另行申请。
+1. :func:`load_chapter_overlays` —— 章节隔离层（overlay）的**统一读入口**：
+   优先读专用表，表里没有才回退旧结构 ``payload.chapter_overlay``（迁移前的章节仍可读）；
+2. :func:`build_overlay_from_item` / :func:`overlay_to_profile_text` —— "本章字段 vs
+   通用字段"的切分口径（全局资产只写通用资料，全局更新也只提议通用字段），
+   这两个口径**没有**因为换存储位置而改变；
+3. :func:`persist_overlay` —— 旧结构的写入路径（仅为兼容既有测试与旧数据保留，
+   主流程已不再调用；主流程写的是专用表）。
 """
 
 from __future__ import annotations
@@ -39,7 +43,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.studio import Chapter, Shot, ShotExtractedCandidate
+from app.models.studio import Shot, ShotExtractedCandidate
 from app.models.types import ShotCandidateStatus
 from app.services.studio.asset_profiles import (
     normalize_asset_type,
@@ -177,6 +181,16 @@ def _temporary_notes_for(asset_type: str, fields: dict[str, str]) -> list[str]:
         if value:
             notes.append(value)
     return notes
+
+
+def plot_identity_for_fields(asset_type: str, fields: Any) -> str:
+    """从（本章范围的）字段里提炼"剧情身份"（公开入口，供持久化层复用同一口径）。"""
+    return _plot_identity_for(str(asset_type or ""), normalize_profile(asset_type, fields or {}))
+
+
+def temporary_notes_for_fields(asset_type: str, fields: Any) -> list[str]:
+    """本章特有的临时补充（时间天气/状态/场合…）；公开入口，口径与 overlay 一致。"""
+    return _temporary_notes_for(str(asset_type or ""), normalize_profile(asset_type, fields or {}))
 
 
 def build_overlay_from_item(
@@ -318,7 +332,33 @@ async def load_chapter_overlays(
     *,
     chapter_id: str,
 ) -> list[dict[str, Any]]:
-    """读回本章范围资料（按资产去重；同一资产在多个镜头上只返回一份）。"""
+    """读回本章范围资料（按资产去重；同一资产在多个镜头上只返回一份）。
+
+    **数据库是事实来源**（2026-09 持久化改造后）：
+
+    1. 先读专用表 ``chapter_asset_profiles``（按项目 + 章节隔离，重启不丢、重新提取不丢）；
+    2. 表里一行都没有时，才回退到**旧结构**（候选 ``payload.chapter_overlay``）——
+       这样"改造前已经确认过的章节"在迁移执行之前也读得到，不会出现空白。
+
+    输出形状与改造前完全一致，老调用方（``global_asset_updates`` / 页面技术详情）不用改。
+    """
+    from app.services.studio.chapter_asset_record_store import (
+        list_chapter_records,
+        record_to_overlay,
+    )
+
+    records = await list_chapter_records(db, chapter_id=chapter_id)
+    if records:
+        return [record_to_overlay(record) for record in records]
+    return await _load_legacy_payload_overlays(db, chapter_id=chapter_id)
+
+
+async def _load_legacy_payload_overlays(
+    db: AsyncSession,
+    *,
+    chapter_id: str,
+) -> list[dict[str, Any]]:
+    """旧结构兜底读：候选行 ``payload.chapter_overlay``（迁移完成前仍可读）。"""
     rows = (
         (
             await db.execute(
@@ -352,6 +392,7 @@ async def load_chapter_overlays(
             "linked_entity_id": payload.get("linked_entity_id") or row.linked_entity_id,
             "candidate_status": str(getattr(row.candidate_status, "value", row.candidate_status)),
             "shot_id": str(row.shot_id),
+            "legacy_payload": True,
         }
     return list(collected.values())
 
@@ -418,5 +459,7 @@ __all__ = [
     "load_chapter_overlays",
     "overlay_to_profile_text",
     "persist_overlay",
+    "plot_identity_for_fields",
     "temporal_field_keys",
+    "temporary_notes_for_fields",
 ]

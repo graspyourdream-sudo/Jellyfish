@@ -34,6 +34,7 @@ from app.services.studio.asset_overlays import (
 from app.services.studio.chapter_asset_profile_cache import clear_chapter_profile_cache
 from app.services.studio.chapter_asset_profile_confirm import confirm_chapter_asset_profiles
 from app.services.studio.chapter_asset_profiles import build_chapter_asset_profiles
+from app.services.studio.chapter_asset_record_store import list_chapter_records
 from app.services.studio.global_asset_updates import (
     GLOBAL_UPDATE_CONFIRM_FIELD,
     apply_global_updates,
@@ -187,8 +188,11 @@ async def test_global_scene_is_not_overwritten_and_overlay_is_persisted() -> Non
         assert entry["chapter_scoped"] is True
         assert entry["description_written"] is False
         assert "global_description" in entry["preserved"]
-        assert entry["chapter_overlay"]["persisted"] is True
-        assert entry["chapter_overlay"]["is_global_asset"] is True
+        # 章节资料现在落在**专用表**（chapter_asset_profiles）；确认结果里回带的是
+        # chapter_record（已关联的真实资产 ID + 记录状态），语义与改造前的 overlay 一致。
+        assert entry["chapter_record"]["bound"] is True
+        assert entry["chapter_record"]["is_global_asset"] is True
+        assert entry["chapter_record"]["asset_id"] == "scene-global"
 
         overlays = await load_chapter_overlays(db, chapter_id="chap-a")
         scene_overlay = next(item for item in overlays if item["name"] == "听雨轩")
@@ -322,7 +326,7 @@ async def test_image_prompt_profile_is_scoped_to_the_requested_chapter() -> None
     # 全局通用资料仍然在（它属于全局资产，不是被覆盖掉的那种）
     assert "临水木构小轩" in scene_a.profile or "临水木构小轩" in scene_b.profile
     assert "外观信息不足" not in scene_a.profile
-    assert "candidate_profile" in scene_a.profile_source  # 如实标注来源
+    assert "chapter_record" in scene_a.profile_source  # 如实标注来源（专用表里的本章资料）
 
 
 @pytest.mark.asyncio
@@ -335,18 +339,25 @@ async def test_overlay_row_is_linked_so_readiness_does_not_regress() -> None:
         names = {item["name"] for item in readiness["items"]}
         assert {"姜岁欢", "听雨轩", "镶银匕首"} <= names
 
-        # 带 overlay 的候选行必须是 linked（否则会把资产推回"待确认"，
-        # 让资产准备页出现假的 pending 状态）
+        # 带章节资料的候选行必须是 linked（否则会把资产推回"待确认"，
+        # 让资产准备页出现假的 pending 状态）。章节资料本身现在存在**专用表**里，
+        # 候选行上留的是证据（asset_profile / shot_refs / evidence）。
         rows = (await db.execute(ShotExtractedCandidate.__table__.select())).all()
-        overlay_rows = [
+        evidence_rows = [
             row
             for row in rows
             if str(row.shot_id) == "shot-a1"
             and isinstance(row.payload, dict)
-            and row.payload.get("chapter_overlay")
+            and row.payload.get("asset_profile")
         ]
-        assert overlay_rows, "确认后本章候选行上应当有 chapter_overlay"
-        assert all(str(row.candidate_status) == "linked" for row in overlay_rows)
+        assert evidence_rows, "确认后本章候选行上应当留有结构化资料证据（asset_profile）"
+        assert all(str(row.candidate_status) == "linked" for row in evidence_rows)
+
+        # 章节资料落在专用表：按项目 + 章节隔离，重启不丢、重新提取候选也不丢
+        records = await list_chapter_records(db, chapter_id="chap-a")
+        assert records, "确认后 chapter_asset_profiles 里应当有本章资料行"
+        assert all(str(record.status) == "confirmed" for record in records)
+        assert all(str(record.asset_id or "") for record in records)
 
         # 第 2 章的候选仍未处理 → 项目级 pending 是既有正确行为，不该被 overlay 影响成"已确认"
         assert any(item["has_pending_candidate"] for item in readiness["items"])
@@ -394,10 +405,10 @@ async def test_overlay_falls_back_to_chapter_only_scope_without_fabricating_evid
     await engine.dispose()
 
     mirror = next(item for item in result["results"] if item["name"] == "铜镜")
-    overlay = mirror["chapter_overlay"]
-    assert overlay["persisted"] is True
-    assert overlay["evidence_scope"] == "chapter_only"
-    assert "不伪造出场依据" in overlay["reason"]
+    overlay = mirror["chapter_record"]
+    assert overlay["bound"] is True
+    assert persisted["铜镜"]["evidence_scope"] == "chapter_only"
+    assert overlay["status"] == "confirmed"  # 确认后行状态如实回写
     assert persisted["铜镜"]["shot_refs"] == [], "没有镜头提到它 → 出场依据必须如实留空"
     assert persisted["铜镜"]["chapter_fields"]["state"] == "碎成两半"
 

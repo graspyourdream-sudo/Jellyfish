@@ -147,6 +147,15 @@ export type GenerationBasis = {
 
 /** 结构化资料来源码 → 用户语言（后端 `profile_source` / `structured_source` 的取值）。 */
 export const STRUCTURED_SOURCE_LABEL: Record<string, string> = {
+  // 2026-09 起，章节资料落在**专用表**（按项目 + 章节持久化，重启不丢、重新提取也不丢）；
+  // 后端据此回 `chapter_record` 这一档来源码，页面必须说人话，不能把内部码直接摊给用户看。
+  chapter_record: '本章资产资料（按项目 + 章节持久化保存，重启与重新提取都不会丢）',
+  'asset_description+chapter_record': '资产描述（全局）+ 本章资产资料（按项目 + 章节持久化保存）',
+  chapter_overlay: '本章资产资料（章节隔离层，含剧本片段与出场镜头）',
+  'asset_description+chapter_overlay': '资产描述（全局）+ 本章资产资料（章节隔离层）',
+  'chapter_overlay+candidate_profile': '本章资产资料 + 候选结构化资料（都按项目 + 章节保存）',
+  'asset_description+chapter_overlay+candidate_profile':
+    '资产描述（全局）+ 本章资产资料 + 候选结构化资料',
   asset_description: '资产描述（全局资产库里的通用资料）',
   candidate_profile: '候选结构化资料（按项目+章节保存，含剧本片段与出场镜头）',
   'asset_description+candidate_profile': '资产描述（全局）+ 候选结构化资料（本章，含剧本片段与出场镜头）',
@@ -154,6 +163,7 @@ export const STRUCTURED_SOURCE_LABEL: Record<string, string> = {
   none: '没有任何资料（只剩空话兜底）',
   script_excerpt: '剧本片段',
   shot_refs: '分镜依据',
+  script_window: '剧本上下文窗口（最弱兜底：只从原文截一段，没有结构化资料）',
 }
 
 /**
@@ -921,11 +931,23 @@ export function buildBasisItems(basis: GenerationBasis): BasisItem[] {
   })
 }
 
-/** 结构化资料来源码 → 用户语言（认不出来的码按原样显示，至少不编造）。 */
+/**
+ * 结构化资料来源码 → 用户语言。
+ *
+ * 认不出来的码分两种处理（都**不编造**来源内容）：
+ * - 像内部标识（全小写 + 下划线，例如后端新加的 `xxx_yyy`）→ 给一句中文兜底，
+ *   并把原始码留给技术详情去查，**不把内部标识摊在用户主流程里**；
+ * - 其余（例如 `资产描述` 这种后端直接给的中文）→ 原样显示。
+ */
 export function describeStructuredSource(code: string): string {
   const key = String(code ?? '').trim()
   if (!key) return ''
-  return STRUCTURED_SOURCE_LABEL[key] ?? key
+  const known = STRUCTURED_SOURCE_LABEL[key]
+  if (known) return known
+  if (/^[a-z][a-z0-9_+]*$/.test(key)) {
+    return '本章资产资料（后端未在本页登记这种来源码，代码见技术详情）'
+  }
+  return key
 }
 
 /** 收起状态下标题右侧那一行摘要（未提供时就是「本次未提供生成依据」）。 */

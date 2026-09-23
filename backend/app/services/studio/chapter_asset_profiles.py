@@ -61,6 +61,7 @@ from app.services.studio.chapter_asset_candidates import (
 )
 from app.services.studio.chapter_asset_profile_cache import (
     build_chapter_profile_cache_key,
+    build_chapter_source_hash,
     get_cached_chapter_profile,
     set_cached_chapter_profile,
 )
@@ -333,6 +334,56 @@ def merge_model_items_into_groups(
     return by_key, dropped
 
 
+def _assemble_user_flow_item(
+    *,
+    asset_type: str,
+    name: str,
+    aliases: list[str],
+    profile: dict[str, str],
+    shot_refs: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
+    shot_count: int,
+    source_kind: str,
+    existing_asset_id: str | None,
+    linked_entity_id: str | None,
+    linked_to_project: bool,
+    linked_to_shot: bool,
+    candidate_recommendation: Any,
+) -> dict[str, Any]:
+    """组装"用户主流程"里的一行（**生成路径与"从库里读"路径共用**）。
+
+    两条路径共用同一个组装函数，是为了让"刚生成出来的清单"与"后端重启后从数据库
+    读回来的清单"在结构上**逐字段同形** —— 否则"重启后直接恢复"就没法验证。
+    """
+    missing = profile_missing_fields(asset_type, profile)
+    missing_visual = profile_missing_fields(asset_type, profile, visual_only=True)
+    extra_aliases = sorted({str(alias) for alias in aliases if str(alias).strip()} - {name})
+    return {
+        "group_key": f"{asset_type}:{normalize_name(name)}",
+        "asset_type": asset_type,
+        "type_label": type_label(asset_type),
+        "name": name,
+        "display_name": (f"{name}（{'、'.join(extra_aliases)}）" if extra_aliases else name),
+        "aliases": extra_aliases,
+        "fields": profile,
+        "summary": render_profile_text(asset_type, profile),
+        "missing_fields": missing,
+        "missing_visual_fields": missing_visual,
+        "completeness": profile_completeness(asset_type, profile),
+        "shot_refs": shot_refs,
+        "evidence": evidence,
+        "shot_count": shot_count,
+        "source_kind": source_kind,
+        # ↓ 内部匹配状态（用户主流程只用来决定"要不要人工处理"）
+        "existing_asset_id": existing_asset_id,
+        "linked_entity_id": linked_entity_id,
+        "linked_to_project": bool(linked_to_project),
+        "linked_to_shot": bool(linked_to_shot),
+        "candidate_recommendation": candidate_recommendation,
+        "notices": [],
+    }
+
+
 def _build_user_flow_item(
     *,
     entry: dict[str, Any],
@@ -369,32 +420,23 @@ def _build_user_flow_item(
                 }
             )
 
-    missing = profile_missing_fields(asset_type, profile)
-    missing_visual = profile_missing_fields(asset_type, profile, visual_only=True)
-    return {
-        "group_key": f"{asset_type}:{normalize_name(name)}",
-        "asset_type": asset_type,
-        "type_label": type_label(asset_type),
-        "name": name,
-        "display_name": (f"{name}（{'、'.join(sorted(set(aliases) - {name}))}）" if aliases else name),
-        "aliases": sorted(set(aliases) - {name}),
-        "fields": profile,
-        "summary": render_profile_text(asset_type, profile),
-        "missing_fields": missing,
-        "missing_visual_fields": missing_visual,
-        "completeness": profile_completeness(asset_type, profile),
-        "shot_refs": refs,
-        "evidence": evidence,
-        "shot_count": max(len(refs), int(entry.get("shot_count") or 0)),
-        "source_kind": str(entry.get("source_kind") or "candidate"),
-        # ↓ 内部匹配状态（用户主流程只用来决定"要不要人工处理"）
-        "existing_asset_id": entry.get("existing_asset_id"),
-        "linked_entity_id": entry.get("linked_entity_id"),
-        "linked_to_project": bool(entry.get("linked_to_project")),
-        "linked_to_shot": bool(entry.get("linked_to_shot")),
-        "candidate_recommendation": entry.get("recommendation"),
-        "notices": [],
-    }
+    item = _assemble_user_flow_item(
+        asset_type=asset_type,
+        name=name,
+        aliases=aliases,
+        profile=profile,
+        shot_refs=refs,
+        evidence=evidence,
+        shot_count=max(len(refs), int(entry.get("shot_count") or 0)),
+        source_kind=str(entry.get("source_kind") or "candidate"),
+        existing_asset_id=entry.get("existing_asset_id"),
+        linked_entity_id=entry.get("linked_entity_id"),
+        linked_to_project=bool(entry.get("linked_to_project")),
+        linked_to_shot=bool(entry.get("linked_to_shot")),
+        candidate_recommendation=entry.get("recommendation"),
+    )
+    item["merge_sources"] = list(entry.get("sources") or [])
+    return item
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +599,12 @@ def detect_conflicts(
 # 主入口
 # ---------------------------------------------------------------------------
 
+#: 库里没有这份清单时的引导（GET 只读，**不花钱**）
+NOT_GENERATED_HINT = (
+    "本章还没有生成过结构化资产清单。生成需要调用一次文本模型（真实模式下会花钱），"
+    "所以只在显式请求时执行：POST /api/v1/studio/chapters/{chapter_id}/asset-profiles。"
+)
+
 
 def _make_target_caller(target: TextLLMTarget | None) -> TextLLMCaller:
     """把"解析出来的模型目标"包成一个 :data:`TextLLMCaller`（真实调用路径）。
@@ -674,18 +722,422 @@ async def _match_existing(
     return result
 
 
+async def _finalize_items(
+    db: AsyncSession,
+    *,
+    project_id: str,
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """匹配库里同名资产 + 冲突判定 + 稳定排序（**生成路径与读库路径共用**）。"""
+    existing_by_type = await _match_existing(db, project_id=project_id, items=items)
+    existing_descriptions = await _load_existing_descriptions(db, existing_by_type=existing_by_type)
+    detect_conflicts(
+        items=items,
+        existing_by_type=existing_by_type,
+        existing_description_by_id=existing_descriptions,
+    )
+    for item in items:
+        item["shot_refs"] = sorted(
+            item.get("shot_refs") or [],
+            key=lambda ref: (int(ref.get("shot_index") or 0), str(ref.get("shot_id") or "")),
+        )
+    items.sort(key=lambda item: (CANDIDATE_TYPES.index(item["asset_type"]), -int(item["shot_count"]), item["name"]))
+    return items
+
+
+# ---------------------------------------------------------------------------
+# 从数据库读回（后端重启后走的就是这条路，一次模型调用都不会发生）
+# ---------------------------------------------------------------------------
+
+
+def build_item_from_record(record: Any) -> dict[str, Any]:
+    """把持久化行还原成"用户主流程"里的一行（与生成路径逐字段同形）。"""
+    from app.services.studio.chapter_asset_record_store import (
+        STATUS_TEXT,
+        effective_profile,
+        has_pending_change,
+        profile_source_label,
+        record_to_read,
+    )
+
+    asset_type = normalize_asset_type(record.asset_type) or str(record.asset_type or "")
+    profile = effective_profile(record)
+    shot_refs = [ref for ref in (record.shot_refs or []) if isinstance(ref, dict)]
+    evidence = [entry for entry in (record.evidence or []) if isinstance(entry, dict)]
+    item = _assemble_user_flow_item(
+        asset_type=asset_type,
+        name=str(record.name or ""),
+        aliases=[str(alias) for alias in (record.aliases or [])],
+        profile=profile,
+        shot_refs=shot_refs,
+        evidence=evidence,
+        shot_count=len(shot_refs),
+        source_kind="chapter_record",
+        existing_asset_id=record.asset_id,
+        linked_entity_id=record.asset_id,
+        linked_to_project=bool(record.asset_id),
+        linked_to_shot=bool(shot_refs),
+        candidate_recommendation=(str(record.link_action or "") or None),
+    )
+    item.update(
+        {
+            "record_id": int(record.id),
+            "record_status": str(record.status or ""),
+            "record_status_label": STATUS_TEXT.get(str(record.status or ""), str(record.status or "")),
+            "record_profile_source": profile_source_label(record),
+            "manual_edited": bool(record.manual_overrides or record.user_notes),
+            "user_notes": [str(note) for note in (record.user_notes or [])],
+            "manual_overrides": dict(record.manual_overrides or {}),
+            "has_pending_change": has_pending_change(record),
+            "pending_change": (record_to_read(record).get("pending") if has_pending_change(record) else None),
+            "source_hash": str(record.source_hash or ""),
+            "source_summary": dict(record.source_summary or {}),
+            "merge_sources": list(record.merge_sources or []),
+        }
+    )
+    return item
+
+
+def _records_source_summary(
+    *,
+    chapter_title: str,
+    script_chars: int,
+    shots: list[dict[str, Any]],
+    source_hash: str,
+    matched_shot_indexes: list[int] | None = None,
+) -> dict[str, Any]:
+    """剧本/分镜**来源摘要**（与 ``source_hash`` 一起落库，便于"这份资料是哪一版剧本来的"）。"""
+    summary: dict[str, Any] = {
+        "chapter_title": str(chapter_title or ""),
+        "script_chars": int(script_chars or 0),
+        "shot_total": len(shots),
+        "shot_indexes": [int(shot.get("index") or 0) for shot in shots],
+        "source_hash": str(source_hash or ""),
+    }
+    if matched_shot_indexes is not None:
+        summary["matched_shot_indexes"] = sorted({int(index) for index in matched_shot_indexes})
+    return summary
+
+
+def _technical_from_run(technical: dict[str, Any], *, items: list[dict[str, Any]], cache_key: str, warnings: list[str]) -> dict[str, Any]:
+    """技术详情（默认收起）：生成时落库的原始材料 + 本次现算的匹配状态。"""
+    return {
+        "candidate_groups": technical.get("candidate_groups") or [],
+        "merged_groups": technical.get("merged_groups") or [],
+        "alias_merge": technical.get("alias_merge") or [],
+        "match_status": [
+            {
+                "group_key": item["group_key"],
+                "asset_type": item["asset_type"],
+                "name": item["name"],
+                "existing_asset_id": item.get("existing_asset_id"),
+                "linked_entity_id": item.get("linked_entity_id"),
+                "linked_to_project": item.get("linked_to_project"),
+                "linked_to_shot": item.get("linked_to_shot"),
+                "candidate_recommendation": item.get("candidate_recommendation"),
+                "suggested_action": item.get("suggested_action"),
+                "record_status": item.get("record_status"),
+            }
+            for item in items
+        ],
+        "dropped_model_items": technical.get("dropped_model_items") or [],
+        "candidates_raw": technical.get("candidates_raw") or {},
+        "llm": technical.get("llm") or {},
+        "reconcile": technical.get("reconcile") or {},
+        "records": technical.get("records") or [],
+        "cache_key": cache_key,
+        "warnings": list(warnings or []),
+        "persistence": technical.get("persistence") or {},
+    }
+
+
+def _assemble_payload(
+    *,
+    chapter_id: str,
+    project_id: str,
+    chapter_title: str,
+    script_chars: int,
+    shot_total: int,
+    items: list[dict[str, Any]],
+    technical_detail: dict[str, Any],
+    meta: dict[str, Any],
+    persistence: dict[str, Any],
+) -> dict[str, Any]:
+    """把清单打包成对外响应（生成路径与读库路径**共用**，保证两者逐字段同形）。"""
+    auto_confirmable = [item for item in items if item["auto_confirmable"]]
+    needs_review = [item for item in items if not item["auto_confirmable"]]
+    return {
+        "chapter_id": chapter_id,
+        "project_id": project_id,
+        "chapter_title": chapter_title,
+        "script_chars": script_chars,
+        "shot_total": shot_total,
+        # ---------------- 用户主流程 ----------------
+        "user_flow": {
+            "items": items,
+            "summary": {
+                "asset_total": len(items),
+                "by_type": {
+                    asset_type: len([item for item in items if item["asset_type"] == asset_type])
+                    for asset_type in CANDIDATE_TYPES
+                },
+                "evidence_backed": len([item for item in items if item["shot_refs"]]),
+                "auto_confirmable": len(auto_confirmable),
+                "needs_review": len(needs_review),
+                "ready_for_image_prompt": len([item for item in items if not item["missing_visual_fields"]]),
+                "pending_change": len([item for item in items if item.get("has_pending_change")]),
+                "manual_edited": len([item for item in items if item.get("manual_edited")]),
+                "linked": len([item for item in items if item.get("linked_entity_id")]),
+            },
+            "auto_confirmable_group_keys": [item["group_key"] for item in auto_confirmable],
+            "needs_review": [
+                {
+                    "group_key": item["group_key"],
+                    "name": item["name"],
+                    "asset_type": item["asset_type"],
+                    "conflict_code": (item["conflict"] or {}).get("code", ""),
+                    "reason": item["action_reason"],
+                    "conflict": item["conflict"],
+                }
+                for item in needs_review
+            ],
+            "field_labels": {
+                asset_type: [
+                    {"key": spec.key, "label": spec.label, "visual": spec.visual}
+                    for spec in field_specs(asset_type)
+                ]
+                for asset_type in CANDIDATE_TYPES
+            },
+            "notes": [
+                "本清单已按**项目 + 章节**持久化保存（新增 / 更新 / 待决定三种结果见 "
+                "persistence.reconcile）：后端重启后直接读同一份数据库，**不会重复调用模型**。",
+                "无冲突项（auto_confirmable）可直接确认；只有 needs_review 里的冲突项需要人工处理。",
+                "确认动作**不写全局资产（场景/道具/服装）的通用资料、不写 image_prompts、不碰图片与定版图**；"
+                "要更新全局通用资料，请走 global-updates 的差异预览 + 显式确认。",
+            ],
+        },
+        # ---------------- 技术详情（默认收起） ----------------
+        "technical_detail": technical_detail,
+        # meta 存成普通 dict（不是 pydantic 模型）：对外的 JSON 形状完全一样。
+        "meta": meta,
+        "persistence": persistence,
+        "note": (
+            "数据库是这份清单的事实来源（专用表 chapter_asset_profiles / "
+            "chapter_asset_profile_runs）；进程内缓存只用于同一进程内省一次序列化。"
+            "接口只预览与持久化：不建资产、不出图；LLM 调用受 DRY_RUN 守卫保护。"
+        ),
+    }
+
+
+async def _payload_from_database(
+    db: AsyncSession,
+    *,
+    chapter: Chapter,
+    source: Any,
+    shots: list[dict[str, Any]],
+    run: Any | None,
+    cache_key: str,
+    content_changed: bool,
+    warnings: list[str],
+    extra_instructions: str,
+) -> dict[str, Any]:
+    """**只读库**地组装清单（一次模型调用都不会发生）。"""
+    from app.services.studio.chapter_asset_record_store import (
+        RUN_STATUS_TEXT,
+        group_key,
+        has_pending_change,
+        list_chapter_records,
+        record_to_read,
+    )
+
+    records = await list_chapter_records(db, chapter_id=chapter.id)
+    items = await _finalize_items(
+        db,
+        project_id=source.project_id,
+        items=[build_item_from_record(record) for record in records],
+    )
+    pending_items = [item for item in items if item.get("has_pending_change")]
+    technical = dict(getattr(run, "technical", None) or {})
+    technical["records"] = [record_to_read(record) for record in records]
+    technical["persistence"] = {
+        "run_id": (int(run.id) if run is not None else None),
+        "status": (str(run.status) if run is not None else "records_only"),
+        "content_changed": bool(content_changed),
+        "extra_instructions": str(extra_instructions or ""),
+    }
+    meta = dict(getattr(run, "meta", None) or {})
+    meta.setdefault("llm_called", False)
+    meta.setdefault("dry_run", dry_run.dry_run_enabled())
+    meta.setdefault("target", None)
+    meta["from_cache"] = False
+    meta["from_db"] = True
+    persistence = {
+        "source": "database",
+        "generated": bool(records) or run is not None,
+        "tables": ["chapter_asset_profiles", "chapter_asset_profile_runs"],
+        "run_id": (int(run.id) if run is not None else None),
+        "status": (str(run.status) if run is not None else "records_only"),
+        "status_label": (
+            RUN_STATUS_TEXT.get(str(run.status), str(run.status))
+            if run is not None
+            else "库里已有资料，但找不到生成记录（可能是从旧结构迁移过来的）"
+        ),
+        "content_changed": bool(content_changed),
+        "content_changed_hint": (
+            "内容已变化，建议重新分析：本章原文或分镜与生成这份清单时不一致（"
+            f"{str(getattr(run, 'stale_reason', '') or '')}）。"
+            "现有资料与人工修改都已保留，未做任何覆盖；要不要重新分析由你决定。"
+            if content_changed
+            else ""
+        ),
+        "source_hash": str(getattr(run, "source_hash", "") or ""),
+        "cache_key": cache_key,
+        "generated_at": (
+            run.generated_at.isoformat() if run is not None and run.generated_at is not None else None
+        ),
+        # 两个"是否调用过模型"必须分开说，否则读库路径会被误读成"又花钱了"：
+        # - llm_called：**本次响应**是否调用了模型（读库路径恒为 False）；
+        # - generated_by_llm：库里这份清单**当初**是不是真实模型调用产生的。
+        "llm_called": False,
+        "generated_by_llm": bool(getattr(run, "llm_called", False)),
+        "dry_run": bool(getattr(run, "dry_run", False)),
+        "records_total": len(records),
+        "protected_records": len(
+            [
+                record
+                for record in records
+                if record.confirmed_at is not None
+                or record.manual_edited_at is not None
+                or dict(record.manual_overrides or {})
+                or list(record.user_notes or [])
+            ]
+        ),
+        "pending_changes": [
+            {
+                "group_key": group_key(record),
+                "name": str(record.name or ""),
+                "asset_type": str(record.asset_type or ""),
+                "asset_id": record.asset_id,
+                "reason": "该行已确认或有人工修改；新结果不会自动覆盖它。",
+            }
+            for record in records
+            if has_pending_change(record)
+        ],
+        "unresolved_change_total": len(pending_items),
+        "reconcile": technical.get("reconcile") or {},
+        "note": (
+            "数据库是事实来源：这一份是从 chapter_asset_profiles 直接读回来的，"
+            "没有调用任何模型；进程内缓存只是性能优化，清掉它结论不变。"
+        ),
+    }
+    return _assemble_payload(
+        chapter_id=str(chapter.id),
+        project_id=str(source.project_id),
+        chapter_title=str(source.title or ""),
+        script_chars=len(source.text),
+        shot_total=len(shots),
+        items=items,
+        technical_detail=_technical_from_run(technical, items=items, cache_key=cache_key, warnings=warnings),
+        meta=meta,
+        persistence=persistence,
+    )
+
+
+def _not_generated_payload(
+    *,
+    chapter_id: str,
+    project_id: str,
+    chapter_title: str,
+    script_chars: int,
+    shot_total: int,
+    cache_key: str,
+    extra_instructions: str,
+) -> dict[str, Any]:
+    """库里从来没有这份清单时的只读响应（**不调模型、不花钱**）。"""
+    return _assemble_payload(
+        chapter_id=chapter_id,
+        project_id=project_id,
+        chapter_title=chapter_title,
+        script_chars=script_chars,
+        shot_total=shot_total,
+        items=[],
+        technical_detail={
+            "candidate_groups": [],
+            "merged_groups": [],
+            "alias_merge": [],
+            "match_status": [],
+            "dropped_model_items": [],
+            "candidates_raw": {},
+            "llm": {},
+            "reconcile": {},
+            "records": [],
+            "cache_key": cache_key,
+            "warnings": [],
+            "persistence": {},
+        },
+        meta={
+            "dry_run": dry_run.dry_run_enabled(),
+            "llm_called": False,
+            "target": None,
+            "latency_ms": None,
+            "raw_output_chars": 0,
+            "json_repairs": [],
+            "json_parse_error": None,
+            "dry_run_reason": None,
+            "from_cache": False,
+            "from_db": True,
+        },
+        persistence={
+            "source": "database",
+            "generated": False,
+            "tables": ["chapter_asset_profiles", "chapter_asset_profile_runs"],
+            "run_id": None,
+            "status": "not_generated",
+            "status_label": "还没有生成过本章的结构化资产清单",
+            "content_changed": False,
+            "content_changed_hint": "",
+            "source_hash": "",
+            "cache_key": cache_key,
+            "extra_instructions": str(extra_instructions or ""),
+            "generated_at": None,
+            "llm_called": False,
+            "dry_run": dry_run.dry_run_enabled(),
+            "records_total": 0,
+            "protected_records": 0,
+            "pending_changes": [],
+            "unresolved_change_total": 0,
+            "reconcile": {},
+            "hint": NOT_GENERATED_HINT.format(chapter_id=chapter_id),
+        },
+    )
+
+
 async def build_chapter_asset_profiles(
     db: AsyncSession,
     *,
     chapter_id: str,
     llm_caller: TextLLMCaller | None = None,
     extra_instructions: str = "",
+    refresh: bool = False,
+    allow_generate: bool = True,
     use_cache: bool = True,
 ) -> dict[str, Any]:
-    """基于**本章完整剧本 + 分镜**生成规范化的角色/场景/道具/服装清单（只读预览）。
+    """本章资产的规范化清单（**数据库优先**：有就直读，没有才生成）。
 
-    返回里 ``user_flow`` 是用户主流程要看的，``technical_detail`` 是默认收起的
-    技术详情（原始候选 / 聚合组 / 内部匹配状态 / 别名合并过程 / 被丢弃条目）。
+    三种调用语义（这是"付费结果不会丢"的落地方式）：
+
+    - ``refresh=False`` 且库里已有（生成记录或资料行）→ **只读数据库**，
+      返回值与"刚生成时"逐字段同形（``user_flow`` / ``technical_detail`` 一致），
+      不调用任何模型；
+      剧本/分镜变了 → ``persistence.content_changed=true`` +
+      中文提示「内容已变化，建议重新分析」，**不覆盖任何资料**；
+    - ``refresh=True`` → 重新分析（可能真实调用模型），结果与库里逐条对账：
+      未确认且未人工改过的行更新；**已确认或人工改过的行只记 ``pending_*``**
+      并标 ``pending_change``，等用户决定覆盖 / 合并 / 保留；没再提到的行不删除；
+    - ``allow_generate=False``（GET 只读入口）且库里没有 → 返回空清单 +
+      ``persistence.status="not_generated"`` 的中文引导，**一次模型调用都不发**。
+
+    ``use_cache`` 只影响"同一进程内要不要省一次 JSON 深拷贝"，不影响结论。
     """
     chapter = await db.get(Chapter, chapter_id)
     if chapter is None:
@@ -695,13 +1147,6 @@ async def build_chapter_asset_profiles(
     shots = await _load_shots(db, chapter_id=chapter_id)
     chapter_haystack = normalize_name(source.text)
 
-    candidates = await build_chapter_asset_candidates(db, chapter_id=chapter_id)
-    groups = [
-        {**item, "source_kind": "candidate"}
-        for item in candidates.get("items") or []
-        if item.get("candidate_type") in CANDIDATE_TYPES
-    ]
-
     cache_key = build_chapter_profile_cache_key(
         project_id=source.project_id,
         chapter_id=chapter_id,
@@ -709,16 +1154,73 @@ async def build_chapter_asset_profiles(
         shots=shots,
         extra_instructions=extra_instructions,
     )
+    source_hash = build_chapter_source_hash(chapter_text=source.text, shots=shots)
 
-    # 读缓存：签名相同（剧本 / 分镜 / 附加要求都没变）就不重复调大模型。
-    # 真实调用是花钱的；而且两次结果不一致会让"用户刚看到的清单"和"确认落库的清单"对不上。
-    if use_cache and llm_caller is None:
+    # 同进程内的性能优化：内容签名一致且不要求刷新时，直接返回上次组装的响应。
+    # **它不是事实来源**：库里的行才是（下面每一次"读"都从库里重新组装）。
+    if use_cache and llm_caller is None and not refresh:
         cached = get_cached_chapter_profile(cache_key)
         if cached is not None:
             meta = cached.get("meta")
             if isinstance(meta, dict):
                 meta["from_cache"] = True
             return cached
+
+    from app.services.studio.chapter_asset_record_store import (
+        get_latest_run,
+        list_chapter_records,
+    )
+
+    latest_run = await get_latest_run(db, chapter_id=chapter_id)
+    has_records = bool(await list_chapter_records(db, chapter_id=chapter_id))
+
+    # ---------------- ① 数据库优先：有就直读，一次模型调用都不发 ----------------
+    if not refresh and (latest_run is not None or has_records):
+        content_changed = latest_run is not None and str(latest_run.cache_key or "") != cache_key
+        warnings = list(getattr(latest_run, "warnings", None) or [])
+        if content_changed and latest_run is not None:
+            from app.services.studio.chapter_asset_record_store import mark_run_stale
+
+            await mark_run_stale(
+                db,
+                run=latest_run,
+                reason="本章原文或分镜与生成这份清单时不一致（内容已变化，建议重新分析）。",
+            )
+            warnings = [*warnings, "本章原文或分镜已变化：现有资料与人工修改均已保留，未做任何覆盖。"]
+        payload = await _payload_from_database(
+            db,
+            chapter=chapter,
+            source=source,
+            shots=shots,
+            run=latest_run,
+            cache_key=cache_key,
+            content_changed=content_changed,
+            warnings=warnings,
+            extra_instructions=extra_instructions,
+        )
+        if use_cache and llm_caller is None:
+            set_cached_chapter_profile(cache_key, payload)
+        return payload
+
+    # ---------------- ② 库里没有：只读入口明确拒绝花钱 ----------------
+    if not allow_generate:
+        return _not_generated_payload(
+            chapter_id=chapter_id,
+            project_id=str(source.project_id),
+            chapter_title=str(source.title or ""),
+            script_chars=len(source.text),
+            shot_total=len(shots),
+            cache_key=cache_key,
+            extra_instructions=extra_instructions,
+        )
+
+    # ---------------- ③ 生成（真实调用或演练占位），结果立刻落库 ----------------
+    candidates = await build_chapter_asset_candidates(db, chapter_id=chapter_id)
+    groups = [
+        {**item, "source_kind": "candidate"}
+        for item in candidates.get("items") or []
+        if item.get("candidate_type") in CANDIDATE_TYPES
+    ]
 
     warnings: list[str] = []
     target: TextLLMTarget | None = None
@@ -780,147 +1282,189 @@ async def build_chapter_asset_profiles(
 
     merged_groups = list(by_key.values())
     items = [_build_user_flow_item(entry=entry, shots=shots, chapter_haystack=chapter_haystack) for entry in merged_groups]
-
-    existing_by_type = await _match_existing(db, project_id=source.project_id, items=items)
-    existing_descriptions = await _load_existing_descriptions(db, existing_by_type=existing_by_type)
-    detect_conflicts(
-        items=items,
-        existing_by_type=existing_by_type,
-        existing_description_by_id=existing_descriptions,
-    )
-
-    items.sort(key=lambda item: (CANDIDATE_TYPES.index(item["asset_type"]), -int(item["shot_count"]), item["name"]))
-
-    # 出场镜头证据：按镜头序号稳定排序（保证跨次调用一致）
     for item in items:
-        item["shot_refs"] = sorted(item["shot_refs"], key=lambda ref: (ref["shot_index"], ref["shot_id"]))
+        item["source_summary"] = _records_source_summary(
+            chapter_title=source.title or "",
+            script_chars=len(source.text),
+            shots=shots,
+            source_hash=source_hash,
+            matched_shot_indexes=[int(ref.get("shot_index") or 0) for ref in item.get("shot_refs") or []],
+        )
+        item["shot_refs"] = sorted(
+            item.get("shot_refs") or [],
+            key=lambda ref: (int(ref.get("shot_index") or 0), str(ref.get("shot_id") or "")),
+        )
 
-    auto_confirmable = [item for item in items if item["auto_confirmable"]]
-    needs_review = [item for item in items if not item["auto_confirmable"]]
-
-    payload = {
-        "chapter_id": chapter_id,
-        "project_id": source.project_id,
-        "chapter_title": source.title or "",
-        "script_chars": len(source.text),
-        "shot_total": len(shots),
-        # ---------------- 用户主流程 ----------------
-        "user_flow": {
-            "items": items,
-            "summary": {
-                "asset_total": len(items),
-                "by_type": {
-                    asset_type: len([item for item in items if item["asset_type"] == asset_type])
-                    for asset_type in CANDIDATE_TYPES
-                },
-                "evidence_backed": len([item for item in items if item["shot_refs"]]),
-                "auto_confirmable": len(auto_confirmable),
-                "needs_review": len(needs_review),
-                "ready_for_image_prompt": len(
-                    [item for item in items if not item["missing_visual_fields"]]
-                ),
-            },
-            "auto_confirmable_group_keys": [item["group_key"] for item in auto_confirmable],
-            "needs_review": [
-                {
-                    "group_key": item["group_key"],
-                    "name": item["name"],
-                    "asset_type": item["asset_type"],
-                    "conflict_code": (item["conflict"] or {}).get("code", ""),
-                    "reason": item["action_reason"],
-                    "conflict": item["conflict"],
-                }
-                for item in needs_review
-            ],
-            "field_labels": {
-                asset_type: [
-                    {"key": spec.key, "label": spec.label, "visual": spec.visual}
-                    for spec in field_specs(asset_type)
-                ]
-                for asset_type in CANDIDATE_TYPES
-            },
-            "notes": [
-                "本清单只做预览与冲突判定，**不建资产、不写库**；确认请调用 "
-                f"POST /api/v1/studio/chapters/{chapter_id}/asset-profiles/confirm。",
-                "无冲突项（auto_confirmable）可直接确认；只有 needs_review 里的冲突项需要人工处理。",
-                "结构化资料会随确认写入资产描述与候选证据，图片提示词生成会直接读它，"
-                "不再出现「外观信息不足，需人工补充」。",
-            ],
+    meta = {
+        **build_run_meta(
+            target=target,
+            llm_called=llm_called,
+            raw_output_chars=raw_output_chars,
+            dry_run_reason=dry_run_reason,
+        ).model_dump(),
+        "from_cache": False,
+        "from_db": False,
+        "just_generated": True,
+    }
+    technical: dict[str, Any] = {
+        "candidate_groups": groups,
+        "merged_groups": [
+            {
+                "group_key": f"{entry['candidate_type']}:{normalize_name(entry['name'])}",
+                "name": entry["name"],
+                "asset_type": entry["candidate_type"],
+                "aliases": sorted(set(entry.get("aliases") or [])),
+                "merged_names": sorted(set(entry.get("model_names") or [])),
+                "source_kind": entry.get("source_kind"),
+                "shot_ids": entry.get("shot_ids") or [],
+                "candidate_statuses": entry.get("statuses") or {},
+            }
+            for entry in merged_groups
+        ],
+        "alias_merge": [
+            {
+                "group_key": f"{entry['candidate_type']}:{normalize_name(entry['name'])}",
+                "canonical_name": entry["name"],
+                "merged_names": sorted(set(entry.get("model_names") or [])),
+                "aliases": sorted(set(entry.get("aliases") or [])),
+                "sources": entry.get("sources") or [],
+            }
+            for entry in merged_groups
+        ],
+        "dropped_model_items": dropped,
+        "candidates_raw": {
+            "summary": candidates.get("summary") or {},
+            "shot_total": candidates.get("shot_total"),
+            "shot_with_candidates": candidates.get("shot_with_candidates"),
         },
-        # ---------------- 技术详情（默认收起） ----------------
-        "technical_detail": {
-            "candidate_groups": groups,
-            "merged_groups": [
-                {
-                    "group_key": f"{entry['candidate_type']}:{normalize_name(entry['name'])}",
-                    "name": entry["name"],
-                    "asset_type": entry["candidate_type"],
-                    "aliases": sorted(set(entry.get("aliases") or [])),
-                    "merged_names": sorted(set(entry.get("model_names") or [])),
-                    "source_kind": entry.get("source_kind"),
-                    "shot_ids": entry.get("shot_ids") or [],
-                    "candidate_statuses": entry.get("statuses") or {},
-                }
-                for entry in merged_groups
-            ],
-            "alias_merge": [
-                {
-                    "group_key": f"{entry['candidate_type']}:{normalize_name(entry['name'])}",
-                    "canonical_name": entry["name"],
-                    "merged_names": sorted(set(entry.get("model_names") or [])),
-                    "aliases": sorted(set(entry.get("aliases") or [])),
-                    "sources": entry.get("sources") or [],
-                }
-                for entry in merged_groups
-            ],
-            "match_status": [
-                {
-                    "group_key": item["group_key"],
-                    "asset_type": item["asset_type"],
-                    "name": item["name"],
-                    "existing_asset_id": item.get("existing_asset_id"),
-                    "linked_entity_id": item.get("linked_entity_id"),
-                    "linked_to_project": item.get("linked_to_project"),
-                    "linked_to_shot": item.get("linked_to_shot"),
-                    "candidate_recommendation": item.get("candidate_recommendation"),
-                    "suggested_action": item.get("suggested_action"),
-                }
-                for item in items
-            ],
-            "dropped_model_items": dropped,
-            "candidates_raw": {
-                "summary": candidates.get("summary") or {},
-                "shot_total": candidates.get("shot_total"),
-                "shot_with_candidates": candidates.get("shot_with_candidates"),
-            },
-            "llm": {
-                "prompt_chars": len(prompt),
-                "prompt_excerpt": _clip(prompt, 1200),
-                "candidate_list_text": build_candidate_list_text(groups),
-                "shot_list_chars": len(build_shot_list_text(shots)),
-            },
-            "cache_key": cache_key,
-            "warnings": warnings,
+        "llm": {
+            "prompt_chars": len(prompt),
+            "prompt_excerpt": _clip(prompt, 1200),
+            "candidate_list_text": build_candidate_list_text(groups),
+            "shot_list_chars": len(build_shot_list_text(shots)),
         },
-        # meta 存成普通 dict（不是 pydantic 模型）：这份 payload 要进进程内缓存
-        # （json 深拷贝），模型实例没法直接序列化；对外的 JSON 形状完全一样。
-        "meta": {
-            **build_run_meta(
-                target=target,
-                llm_called=llm_called,
-                raw_output_chars=raw_output_chars,
-                dry_run_reason=dry_run_reason,
-            ).model_dump(),
-            "from_cache": False,
-        },
-        "note": (
-            "本接口只返回预览：不建资产、不写库、不出图；"
-            "LLM 调用受 DRY_RUN 守卫保护，演练模式下返回带 [DRY_RUN 占位] 的确定性骨架。"
-        ),
+        "reconcile": {},
     }
 
-    set_cached_chapter_profile(cache_key, payload)
+    from app.services.studio.chapter_asset_record_store import create_run, save_analysis_result
+
+    run = await create_run(
+        db,
+        project_id=str(source.project_id),
+        chapter_id=chapter_id,
+        cache_key=cache_key,
+        source_hash=source_hash,
+        source_summary=_records_source_summary(
+            chapter_title=source.title or "",
+            script_chars=len(source.text),
+            shots=shots,
+            source_hash=source_hash,
+        ),
+        item_total=len(items),
+        llm_called=llm_called,
+        dry_run=dry_run.dry_run_enabled(),
+        extra_instructions=extra_instructions,
+        meta=meta,
+        technical=technical,
+        warnings=warnings,
+    )
+    reconcile = await save_analysis_result(
+        db,
+        project_id=str(source.project_id),
+        chapter_id=chapter_id,
+        cache_key=cache_key,
+        source_hash=source_hash,
+        source_summary=run.source_summary,
+        items=items,
+        run=run,
+        extra_instructions=extra_instructions,
+    )
+    run.technical = {**technical, "reconcile": reconcile}
+
+    payload = await _payload_from_database(
+        db,
+        chapter=chapter,
+        source=source,
+        shots=shots,
+        run=run,
+        cache_key=cache_key,
+        content_changed=False,
+        warnings=warnings,
+        extra_instructions=extra_instructions,
+    )
+    payload["meta"] = {**payload["meta"], "from_db": False, "just_generated": True}
+    payload["persistence"] = {
+        **payload["persistence"],
+        "reconcile": reconcile,
+        "llm_called": bool(llm_called),
+        "generated_by_llm": bool(llm_called),
+    }
+    if use_cache and llm_caller is None:
+        set_cached_chapter_profile(cache_key, payload)
     return payload
+
+
+async def load_chapter_asset_records(db: AsyncSession, *, chapter_id: str) -> dict[str, Any]:
+    """只读接口：本章持久化的资产资料（**数据库是事实来源**的唯一读入口）。"""
+    from app.services.studio.chapter_asset_record_store import (
+        get_latest_run,
+        list_chapter_records,
+        record_to_read,
+    )
+
+    chapter = await db.get(Chapter, chapter_id)
+    if chapter is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=entity_not_found("Chapter"))
+    source = await load_chapter_source(db, chapter_id)
+    shots = await _load_shots(db, chapter_id=chapter_id)
+    current_hash = build_chapter_source_hash(chapter_text=source.text, shots=shots)
+    run = await get_latest_run(db, chapter_id=chapter_id)
+    records = await list_chapter_records(db, chapter_id=chapter_id)
+    items = [record_to_read(record) for record in records]
+    pending = [item for item in items if item.get("has_pending_change")]
+    return {
+        "chapter_id": chapter_id,
+        "project_id": str(source.project_id),
+        "items": items,
+        "run": (
+            {
+                "id": int(run.id),
+                "cache_key": str(run.cache_key or ""),
+                "source_hash": str(run.source_hash or ""),
+                "source_summary": dict(run.source_summary or {}),
+                "status": str(run.status or ""),
+                "stale_reason": str(run.stale_reason or ""),
+                "generated_at": run.generated_at.isoformat() if run.generated_at is not None else None,
+                "llm_called": bool(run.llm_called),
+                "dry_run": bool(run.dry_run),
+                "item_total": int(run.item_total or 0),
+            }
+            if run is not None
+            else None
+        ),
+        "content_changed": bool(run is not None and str(run.source_hash or "") != current_hash),
+        "current_source_hash": current_hash,
+        "summary": {
+            "records_total": len(items),
+            "by_type": {
+                asset_type: len([item for item in items if item["asset_type"] == asset_type])
+                for asset_type in CANDIDATE_TYPES
+            },
+            "confirmed": len([item for item in items if item.get("status") == "confirmed"]),
+            "manual_edited": len(
+                [item for item in items if item.get("manual_overrides") or item.get("user_notes")]
+            ),
+            "pending_change": len(pending),
+            "missing_in_latest": len([item for item in items if item.get("status") == "missing_in_latest"]),
+            "linked": len([item for item in items if item.get("asset_id")]),
+        },
+        "note": (
+            "这份资料按**项目 + 章节**隔离保存在 chapter_asset_profiles 表里："
+            "后端重启后直接读，不需要重新调用模型；"
+            "人工修改与用户补充不会被模型结果覆盖，"
+            "也不会写回全局资产（场景/道具/服装）的通用资料、图片提示词或定版图。"
+        ),
+    }
 
 
 __all__ = [
@@ -928,12 +1472,15 @@ __all__ = [
     "MAX_EVIDENCE_CHARS",
     "MAX_EVIDENCE_SHOTS",
     "MAX_ITEMS",
+    "NOT_GENERATED_HINT",
     "build_chapter_asset_profile_prompt",
     "build_chapter_asset_profiles",
     "build_candidate_list_text",
+    "build_item_from_record",
     "build_shot_list_text",
     "detect_conflicts",
     "extract_raw_asset_items",
+    "load_chapter_asset_records",
     "merge_model_items_into_groups",
     "shot_refs_for_name",
 ]

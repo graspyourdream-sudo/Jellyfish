@@ -62,7 +62,8 @@ def _dry_run() -> Any:
 
 def _blocked_types() -> tuple[type[BaseException], ...]:
     d = _dry_run()
-    return (d.DryRunBlocked, d.RealCallNotConfirmed)
+    # OutletNotAllowed 是 RealCallNotConfirmed 的子类（"出口不在白名单"），一并覆盖
+    return (d.DryRunBlocked, d.RealCallNotConfirmed, d.OutletNotAllowed)
 
 
 def confirm_hint() -> str:
@@ -129,7 +130,8 @@ def blocked_payload(exc: Exception) -> dict[str, Any]:
     return {
         "code": BLOCKED_ERROR_CODE,
         "reason": reason,
-        "reason_text": d.blocked_reason_text() or "",
+        # 异常自带说明优先（例如"出口不在白名单"这种与模式无关的拦截原因）
+        "reason_text": str(getattr(exc, "reason_text", "") or d.blocked_reason_text() or ""),
         "outlet": outlet,
         "outlet_label": d.outlet_label(outlet),
         "message": str(exc),

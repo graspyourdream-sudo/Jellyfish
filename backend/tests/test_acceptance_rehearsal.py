@@ -39,6 +39,7 @@ from app.services.studio.asset_prompt_quality import check_cross_asset_duplicate
 from app.services.studio.chapter_asset_profile_cache import clear_chapter_profile_cache  # noqa: E402
 from app.services.studio.chapter_asset_profile_confirm import confirm_chapter_asset_profiles  # noqa: E402
 from app.services.studio.chapter_asset_profiles import build_chapter_asset_profiles  # noqa: E402
+from app.services.studio.chapter_asset_record_store import list_chapter_records  # noqa: E402
 from app.services.studio.llm_orchestration.image_prompt import preview_image_prompts  # noqa: E402
 from app.schemas.studio.llm_orchestration import ImagePromptPreviewRequest  # noqa: E402
 from tests.llm_orchestration_fixtures import build_session  # noqa: E402
@@ -259,7 +260,11 @@ async def test_acceptance_rehearsal_covers_all_five_steps() -> None:
         # --- 确认落库（不调模型） ---
         confirmed = await confirm_chapter_asset_profiles(db, chapter_id=CHAPTER_ID)
         assert confirmed["summary"]["created"] + confirmed["summary"]["linked"] == len(items)
-        assert confirmed["summary"]["overlay_persisted"] == len(items)
+        # 章节资料落进**专用表**（按项目 + 章节隔离），并回写已关联的真实资产 ID
+        assert confirmed["summary"]["chapter_records_bound"] == len(items)
+        records = await list_chapter_records(db, chapter_id=CHAPTER_ID)
+        assert len(records) == len(items)
+        assert all(str(record.status) == "confirmed" and record.asset_id for record in records)
 
         # --- 第 2~5 次调用：逐资产图片提示词（每次一个槽位） ---
         call_plan = (
@@ -320,8 +325,10 @@ async def test_acceptance_rehearsal_covers_all_five_steps() -> None:
         assert "需人工补充" not in blob
         assert item["savable"] is True, f"{item['name']} 应当通过质量拦截：{item['quality_issues']}"
         assert item["has_structured_profile"] is True
-        # 生成依据如实标来源
+        # 生成依据如实标来源（专用表 chapter_record 优先；旧结构与剧本兜底也允许）
         assert item["structured_source"] in {
+            "chapter_record",
+            "asset_description+chapter_record",
             "candidate_profile",
             "chapter_overlay",
             "chapter_overlay+candidate_profile",
