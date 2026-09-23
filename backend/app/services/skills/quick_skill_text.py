@@ -16,7 +16,6 @@ from app.services.prompt_text_format import (
     CHAPTER_RULE,
     SHOT_RULE,
     encode_txt_download,
-    safe_filename_part,
 )
 
 SKILL_PROMPT_HEADER = "【导演Skill提示词】"

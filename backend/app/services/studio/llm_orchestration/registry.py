@@ -145,17 +145,70 @@ IMAGE_PROMPT_SLOT_SPECS: tuple[ImagePromptSlotSpec, ...] = (
     ),
 )
 
+#: **默认九槽位**（镜头级/批量预览用的既有口径，顺序与取值都不动）。
 DEFAULT_IMAGE_PROMPT_CATEGORIES: tuple[PromptCategory, ...] = tuple(
     spec.category for spec in IMAGE_PROMPT_SLOT_SPECS
 )
 
+#: 道具的**正式图片提示词槽位**。
+#:
+#: 为什么单独一张表：道具此前在 ``PromptCategory`` 里有 ``prop_image_front`` /
+#: ``prop_image_other`` 两个枚举值，也有 ``asset_strategies.STRATEGIES["prop"]`` 指向
+#: ``prop_image_front``，但**注册表里没有规格**——后果是两条真实的坏路径：
+#:
+#: 1. ``/studio/llm/image-prompt/preview`` 的 ``resolve_requested_categories`` 用
+#:    ``if value in IMAGE_PROMPT_SLOT_BY_CATEGORY`` 过滤请求槽位，道具槽位**被静默丢掉**
+#:    （请求里传了 prop_image_front，返回里一个道具槽位都没有，也没有任何 warning）；
+#: 2. 出图链路 ``image_pipeline`` 取不到 ``slot_spec``，只能退到
+#:    ``AssetImageStrategy.default_view_hint`` 的硬编码兜底文案。
+#:
+#: 补上规格后：道具走与人物/场景/服装**同一套**槽位、同一套风格/负面词规则、
+#: 同一套保存与生成链路，不再是「不支持（无槽位）」。
+#:
+#: 单独放一张表而不是直接塞进 :data:`IMAGE_PROMPT_SLOT_SPECS`，是为了**不改**
+#: 默认九槽位的口径（``DEFAULT_IMAGE_PROMPT_CATEGORIES`` 保持 9 个，
+#: 镜头级/批量预览的既有行为逐字不变）。
+PROP_IMAGE_PROMPT_SLOT_SPECS: tuple[ImagePromptSlotSpec, ...] = (
+    ImagePromptSlotSpec(
+        category=PromptCategory.prop_image_front,
+        label="道具正面图片",
+        entity_type="prop",
+        view_hint="道具正面清晰展示，完整入画，干净背景",
+        subject_source="道具画像卡",
+    ),
+    ImagePromptSlotSpec(
+        category=PromptCategory.prop_image_other,
+        label="道具侧面/背面图片",
+        entity_type="prop",
+        view_hint="同一道具的另一视角，保持材质、颜色与形制一致",
+        subject_source="道具画像卡",
+    ),
+)
+
+#: 槽位规格全集：默认九槽位 + 道具两槽位（**查表唯一入口**）。
+ALL_IMAGE_PROMPT_SLOT_SPECS: tuple[ImagePromptSlotSpec, ...] = (
+    *IMAGE_PROMPT_SLOT_SPECS,
+    *PROP_IMAGE_PROMPT_SLOT_SPECS,
+)
+
 IMAGE_PROMPT_SLOT_BY_CATEGORY: dict[str, ImagePromptSlotSpec] = {
-    str(spec.category.value): spec for spec in IMAGE_PROMPT_SLOT_SPECS
+    str(spec.category.value): spec for spec in ALL_IMAGE_PROMPT_SLOT_SPECS
+}
+
+#: 资产类型 → 该类资产的图片提示词槽位（正面 / 其它视角）。四类资产**同构**。
+ASSET_IMAGE_PROMPT_SLOTS: dict[str, tuple[PromptCategory, PromptCategory]] = {
+    "character": (PromptCategory.character_image_front, PromptCategory.character_image_other),
+    "scene": (PromptCategory.scene_image_front, PromptCategory.scene_image_other),
+    "prop": (PromptCategory.prop_image_front, PromptCategory.prop_image_other),
+    "costume": (PromptCategory.costume_image_front, PromptCategory.costume_image_other),
 }
 
 
 def image_prompt_slot_specs() -> list[dict[str, Any]]:
-    """九槽位定义的可序列化形式（只读，供前端渲染「手工填写提示词」表单）。
+    """槽位规格全集的可序列化形式（只读，供前端渲染「手工填写提示词」表单）。
+
+    返回**全部**已注册槽位（默认九槽位 + 道具两槽位）：道具槽位此前缺规格，
+    前端只能靠硬编码或直接不给入口；补齐后四类资产在同一个列表里都能拿到槽位定义。
 
     DRY_RUN 下真实大模型被守卫挡住，用户仍然需要一条能把**自己写的**提示词保存到
     ``<entities>.image_prompts`` 的路；前端不应该靠硬编码槽位名来实现它。
@@ -167,8 +220,9 @@ def image_prompt_slot_specs() -> list[dict[str, Any]]:
             "entity_type": spec.entity_type,
             "view_hint": spec.view_hint,
             "subject_source": spec.subject_source,
+            "default": spec in IMAGE_PROMPT_SLOT_SPECS,
         }
-        for spec in IMAGE_PROMPT_SLOT_SPECS
+        for spec in ALL_IMAGE_PROMPT_SLOT_SPECS
     ]
 
 # 分层结构顺序：主体描述 + 动作姿态 + 场景环境 + 镜头语言 + 风格 + 画质词
@@ -212,6 +266,9 @@ SLOT_STYLE_RULES: dict[str, tuple[str, ...]] = {
     "scene_image_other": ("cinematic live-action environment", "empty scene, no people"),
     "costume_image_front": ("isolated costume reference", "flat lay or mannequin display"),
     "costume_image_other": ("isolated costume reference", "back and side detail"),
+    # 道具槽位补齐（此前完全没有 prop 条目 → 道具提示词拿不到任何道具专属风格词）
+    "prop_image_front": ("isolated prop reference", "whole object in frame", "clean neutral background"),
+    "prop_image_other": ("isolated prop reference", "matching material and colour", "clean neutral background"),
     "frame_head_image": ("cinematic still frame", "consistent character identity"),
     "frame_tail_image": ("cinematic still frame", "consistent character identity"),
     "frame_key_image": ("cinematic still frame", "peak emotion moment"),
@@ -222,6 +279,9 @@ SLOT_NEGATIVE_EXTRA: dict[str, tuple[str, ...]] = {
     "character_image_other": ("half body", "cropped body", "exaggerated pose", "multiple people"),
     "scene_image_front": ("isolated object", "product photo", "floating object", "white background"),
     "scene_image_other": ("isolated object", "product photo", "white background"),
+    # 道具槽位专属负面词：道具图要的是「干净背景上的单件物品」，反面是人物/场景串味
+    "prop_image_front": ("human figure", "hands holding object", "cluttered background", "multiple objects"),
+    "prop_image_other": ("human figure", "cluttered background", "multiple objects"),
 }
 
 

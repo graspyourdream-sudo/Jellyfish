@@ -75,7 +75,9 @@ class AssetImageStrategy:
     result_label: str
     #: 写死的画幅（人物 = 16:9）；为 None 时按调用方口径 → 兜底默认
     fixed_aspect_ratio: str | None = None
-    #: 注册表里没有该类型的槽位规格时用的动作姿态提示词（目前只有 prop 需要）
+    #: 注册表里没有该类型的槽位规格时的动作姿态兜底。
+    #: 道具的正式槽位（``prop_image_front`` / ``prop_image_other``）已补进
+    #: ``llm_orchestration.registry``，这条只在注册表异常时才用得上（保留以防 import 环/降级）。
     default_view_hint: str = ""
     #: 「按定版参考图批量出图」是否对该类型开放（只有人物 True）
     batch_reference_allowed: bool = False
@@ -141,7 +143,8 @@ STRATEGIES: dict[str, AssetImageStrategy] = {
         prompt_template=TEMPLATE_PROP_ASSET_IMAGE,
         result_kind=KIND_PROP_ASSET_IMAGE,
         result_label="道具资产图",
-        # 提示词注册表里没有 prop 槽位规格 → 用这条动作姿态兜底（不是「自然展示」的通用兜底）
+        # 道具的**正式槽位**已在注册表里（prompt_slot 指到的就是它）；
+        # default_view_hint 只是注册表异常时的降级兜底，正常路径不会用到。
         default_view_hint="道具正面展示，干净背景",
         generation_type=client.DEFAULT_GENERATION_TYPE.get("prop", ""),
     ),

@@ -57,6 +57,14 @@ class EntityProfileInput(BaseModel):
     profile: str = Field("", description="实体画像描述")
     base_prompt: str = Field("", description="已有资产基础提示词（可空）")
     image_prompt: str = Field("", description="已有资产图片提示词（可空）")
+    profile_source: str = Field(
+        "",
+        description=(
+            "画像资料的来源（由装载方如实填写，供前端说明「这段描述是从哪来的」）："
+            "asset_description=资产描述；candidate_profile=候选结构化资料；"
+            "request=调用方直接传入；none=没有任何资料"
+        ),
+    )
 
 
 class EntityProfileCardRead(BaseModel):
@@ -67,6 +75,11 @@ class EntityProfileCardRead(BaseModel):
     source: Literal["request", "project"]
     profile: str = Field("", description="画像描述")
     canonical_subject: str = Field("", description="用于所有槽位的统一主体描述")
+    profile_source: str = Field("", description="画像资料的来源（见 EntityProfileInput.profile_source）")
+    has_structured_profile: bool = Field(
+        False,
+        description="这段画像是否含有可出图的具体资料（false = 只剩空话兜底，不允许保存提示词）",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +154,23 @@ class ImagePromptPreviewRequest(BaseModel):
     shot_id: str | None = Field(None, description="镜头 ID（用于装载镜头文本与项目实体）")
     shot_text: str | None = Field(None, description="直接传入的镜头文本")
     project_id: str | None = Field(None, description="项目 ID（用于装载实体画像）")
+    chapter_id: str | None = Field(
+        None,
+        description=(
+            "章节 ID（资产级常用）：装载实体画像时只读**本章**的章节资料（overlay）。"
+            "场景/道具/服装是全局资产，本章的剧情身份、出场依据、临时补充按章节隔离保存，"
+            "给上 chapter_id 才不会串到别的章节。"
+        ),
+    )
     entity_profiles: list[EntityProfileInput] = Field(default_factory=list, description="实体画像（覆盖自动装载）")
+    entity_names: list[str] = Field(
+        default_factory=list,
+        description=(
+            "只保留这些名称的实体（在自动装载的画像卡上过滤）。"
+            "页面「逐资产生成」用它把一次请求收窄到一个资产，"
+            "同时仍然享受 chapter_id 的章节资料加载。"
+        ),
+    )
     categories: list[PromptCategory] | None = Field(
         None,
         description="需要生成的槽位类别；为空时生成全部默认槽位",
@@ -161,6 +190,20 @@ class ImagePromptSlotRead(BaseModel):
     prompt: str = Field("", description="拼接后的完整提示词")
     negative_prompt: str = Field("", description="该槽位的负面提示词")
     warnings: list[str] = Field(default_factory=list)
+    #: 这段内容能不能被保存成"提示词已就绪"。后端质量拦截的**同一份判定**，
+    #: 前端只负责展示与禁用按钮，不自己重写一套规则。
+    savable: bool = Field(True, description="是否通过后端质量拦截（false 时禁止保存 / 批量出图）")
+    quality_issues: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="未通过的原因（结构化中文：code / message / fix / status_code）",
+    )
+    structured_source: str = Field(
+        "",
+        description=(
+            "该槽位主体描述的资料来源：asset_description（资产描述）/ candidate_profile（候选结构化资料）"
+            "/ request（调用方传入）/ none（没有任何资料，只剩空话兜底）"
+        ),
+    )
 
 
 class ImagePromptPreviewRead(BaseModel):

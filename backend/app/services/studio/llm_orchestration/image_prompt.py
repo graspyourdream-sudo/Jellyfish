@@ -213,6 +213,34 @@ def build_slot_layers(
     return layers
 
 
+def build_slot_quality(
+    *,
+    spec: ImagePromptSlotSpec,
+    prompt: str,
+    card: EntityProfileCardRead | None,
+) -> tuple[bool, list[dict[str, Any]], str]:
+    """用后端质量拦截的**同一份判定**标注这个槽位能不能保存。
+
+    返回 ``(savable, issues, structured_source)``。前端拿这几个字段决定
+    "保存 / 批量出图"按钮是否可用，以及把不可保存的原因（中文、可照做修）显示出来。
+    判定逻辑本体在 :mod:`app.services.studio.asset_prompt_quality`，这里不复制规则。
+    """
+    from app.services.studio.asset_prompt_quality import check_single_prompt
+
+    issues = check_single_prompt(
+        prompt,
+        slot=str(spec.category.value),
+        asset_name=card.name if card else "",
+        asset_type=card.entity_type if card else (spec.entity_type or ""),
+    )
+    structured_source = ""
+    if card is not None:
+        structured_source = str(card.profile_source or "") or (
+            "asset_description" if card.has_structured_profile else "none"
+        )
+    return (not issues, [issue.to_read() for issue in issues], structured_source)
+
+
 def postprocess_slots(
     *,
     parsed: dict[str, Any],
@@ -221,7 +249,7 @@ def postprocess_slots(
     shot_text: str,
     global_negative: str,
 ) -> tuple[list[ImagePromptSlotRead], list[str]]:
-    """后校验：槽位白名单 + 去重 + 画像卡一致性 + 分层补齐。"""
+    """后校验：槽位白名单 + 去重 + 画像卡一致性 + 分层补齐 + 质量标注。"""
     warnings: list[str] = []
     raw_slots = parsed.get("slots")
     if not isinstance(raw_slots, list):
@@ -252,17 +280,32 @@ def postprocess_slots(
         card = pick_entity_for_slot(spec, cards=cards, shot_text=shot_text)
         layers = build_slot_layers(spec=spec, raw=raw, card=card, warnings=warnings)
         entity_name = coerce_str(raw.get("entity_name")) or (card.name if card else "") or None
+        prompt = assemble_image_prompt(layers)
+        savable, quality_issues, structured_source = build_slot_quality(
+            spec=spec,
+            prompt=prompt,
+            card=card,
+        )
+        if not savable:
+            warnings.append(
+                f"槽位 {category.value}（{spec.label}）未通过质量拦截，"
+                f"不能保存成「提示词已就绪」，也不能进入批量出图："
+                f"{quality_issues[0]['message'] if quality_issues else '内容不合格'}"
+            )
         slots.append(
             ImagePromptSlotRead(
                 category=category,
                 label=spec.label,
                 entity_name=entity_name,
                 layers={key: layers[key] for key in IMAGE_PROMPT_LAYER_ORDER},
-                prompt=assemble_image_prompt(layers),
+                prompt=prompt,
                 negative_prompt=build_slot_negative_prompt(
                     slot_category=str(category.value),
                     global_negative=global_negative,
                 ),
+                savable=savable,
+                quality_issues=quality_issues,
+                structured_source=structured_source,
             )
         )
     return slots, warnings
@@ -308,17 +351,22 @@ def build_dry_run_slots(
             "style": ", ".join([DEFAULT_STYLE_WORDS, *SLOT_STYLE_RULES.get(str(category.value), ())]),
             "quality": DEFAULT_QUALITY_WORDS,
         }
+        prompt = assemble_image_prompt(layers)
+        savable, quality_issues, structured_source = build_slot_quality(spec=spec, prompt=prompt, card=card)
         slots.append(
             ImagePromptSlotRead(
                 category=category,
                 label=spec.label,
                 entity_name=card.name if card else None,
                 layers={key: layers[key] for key in IMAGE_PROMPT_LAYER_ORDER},
-                prompt=assemble_image_prompt(layers),
+                prompt=prompt,
                 negative_prompt=build_slot_negative_prompt(
                     slot_category=str(category.value),
                     global_negative=global_negative,
                 ),
+                savable=savable,
+                quality_issues=quality_issues,
+                structured_source=structured_source,
             )
         )
     return slots, warnings
@@ -358,14 +406,17 @@ async def preview_image_prompts(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"镜头 {body.shot_id} 没有剧本摘录，无法生成图片提示词。",
                 )
-        elif body.entity_profiles:
-            # 资产级：没有镜头文本是正常的，用占位文案让模板有东西可渲染
+        elif body.entity_profiles or body.project_id:
+            # 资产级：没有镜头文本是正常的，用占位文案让模板有东西可渲染。
+            # 只给 ``project_id`` 也按资产级处理（画像卡由 ``load_project_entity_profiles``
+            # 自动装载）—— 资产准备页正是这个调用形态，此前会被 400 挡掉，
+            # 导致"项目内实体自动装载 + 结构化资料富化"这条能力根本没有入口。
             asset_only = True
             shot_text = ""
         else:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="需要提供 shot_id / shot_text（镜头级），或 entity_profiles（资产级）。",
+                detail="需要提供 shot_id / shot_text（镜头级），或 project_id / entity_profiles（资产级）。",
             )
     elif body.shot_id:
         shot_id = body.shot_id
@@ -382,8 +433,26 @@ async def preview_image_prompts(
     profiles: list[EntityProfileInput] = list(body.entity_profiles)
     profile_source = "request"
     if not profiles and project_id:
-        profiles = await load_project_entity_profiles(db, project_id=project_id)
+        # 资产级自动装载：把 chapter_id 一起带下去，全局资产（场景/道具/服装）才会读到
+        # **本章**的 overlay 而不是别的章节的资料（章节隔离，见 asset_overlays）。
+        profiles = await load_project_entity_profiles(
+            db,
+            project_id=project_id,
+            chapter_id=body.chapter_id or (shot_context.chapter_id if shot_context else None),
+        )
         profile_source = "project"
+    if body.entity_names:
+        # 逐资产生成：把画像卡收窄到指定名称（不改自动装载，也不绕过章节资料加载）
+        wanted = {normalize_name(name) for name in body.entity_names if str(name).strip()}
+        profiles = [profile for profile in profiles if normalize_name(profile.name) in wanted]
+        if not profiles:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"entity_names 里的名称在本项目/本章的实体画像里都找不到："
+                    f"{list(body.entity_names)}。请检查名称写法，或先确认该资产已建/已关联。"
+                ),
+            )
     cards = build_profile_cards(profiles, source=profile_source)
 
     categories = resolve_requested_categories(body.categories)
@@ -413,6 +482,19 @@ async def preview_image_prompts(
         warnings.append(asset_only_note)
     if not cards:
         warnings.append("本次没有可用的实体画像卡，图片提示词只依据镜头文本生成，实体一致性可能较弱。")
+    # 画像卡里"只有空话"的实体：如实点出来，并指向正确的补齐入口。
+    # 这里只是**如实回报**；真正拦住"保存成已就绪"的是写库前的质量拦截
+    # （见 app.services.studio.asset_prompt_quality）。
+    vague_cards = [card for card in cards if not card.has_structured_profile]
+    if vague_cards:
+        names = "、".join(card.name for card in vague_cards[:8])
+        more = "" if len(vague_cards) <= 8 else f" 等 {len(vague_cards)} 个"
+        warnings.append(
+            f"以下实体在库里没有可用于出图的资料（{names}{more}），"
+            "画像卡只能落到「外观信息不足，需人工补充」这类空话，"
+            "生成结果不会通过质量拦截、不能保存成「提示词已就绪」。"
+            "请先在资产准备页生成「章节资产清单」并确认，或手工补齐资产描述。"
+        )
 
     target, target_warning = await _try_resolve_target(db, needed=llm_caller is None)
 

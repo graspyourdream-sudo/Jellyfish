@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import uuid
-
-import os
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.utils import apply_keyword_filter, apply_order, paginate
+from app.api.utils import apply_keyword_filter, apply_order, error_envelope, paginate
 from app.dependencies import get_db
 from app.models.studio import Chapter, ChapterStatus, Project
 from app.models.types import ProjectStartMode, ProjectStyle, ProjectVisualStyle
@@ -33,9 +33,31 @@ from app.schemas.studio.projects import (
     StyleOption,
 )
 from app.schemas.studio.assets import ProjectAssetReadinessRead
+from app.services.studio.asset_prompt_batch import save_asset_image_prompts
 from app.services.studio.project_asset_readiness import build_project_asset_readiness
 
 router = APIRouter()
+
+
+class ProjectAssetImagePromptItem(BaseModel):
+    """批量保存里的一项：资产 + 本次要保存的槽位提示词。"""
+
+    asset_type: str = Field(..., description="character / scene / prop / costume")
+    asset_id: str = Field(..., description="资产 ID")
+    image_prompts: dict[str, str] = Field(
+        ...,
+        description="按槽位类别提交的提示词（例如 character_image_front / prop_image_front）；只需提交要变更的槽位",
+    )
+
+
+class ProjectAssetImagePromptSaveRequest(BaseModel):
+    """批量保存资产图片提示词的请求（全有或全无）。"""
+
+    items: list[ProjectAssetImagePromptItem] = Field(..., description="要保存的资产与提示词")
+    confirm_replace_image_prompt: bool = Field(
+        False,
+        description="已有提示词槽位默认**不被覆盖**；确实要覆盖时置 true",
+    )
 
 PROJECT_ORDER_FIELDS = {"name", "created_at", "updated_at", "progress"}
 
@@ -221,6 +243,54 @@ async def get_project_asset_readiness(
     await get_or_404(db, Project, project_id, detail=entity_not_found("Project"))
     payload = await build_project_asset_readiness(db, project_id=project_id)
     return success_response(ProjectAssetReadinessRead.model_validate(payload))
+
+
+@router.post(
+    "/{project_id}/asset-image-prompts",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="批量保存资产图片提示词（后端质量拦截 + 跨资产查重 + 覆盖保护）",
+)
+async def save_project_asset_image_prompts(
+    project_id: str,
+    body: dict[str, Any],
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[dict[str, Any]]:
+    """资产准备页「确认保存」的**唯一批量入口**（一次请求一个事务，全有或全无）。
+
+    为什么必须放在后端而不是各页面各写一遍：
+
+    - **质量拦截**（422，结构化中文错误、可照做修）：空提示词、
+      含「外观信息不足 / 需人工补充」这类空话、只有资产名 + 通用摄影词
+      （去掉资产名与景别/机位/背景/画质词后没有任何该资产的特征）；
+    - **跨资产查重**（409）：两个**不同**资产生成了逐字相同或高度重复的内容
+      （同一资产的正面/侧面不在此列）——这正是"一段文本给两个角色"的线上症状；
+    - **覆盖保护**（409）：已有提示词槽位默认不动，要覆盖必须显式传
+      ``confirm_replace_image_prompt=true``；
+    - **合并写入**：只写本次提交的槽位，其它槽位原样保留。
+
+    任何一项不合规 → 整批拒绝、库里零改动；成功返回里带每项实际写入的槽位。
+    请求体用原始 ``dict``：这样 ``confirm_replace_image_prompt`` 这类开关字段
+    与既有 ``primary_protection`` 的口径一致（未知字段照旧被忽略，向后兼容）。
+    """
+    await get_or_404(db, Project, project_id, detail=entity_not_found("Project"))
+    items = body.get("items") if isinstance(body, dict) else None
+    if not isinstance(items, list):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_body", "message": "items 必须是数组。", "fix": "请按文档传入 items 数组。"},
+        )
+    try:
+        payload = await save_asset_image_prompts(
+            db,
+            project_id=project_id,
+            items=items,
+            raw_body=body,
+        )
+    except HTTPException as exc:
+        # 质量拦截 / 跨资产查重 / 覆盖保护都是**结构化中文错误**，
+        # 必须原样进 meta.error，不能被全局处理器压成一行字符串。
+        return error_envelope(code=exc.status_code, detail=exc.detail)
+    return success_response(payload)
 
 
 @router.patch(

@@ -129,6 +129,8 @@ def resolve_effective_ratio(input_: VideoGenerationInput) -> str | None:
     return input_.ratio
 
 
+# 优先级 if 链：多个 return 是这段规则最清楚的表达（不该为了行数拆成状态机）
+# pylint: disable=too-many-return-statements
 def infer_ratio_from_size(value: str | None) -> str | None:
     """从「比例」或「像素尺寸」字符串反推画幅比例。
 

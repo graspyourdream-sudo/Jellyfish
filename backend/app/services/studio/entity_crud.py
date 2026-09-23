@@ -11,6 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.utils import apply_keyword_filter, apply_order, paginate
 from app.models.studio import Actor, Chapter, Costume, Project, ProjectActorLink, Shot, ShotCharacterLink
 from app.schemas.studio.cast import ShotCharacterLinkCreate
+from app.services.studio.asset_prompt_quality import (
+    ensure_image_prompts_not_silently_replaced,
+    validate_asset_image_prompts,
+)
 from app.services.studio.product_guardrails import validate_product_text_fields
 from app.services.common import entity_already_exists, entity_not_found
 from app.services.studio.entity_specs import DEFAULT_VIEW_ANGLES, LINK_MODEL_BY_ENTITY, entity_spec, normalize_entity_type
@@ -129,6 +133,14 @@ async def create_entity(
     data = parsed.model_dump()
     # 资产级图片提示词属于正式产物字段：禁止把演练占位文本写进去
     validate_product_text_fields(data)
+    # 再拦"空话 / 空提示词 / 只有资产名+通用摄影词"：这类内容不得被保存成「提示词已就绪」，
+    # 更不得进入批量出图（见 asset_prompt_quality 的模块说明）。
+    validate_asset_image_prompts(
+        data.get("image_prompts"),
+        asset_key=str(data.get("id") or ""),
+        asset_name=str(data.get("name") or ""),
+        asset_type=entity_type_norm,
+    )
 
     link_project_id: str | None = None
     link_chapter_id: str | None = None
@@ -282,6 +294,21 @@ async def update_entity(
     update_data = spec.update_model.model_validate(body).model_dump(exclude_unset=True)
     # 资产级图片提示词属于正式产物字段：禁止把演练占位文本写进去
     validate_product_text_fields(update_data)
+    if "image_prompts" in update_data:
+        # 「不许自动覆盖」+「质量拦截」：两条都必须在 setattr 之前判定，
+        # 这样 409/422 时库里一行都没改。
+        ensure_image_prompts_not_silently_replaced(
+            getattr(obj, "image_prompts", None),
+            update_data.get("image_prompts"),
+            raw_body=body,
+            asset_name=str(getattr(obj, "name", "") or ""),
+        )
+        validate_asset_image_prompts(
+            update_data.get("image_prompts"),
+            asset_key=str(entity_id),
+            asset_name=str(getattr(obj, "name", "") or ""),
+            asset_type=entity_type_norm,
+        )
     if entity_type_norm == "character":
         if "project_id" in update_data and await db.get(Project, update_data["project_id"]) is None:
             raise HTTPException(status_code=400, detail=entity_not_found("Project"))

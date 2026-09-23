@@ -352,7 +352,9 @@ async def test_submit_plan_dispatches_template_and_kind_per_type(
     hint_by_type = {
         "character": "正面全身参考图",
         "scene": "广角建立镜头，空间结构清晰",
-        "prop": "道具正面展示，干净背景",  # 注册表没有 prop 槽位 → 分流表里的兜底提示词
+        # 道具的**正式槽位**已补进 llm_orchestration.registry（PromptCategory.prop_image_front），
+        # 所以这里取的是槽位规格里的 view_hint，不再走 asset_strategies 的兜底文案。
+        "prop": "道具正面清晰展示，完整入画，干净背景",
     }
     assert hint_by_type[asset_type] in target.prompt
     for other_type, hint in hint_by_type.items():
