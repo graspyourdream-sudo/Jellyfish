@@ -19,10 +19,121 @@
 // 带 `.ts` 后缀：本模块要能被 `node --test` 直接加载（Node ESM 不猜扩展名），
 // tsconfig 已开 allowImportingTsExtensions，Vite 也照常解析。
 import { maskInternalIds } from '../../../components/maskInternalIds.ts'
+import {
+  BATCH_REFERENCE_FLOW_LABEL,
+  IMAGE_ASSET_TYPE_ORDER,
+  buildAspectRatioNotice,
+  buildAspectRatioStatement,
+  buildBatchActionLabel,
+  buildBatchConfirmTitle,
+  groupAssetsByType,
+  isImageAssetType,
+  resolveResultKind,
+  resolveResultLabel,
+  resultArtifactCopy,
+  supportsBatchReference,
+  BATCH_REFERENCE_ALLOWED_BY_ASSET_TYPE,
+  CHARACTER_ONLY_RESULT_KIND,
+  CHARACTER_REFERENCE_RATIO,
+  RESULT_KIND_BY_ASSET_TYPE,
+  RESULT_LABEL_BY_ASSET_TYPE,
+  RESULT_NOUN_BY_ASSET_TYPE,
+  type ImageAssetType,
+} from './assetResultKind.ts'
+
+/* ------------------------------------------- 按资产类型的生产口径（用户点名要有） */
+
+/**
+ * 类型 → **图片提示词槽位**（= 生图实际读取的那一列 `image_prompts[<slot>]`）。
+ *
+ * 后端按 `asset_type` 分流到各自的提示词模板/尺寸/结果类型；前端这一侧至少要把
+ * "读哪一列提示词"钉死，避免四类资产共用同一条提示词。
+ */
+export const PROMPT_SLOT_BY_ASSET_TYPE: Record<ProductionAssetType, string> = {
+  character: 'character_image_front',
+  scene: 'scene_image_front',
+  prop: 'prop_image_front',
+  costume: 'costume_image_front',
+}
+
+export type AssetTypeProductionSpec = {
+  assetType: ProductionAssetType
+  /** 类型名：人物 / 场景 / 道具 / 服装 */
+  assetText: string
+  /** 提示词槽位（`image_prompts` 的键） */
+  promptSlot: string
+  /** 机器可读结果类型（人物 = characterReference，其余各用各的） */
+  resultKind: string
+  /** 结果类型中文标签：人物参考图 / 场景资产图 / 道具资产图 / 服装设定图 */
+  resultLabel: string
+  /** 按钮与确认框里的简称（只有人物叫「参考图」） */
+  noun: string
+  /** 该类型的默认出图比例（人物固定 16:9，其余跟随本次选择） */
+  aspectRatio: string
+  /** 比例是否**固定**（不跟随项目/镜头/用户选择） */
+  aspectRatioFixed: boolean
+  /** 「按定版图片批量出图」是否对该类型开放（只有人物） */
+  batchReferenceAllowed: boolean
+}
+
+/**
+ * 类型 → 生产口径（提示词槽位 / 结果类型 / 标签 / 尺寸）。
+ *
+ * 这是**唯一**的一份映射：卡片、列表、确认框、按钮文案都从这里取，
+ * 避免出现"场景被标成人物参考图"这类错标。
+ */
+export function assetTypeProductionSpec(assetType: ProductionAssetType): AssetTypeProductionSpec {
+  const copy = resultArtifactCopy(assetType)
+  const fixed = assetType === 'character'
+  return {
+    assetType,
+    assetText: copy.assetText,
+    promptSlot: PROMPT_SLOT_BY_ASSET_TYPE[assetType],
+    resultKind: RESULT_KIND_BY_ASSET_TYPE[assetType],
+    resultLabel: RESULT_LABEL_BY_ASSET_TYPE[assetType],
+    noun: RESULT_NOUN_BY_ASSET_TYPE[assetType],
+    aspectRatio: fixed ? CHARACTER_REFERENCE_RATIO : '',
+    aspectRatioFixed: fixed,
+    batchReferenceAllowed: BATCH_REFERENCE_ALLOWED_BY_ASSET_TYPE[assetType],
+  }
+}
+
+/** 全部四类的生产口径（按人物 / 场景 / 道具 / 服装顺序）。 */
+export function assetTypeProductionSpecs(): AssetTypeProductionSpec[] {
+  return ASSET_TYPE_ORDER.map((assetType) => assetTypeProductionSpec(assetType))
+}
+
+/**
+ * 错标自检：**非人物**类型的结果类型/标签里一旦出现「参考图」或 `characterReference`，
+ * 就把这条问题报出来（空数组 = 全部正确）。
+ *
+ * 对应硬要求：「场景 / 道具 / 服装绝不能被标成 characterReference」。
+ */
+export function collectTypeNamingProblems(
+  specs: readonly AssetTypeProductionSpec[] = assetTypeProductionSpecs(),
+): string[] {
+  const problems: string[] = []
+  specs.forEach((spec) => {
+    if (spec.assetType === 'character') return
+    const haystack = `${spec.resultKind} ${spec.resultLabel} ${spec.noun}`
+    if (haystack.includes('参考图')) problems.push(`${spec.assetType}：标签里出现「参考图」（${spec.resultLabel}）`)
+    if (haystack.includes(CHARACTER_ONLY_RESULT_KIND)) {
+      problems.push(`${spec.assetType}：结果类型被标成 ${CHARACTER_ONLY_RESULT_KIND}`)
+    }
+    if (spec.batchReferenceAllowed) problems.push(`${spec.assetType}：不该开放「按定版图片批量出图」`)
+  })
+  return problems
+}
 
 /* ------------------------------------------------------------------ 基础口径 */
 
-export type ProductionAssetType = 'character' | 'scene' | 'prop' | 'costume'
+/**
+ * 出图链路涉及的资产类型。
+ *
+ * 直接复用 `assetResultKind.ImageAssetType`（**同一个人物/场景/道具/服装口径**）：
+ * 结果类型标签、画幅来源、按类型文案都从那里取，全前端只有一份分流表。
+ */
+export type ProductionAssetType = ImageAssetType
 
 /** 分页签顺序：人物 / 场景 / 道具 / 服装。 */
 export const ASSET_TYPE_ORDER: ProductionAssetType[] = ['character', 'scene', 'prop', 'costume']
@@ -38,7 +149,7 @@ export const ASSET_TYPE_LABEL: Record<ProductionAssetType, string> = {
 /**
  * 出图服务当前**只接受**这三类资产（后端 `SERVICE_ASSET_TYPES`）。
  * 服装不在契约内 —— 选中服装时必须在**提交前**明确拦住并说明原因，
- * 不能静默丢弃，也不能让它进队列（本机没有 worker 的队列只会留下「排队中」假象）。
+ * 不能静默丢弃，也不能让它进队列（本机没有 worker 的队列只会留下一条永远不执行的"排队中"）。
  */
 export const SUBMITTABLE_ASSET_TYPES: ProductionAssetType[] = ['character', 'scene', 'prop']
 
@@ -197,8 +308,6 @@ export function summarizeSelection(
 /* ---------------------------------------------------------------- 生成设置 */
 
 export type GenerationSettings = {
-  /** 是否使用定版图当垫图（关掉 = 纯文本提示词出图） */
-  useReference: boolean
   /** 画面比例 */
   aspectRatio: string
 }
@@ -214,28 +323,120 @@ export const ASPECT_RATIO_OPTIONS = [
 export const DEFAULT_ASPECT_RATIO = '16:9'
 
 /**
- * 默认生成设置：使用定版图当垫图（没有定版图的资产自然退化为纯提示词出图）+ 16:9。
+ * 提交给出图服务时**固定**使用的阶段值：`character_sheet` = 不把已有图片当输入传出去。
  *
- * 说明：后端 `stage` 只决定**要不要垫图**（`character_sheet` = 不带垫图，
- * `reference_batch` = 带定版垫图），真实生成类型由后端按资产类型决定，
- * 所以这里不需要、也不应该把内部取值暴露给用户。
+ * 口径（用户 2026-09 拍板，最高优先级）：
+ * 上游「人物及场景生产」的**真实模型就是"按提示词直接生成参考图"**
+ * （其代码明写"人物直接生成 16:9 参考图模式：合并人物主图提示词与参考图布局，一次生成"，
+ * 结果进参考图库，用户再从结果里挑一张设为人物主图/定版）。
+ *
+ * 所以 Jellyfish 的**默认主流程 = 生成参考图**：按（可编辑的）图片提示词直接生成，
+ * 走的就是既有的 `POST /studio/image-pipeline/submit`（提交给上游服务端点），
+ * 不需要新出口、也不需要上游把已有图片当输入再生成。
+ *
+ * 另有**可选返工流程**「使用已有参考图重新生成」（`regenerate_with_existing_reference`）：
+ * 只有该资产**已有参考图**、且用户明确要保一致性时才用，走 Jellyfish 自己已验证的
+ * APIMart 图片通道（把公网可用的参考图真的传进请求），**不是**上游服务端点。
  */
+export const SUBMIT_STAGE: 'character_sheet' | 'reference_batch' = 'character_sheet'
+
+/** 出图方式的**如实陈述**（默认主流程的原文口径，页面与确认框都用它）。 */
+export const OUTPUT_MODE_STATEMENT = '出图方式：按提示词直接生成参考图（默认）'
+
+/** 两条流程的**代码名分开**（不要合成一个含糊的 use_reference 开关）。 */
+export type ProductionFlow = 'generate_reference_image' | 'regenerate_with_existing_reference'
+
+export const FLOW_LABEL: Record<ProductionFlow, string> = {
+  generate_reference_image: '生成参考图',
+  regenerate_with_existing_reference: '使用已有参考图重新生成',
+}
+
+/** 默认主流程（批量与单项生成都用它）。 */
+export const DEFAULT_FLOW: ProductionFlow = 'generate_reference_image'
+
+/**
+ * 「使用已有参考图重新生成」的前置条件：该资产**已经有参考图**。
+ *
+ * 没有参考图的资产根本谈不上"用已有参考图重新生成"，按钮就该是禁用的。
+ */
+export function canRegenerateWithExistingReference(asset: Pick<ProductionAsset, 'hasImage'> | undefined): boolean {
+  return asset?.hasImage === true
+}
+
+/** 端点还没上线时的如实说明（前端必须优雅降级，不能假装可用）。 */
+export const REFERENCE_REWORK_UNAVAILABLE_HINT =
+  '该能力正在接入（后端端点还没上线），暂时不能使用；现在可以先用「重新生成参考图」。'
+
+/** 默认生成设置：16:9（出图方式固定为"按提示词直接生成参考图"）。 */
 export function defaultGenerationSettings(): GenerationSettings {
-  return { useReference: true, aspectRatio: DEFAULT_ASPECT_RATIO }
+  return { aspectRatio: DEFAULT_ASPECT_RATIO }
 }
 
-/** 设置 → 后端 `stage`（内部值，不进用户文案）。 */
-export function stageForSettings(settings: GenerationSettings): 'character_sheet' | 'reference_batch' {
-  return settings.useReference ? 'reference_batch' : 'character_sheet'
-}
-
-/** 设置的一句话说明（用户语言）。 */
-export function describeSettings(settings: GenerationSettings): string {
+/**
+ * 设置的一句话说明（用户语言）。
+ *
+ * `assetType` 决定"生成的是什么图"：人物 = 参考图，场景/道具/服装 = 各自的资产图/设定图。
+ * 不给类型时按人物（历史口径，旧调用方与测试不用改）。
+ */
+export function describeSettings(
+  settings: GenerationSettings,
+  assetType: ProductionAssetType = 'character',
+): string {
   return [
-    settings.useReference ? '使用定版图当垫图' : '不使用垫图（只按提示词出图）',
+    resultArtifactCopy(assetType).outputModeStatement,
     `画面比例 ${settings.aspectRatio}`,
     `每个资产 ${IMAGES_PER_ASSET} 张（出图服务一次只出一张）`,
   ].join('；')
+}
+
+/**
+ * 该链路不支持某类型时的说明（按类型取词，**不让场景/道具出现「参考图」**）。
+ *
+ * 历史文案对所有类型都说「生成参考图」，服装/道具用户会以为是同一种图。
+ */
+export function supportHint(assetType: ProductionAssetType): string {
+  return resultArtifactCopy(assetType).unsupportedHint
+}
+
+/** 按类型取的「一张结果」的按钮文案（生成参考图 / 生成场景资产图 …）。 */
+export function generateActionLabel(assetType: ProductionAssetType, operation: BatchOperation = 'generate'): string {
+  const copy = resultArtifactCopy(assetType)
+  return operation === 'regenerate' ? copy.regenerateAction : copy.generateAction
+}
+
+/** 按类型取的返工入口文案（使用已有参考图重新生成 / 使用已有场景资产图重新生成）。 */
+export function existingImageActionLabel(assetType: ProductionAssetType): string {
+  return resultArtifactCopy(assetType).existingImageAction
+}
+
+/**
+ * 端点还没上线时的如实说明（**按类型取词**：场景/道具不说「参考图」）。
+ */
+export function referenceReworkUnavailableHint(assetType: ProductionAssetType = 'character'): string {
+  return `该能力正在接入（后端端点还没上线），暂时不能使用；现在可以先用「${resultArtifactCopy(assetType).regenerateAction}」。`
+}
+
+/** 「按定版图片批量出图」对该类型的如实说明（只有人物开放）。 */
+export function batchReferenceHint(assetType: ProductionAssetType): string {
+  return resultArtifactCopy(assetType).batchReferenceHint
+}
+
+/** 「批量生成 / 批量重新生成」按钮文案（按类型；混选时列出每个类型各多少项）。 */
+export function batchActionLabel(
+  assets: readonly Pick<ProductionAsset, 'type'>[],
+  operation: BatchOperation,
+): string {
+  return buildBatchActionLabel(groupAssetsByType(assets), operation)
+}
+
+/** 「按定版图片批量出图」的按钮文案（只有人物开放）。 */
+export function batchReferenceActionLabel(count: number): string {
+  return `${BATCH_REFERENCE_FLOW_LABEL}（${count}）`
+}
+
+/** 该类型是否允许走「按定版图片批量出图」（只有人物，与后端同口径）。 */
+export function canBatchWithReference(assetType: ProductionAssetType): boolean {
+  return supportsBatchReference(assetType)
 }
 
 /* ------------------------------------------------------ 二次确认（硬边界 B） */
@@ -275,8 +476,12 @@ export type BatchConfirmationInput = {
   settings: GenerationSettings
   mode: RuntimeMode
   operation: BatchOperation
-  /** 本次计划里带垫图的条数（来自只读的出图计划，取不到时传 null） */
-  withReference: number | null
+  /** 项目自己的最终视频画幅（`projects.default_video_ratio`）：用来把「人物参考图固定 16:9」说清 */
+  projectVideoRatio?: string | null
+  /** 只读计划里的 `aspect_ratio_source`（命中人物固定口径时是 `character_reference_fixed`） */
+  aspectRatioSource?: string | null
+  /** 只读计划里的画幅值 */
+  aspectRatioValue?: string | null
 }
 
 /**
@@ -287,10 +492,14 @@ export type BatchConfirmationInput = {
  * - 批量（多于 1 项）一律二次确认（范围与张数要当面核对）；
  * - **重新生成**（选中项里有已有图片的资产）一律二次确认（硬边界 B）；
  * - 演练模式下单个未生成项的「生成」不弹框（不花钱、不覆盖任何东西）。
+ *
+ * 按类型分流（用户点名）：混选时**按 asset_type 分组**逐条写清"这一组会生成什么图"，
+ * 场景 / 道具的结果**不叫参考图**；人物那组另外写出「人物参考图固定 16:9，不等于项目最终视频画幅」。
  */
 export function buildBatchConfirmation(input: BatchConfirmationInput): ConfirmationPlan {
   const { scope, settings, mode, operation } = input
   const label = operationLabel(operation)
+  const groups = groupAssetsByType(scope.assets.filter((asset) => isSubmittableAssetType(asset.type)))
 
   if (scope.submittableCount === 0) {
     return {
@@ -318,6 +527,19 @@ export function buildBatchConfirmation(input: BatchConfirmationInput): Confirmat
     `本次选择资产 ${scope.total} 项：人物 ${scope.byType.character}、场景 ${scope.byType.scene}、道具 ${scope.byType.prop}、服装 ${scope.byType.costume}`,
     `本次可出图 ${scope.submittableCount} 项，预计生成图片 ${scope.estimatedImages} 张`,
   ]
+  if (groups.length > 1) {
+    lines.push('本次混选了多个类型，会「按类型分组」分别提交（出图接口一次只接受一个类型）')
+  }
+  groups.forEach((group) => {
+    lines.push(
+      `${group.copy.assetText} ${group.count} 项：${operationLabel(operation)}${group.copy.noun}` +
+        `（结果类型：${group.copy.label}）`,
+    )
+  })
+  // 「按定版图片批量出图」只对人物开放：非人物类型如实说明会被忽略，不静默按人物处理
+  groups
+    .filter((group) => !group.batchReferenceAllowed)
+    .forEach((group) => lines.push(group.copy.batchReferenceHint))
   if (scope.unsupportedCount > 0) {
     lines.push(
       `服装 ${scope.unsupportedCount} 项本次不会提交：出图服务目前只接受人物、场景、道具，服装图片请在资产页手工上传或生成`,
@@ -333,17 +555,24 @@ export function buildBatchConfirmation(input: BatchConfirmationInput): Confirmat
     lines.push(`其中已有定版图的资产 ${scope.withExistingPrimary} 项：本次只新增结果，定版图保持不变`)
   }
   if (scope.ungenerated > 0) {
-    lines.push(`其中还没有图片的资产 ${scope.ungenerated} 项会直接生成首张参考图`)
+    lines.push(`其中还没有图片的资产 ${scope.ungenerated} 项会直接生成第一张结果图`)
   }
-  lines.push(describeSettings(settings))
-  if (settings.useReference) {
-    const withReference = input.withReference
-    lines.push(
-      withReference === null
-        ? '本次会尽量用各资产已定版的图当垫图（取不到垫图的会按纯提示词出图）'
-        : `本次计划里带垫图 ${withReference} 项，其余没有可用垫图的会按纯提示词出图`,
-    )
-  }
+  // 出图方式如实陈述（按类型取词：人物 = 参考图，场景/道具 = 各自的资产图）
+  lines.push(
+    groups.length === 1
+      ? describeSettings(settings, groups[0].assetType)
+      : `出图方式：按提示词直接生成各自的图（${groups
+          .map((group) => `${group.copy.assetText} = ${group.copy.label}`)
+          .join('，')}）；画面比例 ${settings.aspectRatio}；每个资产 ${IMAGES_PER_ASSET} 张（出图服务一次只出一张）`,
+  )
+  // 人物参考图固定 16:9（≠ 项目最终视频画幅）：本次含人物时必须写在确认框里
+  const ratioNotice = buildAspectRatioNotice({
+    assetTypes: groups.map((group) => group.assetType),
+    projectRatio: input.projectVideoRatio,
+    source: input.aspectRatioSource,
+    ratio: input.aspectRatioValue,
+  })
+  if (ratioNotice.applies) lines.push(ratioNotice.line)
   if (scope.withoutPrompt > 0) {
     lines.push(`其中 ${scope.withoutPrompt} 项还没有保存过图片提示词，本次会用资产描述拼装提示词`)
   }
@@ -352,10 +581,7 @@ export function buildBatchConfirmation(input: BatchConfirmationInput): Confirmat
     required,
     blocked: false,
     blockedReason: '',
-    title:
-      operation === 'regenerate'
-        ? `确认重新生成这 ${scope.submittableCount} 项资产？`
-        : `确认生成这 ${scope.submittableCount} 项资产的图片？`,
+    title: buildBatchConfirmTitle(groups, operation),
     lines,
     costWarning: mode === 'real' ? COST_WARNING_REAL : COST_WARNING_DRY_RUN,
     okText: mode === 'real' ? `确认真实生成（${scope.estimatedImages} 张）` : `确认生成（${scope.estimatedImages} 张）`,
@@ -368,6 +594,51 @@ export function requiresPrimaryReplaceConfirmation(asset: Pick<ProductionAsset, 
   return asset?.hasPrimary === true
 }
 
+export type ReferenceReworkConfirmation = {
+  required: boolean
+  title: string
+  lines: string[]
+  costWarning: string
+  okText: string
+  cancelText: string
+}
+
+/**
+ * 「使用已有参考图重新生成」的二次确认文案（用户点名要）。
+ *
+ * 必须写清三件事：**用哪张图作为输入**、**会替换/新增什么**、**会不会产生费用**。
+ * 这是可选返工流程：走 Jellyfish 自己的图片通道（参考图会真的进请求），与默认主流程无关。
+ */
+export function buildRegenerateWithReferenceConfirmation(args: {
+  assetName: string
+  /** 会用哪张图（可读名；具体地址只进「技术详情」） */
+  referenceLabel: string
+  mode: RuntimeMode
+  /** 资产类型：决定"这张图叫什么"（人物 = 参考图；场景/道具/服装用各自的图名） */
+  assetType?: ProductionAssetType
+}): ReferenceReworkConfirmation {
+  const copy = resultArtifactCopy(args.assetType ?? 'character')
+  const lines = [
+    `会把这张已有${copy.noun}（${args.referenceLabel}）作为输入传给图片模型`,
+    `这一步是为了保持同一个${copy.assetText}的一致性；默认主流程「${copy.generateAction}」不依赖已有图片`,
+    `新的结果会作为新的一张图片保存，不会替换现有${copy.noun}，也不会动现有定版图`,
+    args.mode === 'real'
+      ? '这张已有图片必须公网可访问：提交前会先探测可达性，取不到就不提交、也不产生费用'
+      : '演练模式：不会真的把已有图片发出去，返回的是占位结果',
+  ]
+  return {
+    required: true,
+    title: `使用「${args.assetName}」已有的${copy.noun}重新生成一张？`,
+    lines,
+    costWarning:
+      args.mode === 'real'
+        ? '当前是真实模式：确认后会把已有图片真的传进请求并重新出图，按张计费，会产生真实费用。'
+        : '当前是演练模式：不会真的调用图片模型、不产生费用；返回的是占位结果。',
+    okText: args.mode === 'real' ? '确认真实生成（会产生费用）' : '确认重新生成',
+    cancelText: '取消',
+  }
+}
+
 export type PrimaryConfirmationPlan = {
   required: boolean
   title: string
@@ -378,8 +649,9 @@ export type PrimaryConfirmationPlan = {
 /**
  * 「设为定版」的确认文案。
  *
- * 说实话：换定版本身**不产生出图费用**（只是改一个标识）；但它会改变
- * 后续出图使用的垫图，所以必须写清"替换的是什么"。
+ * 说实话：换定版本身**不产生出图费用**（只是改一个标识）。
+ * 注意口径：默认主流程是"按提示词直接生成参考图"，定版图是资产对外确认使用的那张图；
+ * 需要保一致性时走**可选返工流程**「使用已有参考图重新生成」（单独入口 + 二次确认）。
  */
 export function buildPrimaryReplaceConfirmation(args: {
   assetName: string
@@ -397,7 +669,8 @@ export function buildPrimaryReplaceConfirmation(args: {
       args.isFromGeneratedResult
         ? '这张是本次生成的结果，会先保存进该资产的图片再设为定版'
         : '这张来自该资产已有的图片',
-      '后续出图会用它当垫图，镜头一致性以它为准',
+      '定版图是该资产对外确认使用的那张图，后续环节以它为准',
+      '需要保持同一人物/场景一致性时，用卡片上的「使用已有参考图重新生成」（会另行确认）',
     ],
     costWarning: '替换定版本身不产生出图费用；只有之后再点「生成」才会产生费用。',
   }
@@ -543,8 +816,8 @@ export function buildAttemptPlan(
     attempt,
     note:
       attempt > 0
-        ? `这是第 ${attempt + 1} 次尝试：用同一条提示词再生成一张新图（出图服务会为本次尝试分配新的任务，不会把上一次的结果直接还给你）。`
-        : '这次会用上面这条提示词生成；同一条提示词如果之前提交过，出图服务会复用已有结果。',
+        ? `这是第 ${attempt + 1} 次尝试：用同一条提示词再生成一张参考图（出图服务会为本次尝试分配新的任务，不会把上一次的结果直接还给你）。`
+        : '这次会用上面这条提示词直接生成参考图；同一条提示词如果之前提交过，出图服务会复用已有结果。',
     isRetry: attempt > 0,
   }
 }
@@ -568,6 +841,8 @@ export type ProductionTask = {
   assetType: ProductionAssetType
   assetName: string
   round: number
+  /** 这一项走的是哪条流程（默认主流程 / 可选返工流程） */
+  flow: ProductionFlow
   /** 这一项是第几次尝试（0 = 首轮）。重试/重新生成会 +1，后端据此换一个新的幂等键 */
   attempt: number
   operation: BatchOperation
@@ -580,6 +855,17 @@ export type ProductionTask = {
   prompt: string
   /** 归一化口径（内部值，只进「技术详情」） */
   outcome: string
+  /**
+   * 结果类型标签（**消费后端回包**）：`characterReference` / `sceneAssetImage` /
+   * `propAssetImage` / `costumeDesignImage`。卡片上的图片类型标签由它 + `resultLabel` 决定。
+   */
+  resultKind: string
+  /** 结果类型的中文标签（后端 `result_label`）：人物参考图 / 场景资产图 / 道具资产图 / 服装设定图 */
+  resultLabel: string
+  /** 本次结果使用的画幅（人物参考图固定 16:9，**不是**项目最终视频画幅） */
+  aspectRatio: string
+  /** 画幅来源（`character_reference_fixed` = 命中人物固定口径） */
+  aspectRatioSource: string
   ossUrl: string
   imageUrl: string
   /** 失败原因（已做内部标识屏蔽，可直接展示） */
@@ -596,7 +882,7 @@ export type ProductionTask = {
 }
 
 export const TASK_STATUS_LABEL: Record<ProductionTaskStatus, string> = {
-  queued: '排队中',
+  queued: '待提交',
   submitting: '正在提交',
   generating: '正在生成',
   done: '已完成',
@@ -631,7 +917,10 @@ export type TaskProgressSummary = {
 
 /**
  * 进度数字（要求 7）。全部来自真实的任务状态，不估算、不编造：
- * 总数 / 已完成 / 失败 / 生成中 / 排队中 / 已停止 / 演练占位。
+ * 总数 / 已完成 / 失败 / 生成中 / 待提交 / 已停止 / 演练占位。
+ *
+ * 「待提交」而不是「排队中」：出图是**同进程内联执行**的（本机没有 broker/worker），
+ * 不存在真正的队列，写"排队中"会让人以为后台有个 worker 在跑。
  */
 export function summarizeTaskProgress(tasks: readonly ProductionTask[]): TaskProgressSummary {
   const counts = { done: 0, failed: 0, generating: 0, queued: 0, stopped: 0, dryRun: 0 }
@@ -682,7 +971,7 @@ export function describeProgressLines(summary: TaskProgressSummary): ProgressLin
     { label: '总数', value: summary.total, tone: 'default' },
     { label: '已完成', value: summary.done, tone: 'green' },
     { label: '生成中', value: summary.generating, tone: 'blue' },
-    { label: '排队中', value: summary.queued, tone: 'blue' },
+    { label: '待提交', value: summary.queued, tone: 'blue' },
     { label: '失败', value: summary.failed, tone: summary.failed > 0 ? 'red' : 'default' },
     { label: '已停止', value: summary.stopped, tone: 'default' },
     { label: '演练占位', value: summary.dryRun, tone: 'gold' },
@@ -701,7 +990,7 @@ export function applyStopToQueue(tasks: readonly ProductionTask[]): ProductionTa
 
 /** 停止时给用户的一句话（写清"停的是什么、什么跑完"）。 */
 export function describeStopEffect(summary: TaskProgressSummary): string {
-  const parts = [`已停止后续：排队中的 ${summary.queued} 项不会开始`]
+  const parts = [`已停止后续：还没提交的 ${summary.queued} 项不会开始`]
   if (summary.generating > 0) parts.push(`正在生成的 ${summary.generating} 项会跑完（出图服务没有取消接口）`)
   parts.push(`已完成的 ${summary.done} 项结果会保留`)
   return parts.join('；')
@@ -736,6 +1025,8 @@ export function orderCardsForDisplay(
 export type SubmitResultLike = {
   source_task_id?: string
   source_asset_id?: string
+  /** 结果所属资产类型（回包里就有；没有时由调用方按资产补） */
+  asset_type?: string
   service_task_id?: string
   status?: string
   outcome?: string
@@ -746,6 +1037,14 @@ export type SubmitResultLike = {
   oss_ready?: boolean
   message?: string
   error_message?: string
+  /** 结果类型标签（新，后端按 asset_type 分流返回）：characterReference / sceneAssetImage / … */
+  result_kind?: string
+  /** 结果类型的中文标签（新）：人物参考图 / 场景资产图 / 道具资产图 / 服装设定图 */
+  result_label?: string
+  /** 本次结果的画幅（新）：人物参考图固定 16:9 */
+  aspect_ratio?: string
+  /** 画幅来源（新）：character_reference_fixed / request / default */
+  aspect_ratio_source?: string
 }
 
 export type NormalizedResult = {
@@ -759,6 +1058,11 @@ export type NormalizedResult = {
   ossUrl: string
   imageUrl: string
   sourceTaskId: string
+  /** 结果类型（后端回包优先，回包里没有时按资产类型兜底） */
+  resultKind: string
+  resultLabel: string
+  aspectRatio: string
+  aspectRatioSource: string
 }
 
 /** 演练占位地址的不可达域名（与后端 `adopt.PLACEHOLDER_URL_MARKERS` 同口径）。 */
@@ -812,13 +1116,24 @@ export function describeFailureReason(result: Pick<SubmitResultLike, 'error_mess
   return '生成失败，但没有拿到具体原因；可在结果卡片上点「查看详情」核对。'
 }
 
-/** 提交响应（单条结果）→ 任务状态。 */
-export function resolveResultStatus(result: SubmitResultLike): NormalizedResult {
+/**
+ * 提交响应（单条结果）→ 任务状态。
+ *
+ * `assetType` 用来兜底结果类型标签：后端**已经**回了 `result_kind` / `result_label`（优先采用），
+ * 但演练模式或老版本回包可能缺字段，缺字段时按资产类型取本类型的标签，
+ * 绝不让场景 / 道具的结果被显示成「参考图」。
+ */
+export function resolveResultStatus(
+  result: SubmitResultLike,
+  assetType: ProductionAssetType = 'character',
+): NormalizedResult {
   const outcome = String(result.outcome || '')
   const serviceTaskId = String(result.service_task_id || '')
   const ossUrl = String(result.oss_url || '')
   const imageUrl = String(result.image_url || '')
   const sourceTaskId = String(result.source_task_id || '')
+  // 回包里的 asset_type 优先（同一批里可能出现不同类型），并做一次白名单校验
+  const type: ProductionAssetType = isImageAssetType(result.asset_type) ? result.asset_type : assetType
   const base = {
     outcome,
     serviceTaskId,
@@ -826,6 +1141,10 @@ export function resolveResultStatus(result: SubmitResultLike): NormalizedResult 
     imageUrl,
     sourceTaskId,
     hasLongTermAddress: Boolean(ossUrl),
+    resultKind: resolveResultKind(type, result.result_kind),
+    resultLabel: resolveResultLabel(type, result.result_label, result.result_kind),
+    aspectRatio: String(result.aspect_ratio || ''),
+    aspectRatioSource: String(result.aspect_ratio_source || ''),
   }
   if (result.dry_run === true || outcome === 'dry_run') {
     return {
@@ -981,7 +1300,7 @@ export function planAdoption(args: {
     return {
       mode: 'adopt',
       imageId: args.asset.imageId ?? null,
-      reason: '该资产还没有图片，会用这张作为它的首张图片（不会成为定版，除非你单独确认）。',
+      reason: '该资产还没有参考图，会用这张作为它的第一张参考图（不会成为定版，除非你单独确认）。',
     }
   }
   if (args.emptySlotId !== null) {
@@ -1024,6 +1343,17 @@ export type ProductionHeadlineInput = {
  * 本区顶部状态（要求 13）。只产出用户语言，取值只有这几种：
  * 可以开始提取 / 可以生成图片 / 正在生成 / 生成失败 / 已有图片，待设为定版 / 已定版。
  */
+/** 一轮全是演练占位时的补充说明（标签不变，只在明细里把话说清楚）。 */
+export const DRY_RUN_ROUND_NOTE =
+  '本轮返回的是演练占位结果（没有真实出图）：演练模式下不能采纳、也不能设为定版。'
+
+function withDryRunNote(detail: string, progress: TaskProgressSummary): string {
+  if (progress.dryRun > 0 && progress.done === 0 && progress.failed === 0) {
+    return `${detail}${DRY_RUN_ROUND_NOTE}`
+  }
+  return detail
+}
+
 export function resolveProductionHeadline(input: ProductionHeadlineInput): ProductionHeadline {
   const { assets, progress, readyCount } = input
   if (assets.length === 0) {
@@ -1037,7 +1367,7 @@ export function resolveProductionHeadline(input: ProductionHeadlineInput): Produ
     return {
       label: '正在生成',
       tone: 'blue',
-      detail: `本轮共 ${progress.total} 项：生成中 ${progress.generating} 项，排队中 ${progress.queued} 项，已完成 ${progress.done} 项。`,
+      detail: `本轮共 ${progress.total} 项：正在生成 ${progress.generating} 项，待提交 ${progress.queued} 项，已完成 ${progress.done} 项。`,
     }
   }
   if (progress.failed > 0) {
@@ -1062,7 +1392,7 @@ export function resolveProductionHeadline(input: ProductionHeadlineInput): Produ
     return {
       label: '已有图片，待设为定版',
       tone: 'blue',
-      detail: `有 ${count} 项资产已经有图片但还没定版：定版图会作为后续出图的垫图，请挑一张设为定版。`,
+      detail: `有 ${count} 项资产已经有图片但还没定版：定版图是该资产对外确认使用的那张图，请挑一张设为定版。`,
     }
   }
   const ungenerated = assets.filter(isUngenerated).length
@@ -1070,17 +1400,22 @@ export function resolveProductionHeadline(input: ProductionHeadlineInput): Produ
     return {
       label: '可以生成图片',
       tone: 'gold',
-      detail: `还有 ${ungenerated} 项资产没有图片：默认只勾选未生成项，选好后点「批量生成选中项」。`,
+      detail: withDryRunNote(
+        `还有 ${ungenerated} 项资产没有图片：默认只勾选未生成项，选好后点「批量生成选中项」。`,
+        progress,
+      ),
     }
   }
   const withoutPrompt = assets.filter((asset) => !asset.hasImagePrompt).length
   return {
     label: '可以生成图片',
     tone: 'gold',
-    detail:
+    detail: withDryRunNote(
       withoutPrompt > 0
         ? `图片都已就绪，但还有 ${withoutPrompt} 项资产没有保存图片提示词：可以点「填提示词」或让大模型生成，再决定要不要重新生成。`
         : `图片与提示词都已就绪，但还有 ${assets.length - readyCount} 项资产没有定版：请挑一张满意的图设为定版。`,
+      progress,
+    ),
   }
 }
 
@@ -1099,18 +1434,55 @@ export const INTERNAL_TOKEN_BLACKLIST = [
   'oss_url',
   'image_url',
   'status',
+  'status:',
   'dry_run',
   'dry-run',
   'partial_failed',
   'queued',
   'running',
+  'ready',
+  // 模型名 / 供应商名一律不进主界面（用户点名）
   'gpt-image',
+  'image2',
+  'deepseek',
   'apimart',
   'provider',
   'celery',
   'build_source_task_id',
   '门禁',
 ]
+
+/**
+ * 主界面**不许出现**的误导说法。
+ *
+ * 口径（用户明确要求）：默认主流程就是「按提示词直接生成参考图」。所以：
+ * - 主界面**不再出现上一版的错误说法**（那个词会让人以为要传输入图；文案黑名单测试里逐条钉住）；
+ * - 也不许说「参考图不参与」「不使用参考图」这类把默认流程说反的话。
+ */
+export const MISLEADING_COPY_PATTERNS: RegExp[] = [
+  /垫图/,
+  /参考图不参与/,
+  /不使用参考图/,
+  /不接参考图/,
+  /不接线参考图/,
+  /图生图/,
+]
+
+/**
+ * 文案里是否出现误导说法。
+ *
+ * 注意：这两条正则本身必须写出被禁的词（否则无从检查），
+ * 所以「文案黑名单」源码扫描测试会把本文件里这几行**显式排除**。
+ */
+export function findMisleadingCopy(text: string): string[] {
+  const raw = String(text ?? '')
+  return MISLEADING_COPY_PATTERNS.filter((pattern) => pattern.test(raw)).map((pattern) => pattern.source)
+}
+
+/** 批量检查（测试与自检用）：返回所有含误导说法的文案。 */
+export function collectMisleadingCopy(texts: readonly string[]): string[] {
+  return texts.filter((text) => findMisleadingCopy(text).length > 0)
+}
 
 /**
  * 汇总本模块产出的所有静态用户文案（测试用）。
@@ -1160,8 +1532,9 @@ export function collectUserFacingTexts(): string[] {
     ...Object.values(ASSET_TYPE_LABEL),
     ...Object.values(TASK_STATUS_LABEL),
     ...Object.values(ASPECT_RATIO_OPTIONS).map((item) => item.label),
-    describeSettings({ useReference: true, aspectRatio: DEFAULT_ASPECT_RATIO }),
-    describeSettings({ useReference: false, aspectRatio: '9:16' }),
+    describeSettings({ aspectRatio: DEFAULT_ASPECT_RATIO }),
+    describeSettings({ aspectRatio: '9:16' }),
+    OUTPUT_MODE_STATEMENT,
     COST_WARNING_REAL,
     COST_WARNING_DRY_RUN,
     operationLabel('generate'),
@@ -1171,22 +1544,70 @@ export function collectUserFacingTexts(): string[] {
   const scope = summarizeSelection(assets, assets.map((asset) => asset.key))
   const confirmation = buildBatchConfirmation({
     scope,
-    settings: { useReference: true, aspectRatio: DEFAULT_ASPECT_RATIO },
+    settings: { aspectRatio: DEFAULT_ASPECT_RATIO },
     mode: 'real',
     operation: 'regenerate',
-    withReference: 1,
   })
   texts.push(confirmation.title, confirmation.costWarning, confirmation.okText, confirmation.cancelText, ...confirmation.lines)
   const dryConfirmation = buildBatchConfirmation({
     scope,
-    settings: { useReference: false, aspectRatio: DEFAULT_ASPECT_RATIO },
+    settings: { aspectRatio: DEFAULT_ASPECT_RATIO },
     mode: 'dry_run',
     operation: 'generate',
-    withReference: null,
   })
   texts.push(dryConfirmation.title, dryConfirmation.costWarning, dryConfirmation.okText, ...dryConfirmation.lines)
   const primary = buildPrimaryReplaceConfirmation({ assetName: '乙', isFromGeneratedResult: true })
   texts.push(primary.title, primary.costWarning, ...primary.lines)
+  // 可选返工流程的确认文案（真实 / 演练两种模式）+ 降级说明 + 两条流程的名字
+  ;([{ mode: 'real' }, { mode: 'dry_run' }] as const).forEach(({ mode }) => {
+    const rework = buildRegenerateWithReferenceConfirmation({
+      assetName: '乙',
+      referenceLabel: '该资产的定版图',
+      mode,
+    })
+    texts.push(rework.title, rework.costWarning, rework.okText, rework.cancelText, ...rework.lines)
+  })
+  texts.push(
+    ...Object.values(FLOW_LABEL),
+    REFERENCE_REWORK_UNAVAILABLE_HINT,
+    ...Object.values(TASK_STATUS_LABEL),
+  )
+
+  // —— 按类型的结果类型文案（图片类型标签 / 按钮 / 确认框 / 画幅说明）——
+  // 这些文案会被「场景/道具不得出现参考图」与「内部标识黑名单」两组测试逐个检查，
+  // 所以必须全部登记进来，而不是只测手工挑的几句。
+  IMAGE_ASSET_TYPE_ORDER.forEach((type) => {
+    const copy = resultArtifactCopy(type)
+    texts.push(
+      copy.assetText,
+      copy.label,
+      copy.noun,
+      copy.generateAction,
+      copy.regenerateAction,
+      copy.existingImageAction,
+      copy.existingImageInputLabel,
+      copy.outputModeStatement,
+      copy.aspectRatioNote,
+      copy.unsupportedHint,
+      copy.batchReferenceHint,
+      generateActionLabel(type, 'regenerate'),
+      existingImageActionLabel(type),
+      referenceReworkUnavailableHint(type),
+      describeSettings({ aspectRatio: DEFAULT_ASPECT_RATIO }, type),
+    )
+  })
+  texts.push(batchActionLabel(assets, 'generate'), batchActionLabel(assets, 'regenerate'))
+  texts.push(
+    buildAspectRatioStatement('16:9'),
+    buildAspectRatioStatement('9:16'),
+    buildAspectRatioStatement(''),
+    buildRegenerateWithReferenceConfirmation({
+      assetName: '乙',
+      referenceLabel: '该资产当前的定版图片',
+      mode: 'dry_run',
+      assetType: 'scene',
+    }).title,
+  )
 
   // —— 顶部状态的每一种取值都要被覆盖（含"正在生成""生成失败"）——
   const ungeneratedOnly = assets.filter((asset) => !asset.hasImage)
@@ -1227,13 +1648,15 @@ export function collectUserFacingTexts(): string[] {
 
 /** 造一条样例任务（仅测试与文案自检用）。 */
 export function makeSampleTask(patch: Partial<ProductionTask> = {}): ProductionTask {
+  const assetType = (patch.assetType ?? 'character') as ProductionAssetType
   return {
     key: 'character:a#1',
     assetKey: 'character:a',
     assetId: 'a',
-    assetType: 'character',
+    assetType,
     assetName: '甲',
     round: 1,
+    flow: DEFAULT_FLOW,
     attempt: 0,
     operation: 'generate',
     status: 'queued',
@@ -1241,6 +1664,10 @@ export function makeSampleTask(patch: Partial<ProductionTask> = {}): ProductionT
     serviceTaskId: '',
     prompt: '',
     outcome: '',
+    resultKind: resolveResultKind(assetType, patch.resultKind),
+    resultLabel: resolveResultLabel(assetType, patch.resultLabel, patch.resultKind),
+    aspectRatio: patch.aspectRatio ?? '',
+    aspectRatioSource: patch.aspectRatioSource ?? '',
     ossUrl: '',
     imageUrl: '',
     errorMessage: '',

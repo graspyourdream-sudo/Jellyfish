@@ -41,6 +41,13 @@ import {
 } from '../../../../services/llmPipelineApi'
 import { listTaskLinksNormalized } from '../../../../services/filmTaskLinks'
 import { buildFileDownloadUrl } from '../utils'
+// 结果类型口径（前端唯一一份）：按类型取词/取标签，避免场景、道具被说成「参考图」
+import {
+  BATCH_REFERENCE_FLOW_LABEL,
+  resultArtifactCopy,
+  supportsBatchReference,
+  type ImageAssetType,
+} from '../../project/ProjectWorkbench/components/assetResultKind.ts'
 import { ASSET_OUTCOME_TAG_COLOR, normalizeAssetResultRow, summarizeAssetResults } from '../assetResultSummary'
 import { DisplayImageCard } from './DisplayImageCard'
 import { ProjectVisualStyleAndStyleFields } from '../../project/ProjectVisualStyleAndStyleFields'
@@ -358,7 +365,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   /** 上传本地图片写入槽位时，正在上传的槽位 id（同一时刻只允许一个）。 */
   const [uploadingImageId, setUploadingImageId] = useState<number | null>(null)
 
-  // 垫图批量出图
+  // 按定版图片批量出图（人物 = 参考图；场景 / 道具 / 服装用各自的图名）
   const [referenceBatchLoading, setReferenceBatchLoading] = useState(false)
   const [referenceBatchOpen, setReferenceBatchOpen] = useState(false)
   /** 单张生成的结果（P3 内联出图返回的地址），用于"采纳 / 采纳并设版"。
@@ -840,7 +847,11 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         name: `${formName || asset?.name || assetId} 生成图`,
         ...(confirmReplacePrimary ? { confirm_replace_primary: true } : {}),
       })
-      message.success(asPrimary ? '已采纳并设为定版（刷新后仍在，后续出图会用它当垫图）' : '已采纳到该槽位（刷新后仍在）')
+      message.success(
+        asPrimary
+          ? '已采纳并设为定版（刷新后仍在，后续出图会以这张定版图片为准）'
+          : '已采纳到该槽位（刷新后仍在）',
+      )
       setSingleGenResult(null)
       await loadData()
     } catch (error) {
@@ -1026,7 +1037,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         content: (
           <div className="text-xs leading-5">
             <div>替换后，原来的定版图不再作为「定版」；它仍留在该资产里，随时可以再切回来。</div>
-            <div>后续出图会以新的定版图当垫图，镜头一致性以它为准。</div>
+            <div>后续出图会以新的定版图片为准，镜头一致性也以它为准。</div>
             <div>替换定版本身不产生出图费用。</div>
           </div>
         ),
@@ -1094,12 +1105,12 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     }
   }
 
-  /** T4：用定版主图做垫图提交批量出图（受 DRY_RUN 守卫，本页不落库）。 */
+  /** T4：用定版图片提交批量出图（受 DRY_RUN 守卫，本页不落库）。**只对人物开放**。 */
   const runReferenceBatch = async (projectId: string) => {
     if (!assetId) return
     const assetType = assetNavigateRelationType
     if (assetType !== 'character' && assetType !== 'scene' && assetType !== 'prop') {
-      message.warning('出图服务 V0 只支持角色/场景/道具，当前资产类型无法垫图批量出图')
+      message.warning('出图服务 V0 只支持角色/场景/道具，当前资产类型无法用定版图片批量出图')
       return
     }
 
@@ -1117,7 +1128,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       setReferenceBatchResult(data)
       setReferenceBatchOpen(true)
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '提交垫图批量出图失败')
+      message.error(error instanceof Error ? error.message : '提交批量出图失败')
     } finally {
       setReferenceBatchLoading(false)
     }
@@ -1125,7 +1136,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
 
   const handleSubmitReferenceBatch = async () => {
     if (!assetId) return
-    if (!supportsImageServiceAssetType(assetNavigateRelationType)) return
+    if (!referenceBatchAllowed) return
     const projectId = resolvedProjectId.trim()
     if (!projectId) {
       // 场景/道具/服装的读模型没有 project_id，从资产库直接打开时也拿不到 URL 线索
@@ -1321,7 +1332,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
    */
   const singleGenAlertLines = useMemo(() => {
     const adoptHint =
-      '采纳会把图片下载入库并写进资产图片槽位（刷新后仍在）；设为定版后，后续出图会用它当垫图、镜头也会读到它。'
+      '采纳会把图片下载入库并写进资产图片槽位（刷新后仍在）；设为定版后，后续出图会以这张定版图片为准，镜头也会读到它。'
     if (singleGenSummary.detailLines.length === 0) return [adoptHint]
     return singleGenSummary.allSucceeded ? [...singleGenSummary.detailLines, adoptHint] : singleGenSummary.detailLines
   }, [singleGenSummary])
@@ -1341,13 +1352,24 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     [referenceBatchResult],
   )
 
+  /**
+   * 「按定版图片批量出图」的准入。
+   *
+   * 两层条件缺一不可：
+   *   1. 出图服务本身支持该类型（character / scene / prop）；
+   *   2. **「按定版图片批量出图」只对人物开放**（后端 `batch_reference_allowed`）——
+   *      场景 / 道具走到这条路时后端会**明确忽略**已有图片，只按提示词生成；
+   *      按钮还叫"用定版图批量出图"就等于骗人，所以这里直接按类型禁用并说明。
+   */
   const referenceBatchSupported = supportsImageServiceAssetType(assetNavigateRelationType)
+  const referenceBatchAllowed = referenceBatchSupported && supportsBatchReference(assetNavigateRelationType as ImageAssetType)
+  const assetCopy = resultArtifactCopy((assetNavigateRelationType ?? 'character') as ImageAssetType)
   const hasPrimaryImage = images.some((img) => img.is_primary === true)
-  const referenceBatchTooltip = referenceBatchSupported
-    ? '用该资产已设为定版的主图做垫图，提交 reference_batch 批量出图（受 DRY_RUN 守卫）'
+  const referenceBatchTooltip = referenceBatchAllowed
+    ? `用该资产已设为定版的图片提交批量出图，生成${assetCopy.label}（受 DRY_RUN 守卫）`
     : assetNavigateRelationType === 'costume'
-      ? '出图服务 V0 不支持服装（costume），无法垫图批量出图'
-      : '出图服务 V0 只支持角色 / 场景 / 道具，当前资产类型无法垫图批量出图'
+      ? `出图服务 V0 不支持服装（costume）；${BATCH_REFERENCE_FLOW_LABEL}也只对人物开放，服装设定图请手工上传或生成`
+      : `${BATCH_REFERENCE_FLOW_LABEL}只对人物开放：${assetCopy.noun}会按提示词直接生成，不会带上已有图片${referenceBatchSupported ? '（本页的常规出图入口仍可用）' : ''}`
 
   if (!assetId) {
     return (
@@ -1489,11 +1511,11 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                           size="small"
                           type="primary"
                           ghost
-                          disabled={!referenceBatchSupported || referenceBatchLoading}
+                          disabled={!referenceBatchAllowed || referenceBatchLoading}
                           loading={referenceBatchLoading}
                           onClick={() => void handleSubmitReferenceBatch()}
                         >
-                          用定版垫图批量出图
+                          {`用定版${assetCopy.noun}批量出图`}
                         </Button>
                       </span>
                     </Tooltip>
@@ -1503,8 +1525,8 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                     <span className="ml-3">
                       {resolvedProjectId ? `项目作用域：${resolvedProjectId}` : '项目作用域：未识别'}
                     </span>
-                    {referenceBatchSupported && !hasPrimaryImage ? (
-                      <span className="ml-3 text-orange-500">未设置定版（垫图会退回正面视角图）</span>
+                    {referenceBatchAllowed && !hasPrimaryImage ? (
+                      <span className="ml-3 text-orange-500">未设置定版（会退回用正面视角的图片）</span>
                     ) : null}
                   </div>
                 </div>
@@ -1607,7 +1629,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                               </Tooltip>
                             ) : null}
                             {slot.image ? (
-                              <Tooltip title={slot.image.is_primary ? '该图片已是当前定版' : '设为定版后，垫图批量出图会优先使用它'}>
+                              <Tooltip title={slot.image.is_primary ? '该图片已是当前定版' : '设为定版后，「用定版图片批量出图」会优先使用它'}>
                                 <span className="inline-block">
                                   <Button
                                     size="small"
@@ -1958,7 +1980,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             <Tooltip
               title={
                 singleGenResult?.url
-                  ? '采纳的同时设为定版（后续出图会用它当垫图）'
+                  ? '采纳的同时设为定版（后续出图会以这张定版图片为准）'
                   : '这条结果没有可采纳的图片地址，无法采纳入库'
               }
             >
@@ -2039,7 +2061,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       </Modal>
 
       <Modal
-        title="垫图批量出图结果"
+        title="按定版图片批量出图结果"
         open={referenceBatchOpen}
         onCancel={() => setReferenceBatchOpen(false)}
         footer={<Button onClick={() => setReferenceBatchOpen(false)}>关闭</Button>}

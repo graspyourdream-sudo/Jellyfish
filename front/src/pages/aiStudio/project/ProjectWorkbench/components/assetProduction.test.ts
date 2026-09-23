@@ -11,6 +11,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   ASPECT_RATIO_OPTIONS,
@@ -24,7 +25,16 @@ import {
   assetKeyOf,
   buildBatchConfirmation,
   buildPrimaryReplaceConfirmation,
+  FLOW_LABEL,
+  assetTypeProductionSpec,
+  assetTypeProductionSpecs,
+  collectTypeNamingProblems,
+  DEFAULT_FLOW,
+  REFERENCE_REWORK_UNAVAILABLE_HINT,
   buildAttemptPlan,
+  buildRegenerateWithReferenceConfirmation,
+  canRegenerateWithExistingReference,
+  collectMisleadingCopy,
   collectUserFacingTexts,
   createAssetSubmitGate,
   defaultGenerationSettings,
@@ -33,6 +43,7 @@ import {
   describeProgressLines,
   describeSettings,
   describeStopEffect,
+  findMisleadingCopy,
   describeTaskStatus,
   findIdempotentReuse,
   hasUnsettledTasks,
@@ -50,7 +61,8 @@ import {
   resolveResultStatus,
   resolveTaskQueryPatch,
   selectUngenerated,
-  stageForSettings,
+  OUTPUT_MODE_STATEMENT,
+  SUBMIT_STAGE,
   summarizeSelection,
   summarizeTaskProgress,
   toProductionAssets,
@@ -58,6 +70,13 @@ import {
   type ProductionTask,
   type ProductionTaskStatus,
 } from './assetProduction.ts'
+import {
+  CHARACTER_REFERENCE_FIXED_STATEMENT,
+  IMAGE_ASSET_TYPE_TEXT,
+  buildAspectRatioStatement,
+  describeGroupBreakdown,
+  groupAssetsByType,
+} from './assetResultKind.ts'
 
 /* ------------------------------------------------------------------ 测试夹具 */
 
@@ -170,7 +189,6 @@ test('选择里只有服装时在提交前被拦住并说明原因（不进任�
     settings: defaultGenerationSettings(),
     mode: 'real',
     operation: 'generate',
-    withReference: 0,
   })
   assert.equal(confirmation.blocked, true)
   assert.equal(confirmation.required, false)
@@ -189,7 +207,6 @@ test('已有图片的资产做重新生成 → 必须二次确认，且写清不
     settings: defaultGenerationSettings(),
     mode: 'dry_run',
     operation: 'regenerate',
-    withReference: 1,
   })
   assert.equal(confirmation.required, true)
   assert.equal(confirmation.blocked, false)
@@ -204,7 +221,6 @@ test('演练模式下单个未生成项的「生成」不弹二次确认（不�
     settings: defaultGenerationSettings(),
     mode: 'dry_run',
     operation: 'generate',
-    withReference: 0,
   })
   assert.equal(confirmation.required, false)
   assert.equal(confirmation.blocked, false)
@@ -217,14 +233,12 @@ test('真实模式一律二次确认，并出现"会产生真实费用"的明确
     settings: defaultGenerationSettings(),
     mode: 'dry_run',
     operation: 'generate',
-    withReference: 0,
   })
   const realConfirmation = buildBatchConfirmation({
     scope,
     settings: defaultGenerationSettings(),
     mode: 'real',
     operation: 'generate',
-    withReference: 0,
   })
   assert.equal(dryConfirmation.required, false)
   assert.equal(realConfirmation.required, true)
@@ -234,21 +248,196 @@ test('真实模式一律二次确认，并出现"会产生真实费用"的明确
   assert.match(realConfirmation.costWarning, /按张计费/)
 })
 
-test('批量（多于一项）一律二次确认，确认框列出类型分布/预计张数/模式/是否用参考图', () => {
+test('批量确认框按类型分组写清"这一组生成什么图"，且不含误导说法', () => {
   const scope = summarizeSelection(MIXED, selectUngenerated(MIXED))
   const confirmation = buildBatchConfirmation({
     scope,
-    settings: { useReference: false, aspectRatio: '9:16' },
+    settings: { aspectRatio: '9:16' },
     mode: 'dry_run',
     operation: 'generate',
-    withReference: null,
+    projectVideoRatio: '16:9',
   })
   assert.equal(confirmation.required, true)
   const text = confirmation.lines.join('\n')
   assert.match(text, /本次选择资产 3 项：人物 1、场景 1、道具 1、服装 0/)
   assert.match(text, /预计生成图片 3 张/)
-  assert.match(text, /不使用垫图/)
   assert.match(text, /画面比例 9:16/)
+  // 混选时必须逐组写清结果类型，不能把三种图说成同一种
+  assert.match(text, /按类型分组/)
+  assert.match(text, /人物 1 项：生成参考图（结果类型：人物参考图）/)
+  assert.match(text, /场景 1 项：生成场景资产图（结果类型：场景资产图）/)
+  assert.match(text, /道具 1 项：生成道具资产图（结果类型：道具资产图）/)
+  assert.deepEqual(collectMisleadingCopy([confirmation.title, ...confirmation.lines, confirmation.costWarning]), [])
+
+  // 只有人物时仍然是整句「出图方式：按提示词直接生成参考图（默认）」
+  const onlyCharacter = buildBatchConfirmation({
+    scope: summarizeSelection(MIXED, [assetKeyOf('character', 'c1')]),
+    settings: defaultGenerationSettings(),
+    mode: 'real',
+    operation: 'generate',
+  })
+  assert.ok(onlyCharacter.lines.join('\n').includes(OUTPUT_MODE_STATEMENT), onlyCharacter.lines.join('\n'))
+})
+
+test('结果卡片消费回包的 result_kind / result_label / aspect_ratio_source（场景/道具不被说成参考图）', () => {
+  const scene = resolveResultStatus(
+    {
+      source_task_id: 'k1',
+      source_asset_id: 's1',
+      asset_type: 'scene',
+      outcome: 'ok',
+      oss_url: 'https://cdn.example.com/s.png',
+      result_kind: 'sceneAssetImage',
+      result_label: '场景资产图',
+      aspect_ratio: '16:9',
+      aspect_ratio_source: 'default',
+    },
+    'scene',
+  )
+  assert.equal(scene.status, 'done')
+  assert.equal(scene.resultKind, 'sceneAssetImage')
+  assert.equal(scene.resultLabel, '场景资产图')
+  assert.equal(scene.aspectRatio, '16:9')
+  assert.equal(scene.aspectRatioSource, 'default')
+  assert.ok(!scene.resultLabel.includes('参考图'), scene.resultLabel)
+
+  // 人物：固定口径要能透传到卡片上
+  const character = resolveResultStatus(
+    {
+      outcome: 'ok',
+      oss_url: 'https://cdn.example.com/c.png',
+      result_kind: 'characterReference',
+      result_label: '人物参考图',
+      aspect_ratio: '16:9',
+      aspect_ratio_source: 'character_reference_fixed',
+    },
+    'character',
+  )
+  assert.equal(character.resultLabel, '人物参考图')
+  assert.equal(character.aspectRatioSource, 'character_reference_fixed')
+
+  // 回包没带结果类型字段 → 按资产类型兜底（绝不猜成「参考图」）
+  assert.equal(resolveResultStatus({ outcome: 'ok', oss_url: 'x' }, 'prop').resultLabel, '道具资产图')
+  assert.equal(resolveResultStatus({ outcome: 'ok', oss_url: 'x' }, 'costume').resultKind, 'costumeDesignImage')
+
+  // 回包把人物专用标签错给到场景 → 一律不采用
+  const wrong = resolveResultStatus(
+    {
+      outcome: 'ok',
+      oss_url: 'x',
+      asset_type: 'scene',
+      result_kind: 'characterReference',
+      result_label: '人物参考图',
+    },
+    'scene',
+  )
+  assert.equal(wrong.resultKind, 'sceneAssetImage')
+  assert.equal(wrong.resultLabel, '场景资产图')
+})
+
+test('卡片与生产区的按钮文案都按类型取（源码里不再硬编码「重新生成参考图」这类写死的按钮字）', () => {
+  const files = ['AssetResultCard.tsx', 'AssetProductionArea.tsx']
+  const offenders: string[] = []
+  files.forEach((file) => {
+    const source = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8')
+    source.split('\n').forEach((line, index) => {
+      const trimmed = line.trim()
+      const isComment =
+        trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('{/*')
+      if (isComment) return
+      // 写死的整句按钮/标题文案不许再出现（要按类型取词）
+      if (/'生成参考图'|'重新生成参考图'|"生成参考图"|"重新生成参考图"/.test(line)) {
+        offenders.push(`${file}:${index + 1}: ${trimmed}`)
+      }
+    })
+  })
+  assert.deepEqual(offenders, [])
+})
+
+test('类型 → 提示词槽位 / 结果类型 / 标签 / 尺寸：四类各一套，映射可测', () => {
+  const specs = assetTypeProductionSpecs()
+  assert.deepEqual(specs.map((spec) => spec.assetType), ['character', 'scene', 'prop', 'costume'])
+
+  const character = assetTypeProductionSpec('character')
+  assert.equal(character.promptSlot, 'character_image_front')
+  assert.equal(character.resultKind, 'characterReference')
+  assert.equal(character.resultLabel, '人物参考图')
+  assert.equal(character.noun, '参考图')
+  assert.equal(character.aspectRatio, '16:9')
+  assert.equal(character.aspectRatioFixed, true)
+  assert.equal(character.batchReferenceAllowed, true)
+
+  const scene = assetTypeProductionSpec('scene')
+  assert.equal(scene.promptSlot, 'scene_image_front')
+  assert.equal(scene.resultLabel, '场景资产图')
+  assert.equal(scene.aspectRatioFixed, false)
+  assert.equal(scene.batchReferenceAllowed, false)
+
+  const prop = assetTypeProductionSpec('prop')
+  assert.equal(prop.promptSlot, 'prop_image_front')
+  assert.equal(prop.resultLabel, '道具资产图')
+  assert.equal(prop.aspectRatioFixed, false)
+
+  const costume = assetTypeProductionSpec('costume')
+  assert.equal(costume.promptSlot, 'costume_image_front')
+  assert.equal(costume.resultLabel, '服装设定图')
+  assert.equal(costume.aspectRatioFixed, false)
+
+  // 四类各读各的提示词槽位（不许共用一条）
+  assert.equal(new Set(specs.map((spec) => spec.promptSlot)).size, 4)
+})
+
+test('场景 / 道具 / 服装绝不被标成人物参考图（标签里不出现「参考图」或 characterReference）', () => {
+  const specs = assetTypeProductionSpecs()
+  specs
+    .filter((spec) => spec.assetType !== 'character')
+    .forEach((spec) => {
+      const haystack = `${spec.resultKind} ${spec.resultLabel} ${spec.noun}`
+      assert.ok(!haystack.includes('参考图'), `${spec.assetType} 不该出现「参考图」：${haystack}`)
+      assert.ok(!haystack.includes('characterReference'), `${spec.assetType} 不该被标成 characterReference`)
+    })
+  // 自检函数在正确映射上必须为空
+  assert.deepEqual(collectTypeNamingProblems(specs), [])
+  // 人为错标时能被抓出来（这就是"演练验收会额外确认 1 场景 + 1 道具"的护栏）
+  const broken = specs.map((spec) =>
+    spec.assetType === 'scene' ? { ...spec, resultKind: 'characterReference', resultLabel: '人物参考图' } : spec,
+  )
+  const problems = collectTypeNamingProblems(broken)
+  assert.equal(problems.length, 2)
+  assert.match(problems.join('\n'), /scene/)
+})
+
+test('人物参考图固定 16:9 要写清「不等于项目最终视频画幅」', () => {
+  const spec = assetTypeProductionSpec('character')
+  assert.equal(spec.aspectRatio, '16:9')
+  assert.equal(spec.aspectRatioFixed, true)
+  assert.match(CHARACTER_REFERENCE_FIXED_STATEMENT, /人物参考图固定 16:9/)
+  assert.match(CHARACTER_REFERENCE_FIXED_STATEMENT, /不等于项目最终视频画幅/)
+  // 项目画幅不同 / 相同 / 未知三种情况都要能一眼看出区别
+  const differ = buildAspectRatioStatement('9:16')
+  const same = buildAspectRatioStatement('16:9')
+  const unknown = buildAspectRatioStatement('')
+  assert.match(differ, /最终视频画幅是 9:16/)
+  assert.match(same, /数值相同，但用途不同/)
+  assert.match(unknown, /还没有设置最终视频画幅/)
+  ;[differ, same, unknown].forEach((text) => assert.match(text, /不等于项目最终视频画幅/))
+})
+
+test('混选按类型分组：不把混选当成同一批同类型（人物参考图 / 场景资产图 / 道具资产图）', () => {
+  const groups = groupAssetsByType(MIXED.filter((asset) => isSubmittableAssetType(asset.type)))
+  const labels = groups.map((group) => `${group.assetType}:${group.count}`)
+  assert.deepEqual(labels, ['character:2', 'scene:2', 'prop:1'])
+  // 每个分组带各自的类型名与结果标签（场景/道具不会被写成「参考图」）
+  groups.forEach((group) => {
+    assert.ok(group.title.includes(IMAGE_ASSET_TYPE_TEXT[group.assetType]))
+    if (group.assetType !== 'character') {
+      assert.ok(!group.title.includes('参考图'), group.title)
+    }
+  })
+  const breakdown = describeGroupBreakdown(groups)
+  assert.match(breakdown, /人物参考图 2/)
+  assert.match(breakdown, /场景资产图 2/)
+  assert.match(breakdown, /道具资产图 1/)
 })
 
 test('把结果设为定版而该资产已有定版图 → 必须二次确认并写清替换的是什么', () => {
@@ -336,7 +525,9 @@ test('进度文案包含用户点名的五个数字，且不含内部口径', ()
     makeSampleTask({ key: 'k2', status: 'queued' }),
   ])
   const labels = describeProgressLines(summary).map((line) => line.label)
-  ;['总数', '已完成', '失败', '生成中', '排队中'].forEach((label) => assert.ok(labels.includes(label), label))
+  ;['总数', '已完成', '失败', '生成中', '待提交'].forEach((label) => assert.ok(labels.includes(label), label))
+  // 内联执行没有队列：不许写"排队中"
+  assert.ok(!labels.includes('排队中'))
   // 1 项已完成 + 1 项排队中 → 进度是 50%，不是"成功"也不是"100%"
   assert.equal(summary.percent, 50)
 })
@@ -484,7 +675,7 @@ test('采纳：资产还没有图片 → 直接存入（不动任何现有内容
   assert.equal(plan.mode, 'adopt')
   if (plan.mode === 'adopt') {
     assert.equal(plan.imageId, null)
-    assert.match(plan.reason, /首张图片/)
+    assert.match(plan.reason, /第一张参考图/)
   }
 })
 
@@ -576,17 +767,106 @@ test('重新生成：还没有提示词时如实说明会先拼装提示词', ()
 
 /* -------------------------------------------------------------- 生成设置 */
 
-test('生成设置：参考图开关 → 后端口径；默认值稳定', () => {
-  assert.deepEqual(defaultGenerationSettings(), { useReference: true, aspectRatio: DEFAULT_ASPECT_RATIO })
-  assert.equal(stageForSettings({ useReference: true, aspectRatio: '16:9' }), 'reference_batch')
-  assert.equal(stageForSettings({ useReference: false, aspectRatio: '16:9' }), 'character_sheet')
-  const text = describeSettings({ useReference: true, aspectRatio: '16:9' })
-  assert.match(text, /使用定版图当垫图/)
+test('生成设置：只提供比例，默认值稳定（不再有参考图开关）', () => {
+  assert.deepEqual(defaultGenerationSettings(), { aspectRatio: DEFAULT_ASPECT_RATIO })
+  const text = describeSettings({ aspectRatio: '16:9' })
   assert.match(text, /每个资产 1 张/)
   assert.ok(ASPECT_RATIO_OPTIONS.some((item) => item.value === '9:16'))
 })
 
-/* ---------------------------------------------------------------- 顶部状态 */
+test('提交阶段固定：默认主流程不把已有图片当输入传出去', () => {
+  // character_sheet = 不带垫图（后端只在这个阶段之外才解析定版垫图）
+  assert.equal(SUBMIT_STAGE, 'character_sheet')
+})
+
+test('出图方式就是默认主流程：按提示词直接生成参考图', () => {
+  assert.equal(OUTPUT_MODE_STATEMENT, '出图方式：按提示词直接生成参考图（默认）')
+  assert.deepEqual(findMisleadingCopy(OUTPUT_MODE_STATEMENT), [])
+  assert.match(OUTPUT_MODE_STATEMENT, /直接生成参考图/)
+})
+
+test('两条流程的代码名分开，且都有用户可读的名字（没有含糊的 use_reference 开关）', () => {
+  assert.equal(DEFAULT_FLOW, 'generate_reference_image')
+  assert.deepEqual(Object.keys(FLOW_LABEL).sort(), [
+    'generate_reference_image',
+    'regenerate_with_existing_reference',
+  ])
+  assert.equal(FLOW_LABEL.generate_reference_image, '生成参考图')
+  assert.equal(FLOW_LABEL.regenerate_with_existing_reference, '使用已有参考图重新生成')
+})
+
+test('「使用已有参考图重新生成」只在资产已有参考图时可用', () => {
+  assert.equal(canRegenerateWithExistingReference({ hasImage: true }), true)
+  assert.equal(canRegenerateWithExistingReference({ hasImage: false }), false)
+  assert.equal(canRegenerateWithExistingReference(undefined), false)
+})
+
+test('返工流程的二次确认写清：用哪张图、会替换/新增什么、会不会产生费用', () => {
+  const real = buildRegenerateWithReferenceConfirmation({
+    assetName: '林小满',
+    referenceLabel: '该资产当前的定版图',
+    mode: 'real',
+  })
+  assert.equal(real.required, true)
+  assert.match(real.title, /使用「林小满」已有的参考图重新生成一张/)
+  const text = real.lines.join('\n')
+  assert.match(text, /作为输入传给图片模型/)
+  assert.match(text, /不会替换现有参考图，也不会动现有定版图/)
+  assert.match(text, /公网可访问/)
+  assert.match(real.costWarning, /会产生真实费用/)
+  assert.match(real.okText, /确认真实生成/)
+  // 演练模式下不谎报费用
+  const dry = buildRegenerateWithReferenceConfirmation({
+    assetName: '林小满',
+    referenceLabel: '该资产当前的定版图',
+    mode: 'dry_run',
+  })
+  assert.match(dry.costWarning, /不产生费用/)
+  // 两条流程的文案都不许出现误导说法
+  assert.deepEqual(collectMisleadingCopy([...real.lines, real.title, real.costWarning, ...dry.lines]), [])
+})
+
+test('返工端点没上线时的降级说明是「正在接入」，不假装可用', () => {
+  assert.match(REFERENCE_REWORK_UNAVAILABLE_HINT, /正在接入/)
+  assert.match(REFERENCE_REWORK_UNAVAILABLE_HINT, /重新生成参考图/)
+})
+
+test('文案黑名单：主界面不许再出现「垫图」这类误导说法', () => {
+  const misleading = [
+    '使用定版图当垫图',
+    '本次会带定版垫图',
+    '带垫图 3 项',
+    '参考图不参与（上游按提示词生成）',
+    '不使用参考图',
+    '走图生图通道',
+  ]
+  misleading.forEach((text) => {
+    assert.ok(findMisleadingCopy(text).length > 0, text)
+  })
+  // 正确口径不算误导
+  assert.deepEqual(collectMisleadingCopy([OUTPUT_MODE_STATEMENT, FLOW_LABEL.generate_reference_image]), [])
+})
+
+test('生产区/卡片源码里不再出现「垫图」，也不把默认流程说成"参考图不参与"', () => {
+  const files = ['AssetProductionArea.tsx', 'AssetResultCard.tsx', 'assetProduction.ts', 'assetProductionApi.ts']
+  const offenders: string[] = []
+  files.forEach((file) => {
+    const source = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8')
+    source.split('\n').forEach((line, index) => {
+      const trimmed = line.trim()
+      const isComment =
+        trimmed.startsWith('*') ||
+        trimmed.startsWith('//') ||
+        trimmed.startsWith('/*') ||
+        trimmed.startsWith('{/*')
+      if (isComment) return
+      if (/^\/.*\/,?$/.test(trimmed)) return // 黑名单正则字面量本身
+      if (/MISLEADING_COPY_PATTERNS|findMisleadingCopy|collectMisleadingCopy/.test(trimmed)) return
+      if (/垫图|参考图不参与|不使用参考图/.test(line)) offenders.push(`${file}:${index + 1}: ${trimmed}`)
+    })
+  })
+  assert.deepEqual(offenders, [])
+})
 
 test('顶部状态：六种用户语言取值各自可达', () => {
   const empty = resolveProductionHeadline({ assets: [], progress: summarizeTaskProgress([]), readyCount: 0 })
@@ -605,7 +885,7 @@ test('顶部状态：六种用户语言取值各自可达', () => {
     readyCount: 0,
   })
   assert.equal(running.label, '正在生成')
-  assert.match(running.detail, /生成中 1 项，排队中 1 项/)
+  assert.match(running.detail, /正在生成 1 项，待提交 1 项/)
 
   const failed = resolveProductionHeadline({
     assets: MIXED,
@@ -654,6 +934,52 @@ test('顶部状态：就绪数按"提示词+图片+定版"口径（与外层步�
   assert.notEqual(headline.label, '已定版')
 })
 
+test('内部字段黑名单必须包含用户点名的这些（deepseek-chat / image2 / status: ready / 门禁 / file_id）', () => {
+  // 这份清单是"主界面不许出现"的底线，删任何一条都应该让测试红
+  const required = ['file_id', 'image2', 'deepseek', 'status', 'ready', '门禁', 'gpt-image']
+  required.forEach((token) => {
+    assert.ok(
+      INTERNAL_TOKEN_BLACKLIST.some((item) => item === token || item.startsWith(token)),
+      `黑名单缺少 ${token}`,
+    )
+  })
+})
+
+test('一轮全是演练占位时，顶部明细里说明白（不能采纳、不能设版）', () => {
+  const headline = resolveProductionHeadline({
+    assets: selectUngeneratedAssets(),
+    progress: summarizeTaskProgress([makeSampleTask({ status: 'dry_run' }), makeSampleTask({ status: 'dry_run' })]),
+    readyCount: 0,
+  })
+  assert.equal(headline.label, '可以生成图片')
+  assert.match(headline.detail, /演练占位结果（没有真实出图）/)
+  assert.match(headline.detail, /不能采纳、也不能设为定版/)
+  // 有真实完成项时就不加这句（避免误伤）
+  const mixed = resolveProductionHeadline({
+    assets: selectUngeneratedAssets(),
+    progress: summarizeTaskProgress([
+      makeSampleTask({ status: 'dry_run' }),
+      makeSampleTask({ status: 'done', ossUrl: 'https://oss/a.png' }),
+    ]),
+    readyCount: 0,
+  })
+  assert.ok(!mixed.detail.includes('演练占位结果（没有真实出图）'))
+})
+
+test('进度里用「待提交」而不是「排队中」（内联执行没有队列）', () => {
+  const labels = describeProgressLines(summarizeTaskProgress([])).map((line) => line.label)
+  assert.ok(labels.includes('待提交'))
+  assert.ok(!labels.includes('排队中'))
+  assert.equal(describeTaskStatus('queued').label, '待提交')
+  const headline = resolveProductionHeadline({
+    assets: MIXED,
+    progress: summarizeTaskProgress([makeSampleTask({ status: 'queued' })]),
+    readyCount: 0,
+  })
+  assert.match(headline.detail, /待提交/)
+  assert.ok(!headline.detail.includes('排队中'))
+})
+
 test('卡片/状态/确认文案不出现内部字段（status / file_id / 任务号 / 模型名 / 门禁）', () => {
   const texts = collectUserFacingTexts()
   assert.ok(texts.length > 20)
@@ -668,7 +994,7 @@ test('卡片/状态/确认文案不出现内部字段（status / file_id / 任�
 test('任务状态文案只有用户语言（无原始状态值）', () => {
   const statuses: ProductionTaskStatus[] = ['queued', 'submitting', 'generating', 'done', 'failed', 'dry_run', 'stopped']
   const labels = statuses.map((status) => describeTaskStatus(status).label)
-  assert.deepEqual(labels, ['排队中', '正在提交', '正在生成', '已完成', '生成失败', '演练占位', '已停止'])
+  assert.deepEqual(labels, ['待提交', '正在提交', '正在生成', '已完成', '生成失败', '演练占位', '已停止'])
   labels.forEach((label) => {
     INTERNAL_TOKEN_BLACKLIST.forEach((token) => {
       assert.ok(!label.toLowerCase().includes(token.toLowerCase()), label)

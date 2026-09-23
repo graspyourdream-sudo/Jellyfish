@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Card, Modal, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd'
 import type { TableColumnsType } from 'antd'
 import { ArrowRightOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -23,6 +23,13 @@ import {
   summarizeAssetPrep,
 } from '../assetPrepStatus'
 import { AssetProductionArea } from './AssetProductionArea'
+import { OUTPUT_MODE_STATEMENT } from './assetProduction'
+import {
+  CHARACTER_REFERENCE_RATIO,
+  CHARACTER_REFERENCE_RATIO_SERVER_NOTE,
+  resultArtifactCopy,
+  type ImageAssetType,
+} from './assetResultKind.ts'
 
 const TYPE_COLOR: Record<ProjectSignalAssetType, string> = {
   character: 'purple',
@@ -125,6 +132,12 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
     targets: ImagePlanTarget[]
     warnings: string[]
     summary: Record<string, unknown>
+    /**
+     * 只读计划里的**按类型分流口径**（后端新字段）：
+     * `result_kind` / `result_label` / `aspect_ratio` / `aspect_ratio_fixed` / `aspect_ratio_note`。
+     * 页面用它把"这份计划会生成什么类型的图"直接标出来，而不是让用户猜。
+     */
+    strategy: Record<string, unknown>
   } | null>(null)
   const [planLoading, setPlanLoading] = useState(false)
   const [planError, setPlanError] = useState('')
@@ -147,7 +160,12 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
         stage: 'reference_batch',
         use_primary_reference: true,
       })
-      setPlan({ targets: data.targets ?? [], warnings: data.warnings ?? [], summary: data.summary ?? {} })
+      setPlan({
+        targets: data.targets ?? [],
+        warnings: data.warnings ?? [],
+        summary: data.summary ?? {},
+        strategy: ((data as unknown as { strategy?: Record<string, unknown> }).strategy ?? {}) as Record<string, unknown>,
+      })
     } catch (e) {
       setPlanError((e as Error)?.message || '出图计划读取失败')
       setPlan(null)
@@ -164,7 +182,14 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
   /** 出图守卫状态（点击前显示：被演练模式拦住 ≠ 接口没接通） */
   const gate = useGenerationGate()
 
-  /** 兼容旧入口：把某资产的已有图片设为定版（生产区之外的单点入口保留在资产明细表里） */
+  /**
+   * 资产明细表里的「设为定版」入口（生产区那套是主路径，这里是轻量补充）。
+   *
+   * 契约（后端定版保护）：该资产**已有定版图**、而本次会把它换成另一张时，
+   * 必须显式带 `confirm_replace_primary=true`，否则返回结构化 409（一行都不改）。
+   * 按钮在已有定版时是禁用的；万一数据不同步被后端拒了，就用后端原文再确认一次，
+   * 用户确认后才带开关重发——**绝不静默替换定版**。
+   */
   const [settingPrimaryKey, setSettingPrimaryKey] = useState('')
   const handleSetPrimary = useCallback(
     async (asset: ProjectSignalAsset) => {
@@ -174,16 +199,36 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
         return
       }
       setSettingPrimaryKey(assetKey(asset))
-      try {
-        await StudioEntitiesService.updateEntityImageApiV1StudioEntitiesEntityTypeEntityIdImagesImageIdPatch({
+      const applyPrimary = (confirmReplace: boolean) =>
+        StudioEntitiesService.updateEntityImageApiV1StudioEntitiesEntityTypeEntityIdImagesImageIdPatch({
           entityType: asset.type,
           entityId: asset.id,
           imageId,
-          requestBody: { is_primary: true } as never,
+          requestBody: { is_primary: true, confirm_replace_primary: confirmReplace } as never,
         })
+      try {
+        try {
+          await applyPrimary(false)
+        } catch (error) {
+          if ((error as { status?: number } | null)?.status !== 409) throw error
+          const detail = error instanceof Error ? error.message : '该资产已有定版图，需要你确认后才能替换。'
+          await new Promise<void>((resolve, reject) => {
+            Modal.confirm({
+              title: `「${asset.name}」已有定版图，确认替换吗？`,
+              width: 540,
+              okText: '确认替换定版',
+              cancelText: '取消',
+              content: <div className="text-xs">{detail}</div>,
+              onOk: () => resolve(),
+              onCancel: () => reject(new Error('cancelled')),
+            })
+          })
+          await applyPrimary(true)
+        }
         message.success(`已把「${asset.name}」的这张图设为定版`)
         onReload?.()
       } catch (error) {
+        if (error instanceof Error && error.message === 'cancelled') return
         const failure = classifyGenerationFailure(error, 'image')
         message.error(failureText(failure))
       } finally {
@@ -194,7 +239,6 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
   )
 
   const planSavedCount = (plan?.targets ?? []).filter((target) => target.prompt_source === 'saved').length
-  const planReferenceCount = (plan?.targets ?? []).filter((target) => Boolean(target.reference_image)).length
 
   const detailColumns: TableColumnsType<ProjectSignalAsset> = [
     {
@@ -282,9 +326,21 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
         </Space>
       }
     >
-      <div className="mb-3 text-xs text-gray-500">
-        为人物、场景、道具准备图片提示词与定版图：先批量生成/完善提示词，再选择要生成的资产批量出图，
-        看进度与失败原因，最后逐张「采纳」「设为定版」。定版图会作为后续出图与镜头的参考图。
+      <div className="mb-3 space-y-1 text-xs text-gray-500">
+        <div>
+          为人物、场景、道具准备图片提示词与定版图：先批量生成/完善提示词，再选择要生成的资产批量出图，
+          看进度与失败原因，最后逐张「采纳」「设为定版」。定版图是该资产对外确认使用的那张图。
+        </div>
+        <div>
+          {/* 按类型取词：人物 = 参考图；场景 / 道具 = 各自的资产图（不让场景说成"参考图"） */}
+          生成的是什么图按资产类型分：人物 = 人物参考图，场景 = 场景资产图，道具 = 道具资产图，
+          服装 = 服装设定图。默认流程就是按提示词直接生成；需要保持同一个资产的图片一致性时，
+          用结果卡片上的「使用已有图片重新生成」（可选返工流程，会先二次确认）。
+        </div>
+        <div>
+          {/* 用户点名要写出来的一句话 */}
+          {`人物参考图固定 ${CHARACTER_REFERENCE_RATIO}，不等于项目最终视频画幅：成片画幅按项目自己的视频比例，两者不要混用。`}
+        </div>
       </div>
 
       {/* 各状态数量：只有范围内资产全部「已定版」才显示就绪 */}
@@ -338,9 +394,20 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
                 <Tag color={planSavedCount > 0 ? 'green' : 'gold'} bordered={false}>
                   {`用已保存提示词 ${planSavedCount} 条`}
                 </Tag>
-                <Tag color={planReferenceCount > 0 ? 'blue' : 'default'} bordered={false}>
-                  {`带垫图 ${planReferenceCount} 条`}
-                </Tag>
+                {/* 出图方式口径：按提示词直接生成（按类型取词，见 assetResultKind） */}
+                <Tag bordered={false}>{OUTPUT_MODE_STATEMENT}</Tag>
+                {/* 计划里带的分流口径（消费后端新字段）：本次计划会生成什么类型的图 */}
+                {plan?.strategy?.result_label ? (
+                  <Tag color="blue" bordered={false}>{`本次计划的结果类型：${String(plan.strategy.result_label)}`}</Tag>
+                ) : null}
+                {plan?.strategy?.prompt_template ? (
+                  <Tag bordered={false}>{`提示词模板：${String(plan.strategy.prompt_template)}`}</Tag>
+                ) : null}
+                {plan?.strategy?.aspect_ratio_note ? (
+                  <Tag bordered={false} title={CHARACTER_REFERENCE_RATIO_SERVER_NOTE}>
+                    {`画幅口径：人物参考图固定 ${CHARACTER_REFERENCE_RATIO}（不等于项目最终视频画幅）`}
+                  </Tag>
+                ) : null}
                 {(['character', 'scene', 'prop'] as ProjectSignalAssetType[]).map((type) => (
                   <Button
                     key={type}
@@ -387,7 +454,21 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
                       { title: '资产', dataIndex: 'name', ellipsis: true },
                       { title: '提示词来源', dataIndex: 'prompt_source', width: 130 },
                       { title: '提示词', dataIndex: 'prompt', ellipsis: true },
-                      { title: '垫图', dataIndex: 'reference_image', width: 160, ellipsis: true },
+                      {
+                        title: '计划里的已有图片输入字段（默认流程不传）',
+                        dataIndex: 'reference_image',
+                        width: 240,
+                        ellipsis: true,
+                        render: (value: unknown) => String(value ?? '') || '（默认流程不传）',
+                      },
+                      {
+                        title: '结果类型',
+                        dataIndex: 'result_label',
+                        width: 120,
+                        render: (value: unknown, row) =>
+                          String(value ?? '') ||
+                          resultArtifactCopy((row.asset_type as ImageAssetType) ?? 'character').label,
+                      },
                     ]}
                     dataSource={plan.targets}
                     pagination={plan.targets.length > 8 ? { pageSize: 8, size: 'small' } : false}

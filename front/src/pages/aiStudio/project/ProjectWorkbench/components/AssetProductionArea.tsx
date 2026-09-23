@@ -1,7 +1,7 @@
 /**
  * 资产生产区（第 2 步「资产准备」的核心：连续生产流程）。
  *
- * 流程：选择要生成的资产 → 批量生成 / 批量重新生成 → 看进度与失败原因 → 结果卡片
+ * 流程：选择要生成的资产 → 批量生成参考图 / 批量重新生成参考图 → 看进度与失败原因 → 结果卡片
  * → 采纳 → 设为定版 → 全部必要资产定版后进入下一步。
  *
  * 复用（**不重新建第二套生成逻辑**）：
@@ -13,7 +13,9 @@
  *
  * 边界（硬要求）：
  *   - 默认只勾选 / 只提交**没有图片的资产**，不覆盖已有图片与已有定版图；
- *   - 「重新生成」与「已有定版时替换定版」都必须二次确认；
+ *   - 「重新生成参考图」与「已有定版时替换定版」都必须二次确认；
+ *   - 可选返工流程「使用已有参考图重新生成」是**单独入口**（走 Jellyfish 自己的图片通道），
+ *     端点没上线时禁用并如实说明「该能力正在接入」；
  *   - 在途闸门 + 后端幂等键，重复点击不重复提交；
  *   - 停止 = 前端不再开始后续项，已完成的结果与定版状态全部保留；
  *   - 只用已验证的内联链路；出图服务不支持的资产类型（服装）在**提交前**明确拦住并说明原因。
@@ -36,7 +38,6 @@ import {
   Select,
   Space,
   Spin,
-  Switch,
   Table,
   Tag,
   Tooltip,
@@ -52,8 +53,9 @@ import {
   ReloadOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { StudioEntitiesApi } from '../../../../../services/studioEntities'
+import { StudioProjectsService } from '../../../../../services/generated'
 import { getAssetImagePrompts, saveAssetImagePrompts } from '../../../../../services/llmPipelineApi'
 import type { GenerationGateSnapshot } from '../../../components/generationGate'
 import { classifyGenerationFailure, failureText } from '../../../components/generationGate'
@@ -64,29 +66,42 @@ import {
   ASSET_TYPE_LABEL,
   ASSET_TYPE_ORDER,
   ASPECT_RATIO_OPTIONS,
+  DEFAULT_FLOW,
+  FLOW_LABEL,
   IMAGES_PER_ASSET,
+  REFERENCE_REWORK_UNAVAILABLE_HINT,
   applySelectionAction,
   applyStopToQueue,
+  batchActionLabel,
   buildBatchConfirmation,
   buildPrimaryReplaceConfirmation,
   buildAttemptPlan,
+  buildRegenerateWithReferenceConfirmation,
+  canBatchWithReference,
+  canRegenerateWithExistingReference,
   createAssetSubmitGate,
   defaultGenerationSettings,
   describeProgressLines,
   describeSettings,
   describeStopEffect,
+  existingImageActionLabel,
   findIdempotentReuse,
+  generateActionLabel,
   hasUnsettledTasks,
   isSubmittableAssetType,
+  PROMPT_SLOT_BY_ASSET_TYPE,
   orderCardsForDisplay,
   pickResultForAsset,
   planAdoption,
+  referenceReworkUnavailableHint,
   requiresPrimaryReplaceConfirmation,
   resolveProductionHeadline,
   resolveResultStatus,
   resolveTaskQueryPatch,
   selectUngenerated,
-  stageForSettings,
+  supportHint,
+  OUTPUT_MODE_STATEMENT,
+  SUBMIT_STAGE,
   summarizeSelection,
   summarizeTaskProgress,
   toProductionAssets,
@@ -95,11 +110,29 @@ import {
   type GenerationSettings,
   type ProductionAsset,
   type ProductionAssetType,
+  type ProductionFlow,
   type ProductionTask,
 } from './assetProduction'
 import {
+  BATCH_REFERENCE_FLOW_LABEL,
+  buildAspectRatioNotice,
+  buildResultKindTag,
+  aspectRatioSourceFromStrategy,
+  groupAssetsByType,
+  resultArtifactCopy,
+} from './assetResultKind.ts'
+import {
+  clearRoundFromStorage,
+  getBrowserStorage,
+  loadRoundPlan,
+  roundStoreKey,
+  saveRoundToStorage,
+} from './assetRoundStore.ts'
+import {
   adoptAssetImageResult,
   createImageSlot,
+  fetchReferenceReworkAvailability,
+  regenerateWithExistingReference as callReferenceRegenerate,
   findEmptyImageSlot,
   previewAssetImagePrompt,
   previewAssetImagePlan,
@@ -116,13 +149,8 @@ const MAX_VISIBLE_CARDS = 6
 /** 结果仍在生成时的轮询间隔与上限（轮询是只读查询，不产生费用）。 */
 const POLL_INTERVAL_MS = 3000
 const POLL_TIMEOUT_MS = 5 * 60 * 1000
-/** 编辑提示词时使用的槽位（= 生图实际读取的那一列）。 */
-const PROMPT_CATEGORY_BY_TYPE: Record<ProductionAssetType, string> = {
-  character: 'character_image_front',
-  scene: 'scene_image_front',
-  prop: 'prop_image_front',
-  costume: 'costume_image_front',
-}
+/** 编辑提示词时使用的槽位：**唯一映射**在 assetProduction.PROMPT_SLOT_BY_ASSET_TYPE（有单测）。 */
+const PROMPT_CATEGORY_BY_TYPE: Record<ProductionAssetType, string> = PROMPT_SLOT_BY_ASSET_TYPE
 /** 道具没有大模型槽位（后端槽位表只定义了人物/场景/服装），只能手工填写。 */
 const LLM_PROMPT_SUPPORTED: ProductionAssetType[] = ['character', 'scene', 'costume']
 
@@ -131,8 +159,6 @@ const PROMPT_SOURCE_LABEL: Record<string, string> = {
   template: '用资产描述拼装的提示词',
   request: '用本次编辑的提示词',
 }
-
-const SUPPORT_HINT = '出图服务目前只支持人物、场景、道具；服装图片请在资产页手工上传或生成。'
 
 type AssetProductionAreaProps = {
   projectId?: string
@@ -161,6 +187,7 @@ function queuedPlaceholder(asset: ProductionAsset): ProductionTask {
     assetType: asset.type,
     assetName: asset.name,
     round: 0,
+    flow: DEFAULT_FLOW,
     attempt: 0,
     operation: 'regenerate',
     status: 'queued',
@@ -172,12 +199,25 @@ function queuedPlaceholder(asset: ProductionAsset): ProductionTask {
     imageUrl: '',
     errorMessage: '',
     note: '',
+    resultKind: '',
+    resultLabel: '',
+    aspectRatio: '',
+    aspectRatioSource: '',
     adoptedUrl: '',
     adoptedImageId: null,
     isPrimary: false,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   }
+}
+
+/** 技术详情里的「图片类型」一行：结果标签 + 它是不是本次回包自带的。 */
+function buildResultKindLabel(task: ProductionTask): string {
+  const tag = buildResultKindTag(task.assetType, {
+    resultKind: task.resultKind,
+    resultLabel: task.resultLabel,
+  })
+  return tag.fromServer ? `${tag.label}（本次回包自带）` : `${tag.label}（按资产类型）`
 }
 
 /** 表格行 → 步骤信号资产（仅用于跳转资产编辑页）。 */
@@ -199,7 +239,10 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
   const { projectId, assets, gate, onReload, onOpenAssetEditor, promptPanel } = props
   const navigate = useNavigate()
   const { projectId: routeProjectId } = useParams<{ projectId: string }>()
+  const [searchParams] = useSearchParams()
   const effectiveProjectId = projectId || routeProjectId || ''
+  /** 当前集（第 2 步是集级页面）：本地恢复按 `project_id + chapter_id` 分键 */
+  const chapterId = searchParams.get('chapter') ?? ''
 
   const productionAssets = useMemo(() => toProductionAssets(assets), [assets])
   const assetByKey = useMemo(() => {
@@ -226,7 +269,23 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
   const [planError, setPlanError] = useState('')
   const [planWarnings, setPlanWarnings] = useState<string[]>([])
   const [planTargetsByType, setPlanTargetsByType] = useState<Record<string, AssetImagePlanTargetLike[]>>({})
+  /** 只读计划里的分流口径（`strategy`）：结果类型标签、画幅来源、模板名 */
+  const [planStrategyByType, setPlanStrategyByType] = useState<Record<string, Record<string, unknown>>>({})
   const [showAllCards, setShowAllCards] = useState(false)
+  /** 可选返工流程「使用已有参考图重新生成」的可用性（端点没上线 → 禁用 + 如实说明） */
+  const [reworkAvailability, setReworkAvailability] = useState<{
+    available: boolean
+    reason: string
+    reasonCode: 'available' | 'not_deployed' | 'unknown'
+  }>({
+    available: false,
+    reason: REFERENCE_REWORK_UNAVAILABLE_HINT,
+    reasonCode: 'not_deployed',
+  })
+  /** 项目自己的最终视频画幅（`projects.default_video_ratio`）：只用于把人物固定 16:9 说清楚 */
+  const [projectVideoRatio, setProjectVideoRatio] = useState('')
+  /** 刷新后恢复上次结果时给用户的那句话（只读恢复，绝不会重新提交） */
+  const [restoredNote, setRestoredNote] = useState('')
 
   const stopRef = useRef(false)
   const gateRef = useRef<AssetSubmitGate>(createAssetSubmitGate())
@@ -235,6 +294,61 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
   const planCacheRef = useRef<Map<string, AssetImagePlanTargetLike[]>>(new Map())
   /** 每个资产已经尝试过几次（0 = 还没提交过）。重试/重新生成都靠它换一个新的幂等键。 */
   const attemptRef = useRef<Map<string, number>>(new Map())
+
+  /* ------------------------------------------- 本轮结果与进度的本地持久化（D5） */
+
+  /** 存储键：`project_id + chapter_id` 分键（换项目 / 换集互不串）。 */
+  const roundKey = roundStoreKey(effectiveProjectId, chapterId)
+  /** 已经为哪个键做过恢复（避免用户改过列表后被重复覆盖）。 */
+  const restoredKeyRef = useRef('')
+
+  /**
+   * 刷新后**只读恢复**本轮结果与进度。
+   *
+   * 只做三件事：读存、校验、把在途状态标成"已停止"。这里**没有**任何提交/轮询调用，
+   * `planRoundRestore` 也恒定返回 `shouldSubmit: false` —— 刷新一次不会重复计费。
+   */
+  useEffect(() => {
+    if (!effectiveProjectId) return
+    if (restoredKeyRef.current === roundKey) return
+    restoredKeyRef.current = roundKey
+    const plan = loadRoundPlan(getBrowserStorage(), roundKey, { projectId: effectiveProjectId, chapterId })
+    if (plan.shouldSubmit) return
+    setTasks(plan.tasks)
+    setRestoredNote(plan.note)
+  }, [chapterId, effectiveProjectId, roundKey])
+
+  /** 结果变化就落盘（空列表 = 清掉，不留下空壳）。 */
+  useEffect(() => {
+    if (!effectiveProjectId) return
+    if (restoredKeyRef.current !== roundKey) return
+    saveRoundToStorage(getBrowserStorage(), roundKey, {
+      projectId: effectiveProjectId,
+      chapterId,
+      tasks,
+    })
+  }, [chapterId, effectiveProjectId, roundKey, tasks])
+
+  /** 项目自己的最终视频画幅：只读一次，用来把「人物参考图固定 16:9」和成片画幅分清楚。 */
+  useEffect(() => {
+    if (!effectiveProjectId) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await StudioProjectsService.getProjectApiV1StudioProjectsProjectIdGet({
+          projectId: effectiveProjectId,
+        })
+        const ratio = (res?.data as { default_video_ratio?: string | null } | undefined)?.default_video_ratio
+        if (!cancelled) setProjectVideoRatio(typeof ratio === 'string' ? ratio.trim() : '')
+      } catch {
+        // 读不到就只写人物固定口径那一半，不编一个项目画幅出来
+        if (!cancelled) setProjectVideoRatio('')
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [effectiveProjectId])
 
   // 资产清单变化（例如刚采纳完）时重建默认勾选：**仍然只勾未生成项**
   const assetsFingerprint = productionAssets.map((asset) => `${asset.key}:${asset.hasImage ? 1 : 0}`).join('|')
@@ -286,22 +400,27 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
   const loadPlan = useCallback(
     async (assetType: ProductionAssetType): Promise<AssetImagePlanTargetLike[]> => {
       if (!effectiveProjectId || !isSubmittableAssetType(assetType)) return []
-      const cacheKey = `${assetType}:${stageForSettings(settings)}`
+      // 计划缓存键里带上比例：换了比例就要重新取计划（出图方式固定，不参与缓存键）
+      const cacheKey = `${assetType}:${SUBMIT_STAGE}:${settings.aspectRatio}`
       const cached = planCacheRef.current.get(cacheKey)
       if (cached) return cached
       setPlanLoading(true)
       setPlanError('')
       try {
+        // 只读计划：按提示词直接生成，**不把已有图片当输入**（见 assetProduction.SUBMIT_STAGE 注释）
         const data = await previewAssetImagePlan({
           project_id: effectiveProjectId,
           asset_type: assetType as 'character' | 'scene' | 'prop',
-          stage: stageForSettings(settings),
-          use_primary_reference: settings.useReference,
           aspect_ratio: settings.aspectRatio,
         })
         const targets = Array.isArray(data?.targets) ? data.targets : []
         planCacheRef.current.set(cacheKey, targets)
         setPlanTargetsByType((prev) => ({ ...prev, [cacheKey]: targets }))
+        // 分流口径（结果类型标签 / 画幅来源 / 模板名）也存下来：页面据它把"这次生成的是什么图"说清
+        setPlanStrategyByType((prev) => ({
+          ...prev,
+          [cacheKey]: (data?.strategy ?? {}) as Record<string, unknown>,
+        }))
         setPlanWarnings(Array.isArray(data?.warnings) ? data.warnings : [])
         return targets
       } catch (error) {
@@ -320,18 +439,73 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
     [],
   )
 
-  const planKeyFor = (assetType: ProductionAssetType) => `${assetType}:${stageForSettings(settings)}`
+  const planKeyFor = (assetType: ProductionAssetType) =>
+    `${assetType}:${SUBMIT_STAGE}:${settings.aspectRatio}`
   const currentPlanTargets = planTargetsByType[planKeyFor(tab)] ?? []
-  const referenceCount = currentPlanTargets.filter((target) => Boolean(target.reference_image)).length
+  const currentPlanStrategy = planStrategyByType[planKeyFor(tab)] ?? {}
+
+  /** 当前页签的结果文案（结果类型标签 / 按钮名 / 说明都按类型取） */
+  const tabCopy = resultArtifactCopy(tab)
+
+  /**
+   * **人物参考图固定 16:9，不等于项目最终视频画幅**（用户点名要写在页面上）。
+   *
+   * 只在「本次是人物 + 画幅来自人物固定口径」时出现；同时给出项目自己的成片画幅，
+   * 两个值不同时一眼就能看出区别。
+   */
+  const tabRatioNotice = buildAspectRatioNotice({
+    assetTypes: [tab],
+    projectRatio: projectVideoRatio,
+    source: aspectRatioSourceFromStrategy(currentPlanStrategy),
+    ratio: typeof currentPlanStrategy.aspect_ratio === 'string' ? currentPlanStrategy.aspect_ratio : null,
+  })
+
+  /** 选中项里可直接出图的部分（服装不在出图服务契约内） */
+  const pickedAssets = useMemo(
+    () => scope.assets.filter((asset) => isSubmittableAssetType(asset.type)),
+    [scope],
+  )
+  /** 批量生成的**按类型分组**（混选时必须分组提交，不能混成同一批同一个口径） */
+  const pickedGroups = useMemo(() => groupAssetsByType(pickedAssets), [pickedAssets])
+  /** 已有图片、可以"再生成一张"的选中项 */
+  const pickedRegenerateAssets = useMemo(() => pickedAssets.filter((asset) => asset.hasImage), [pickedAssets])
+  /** 某个类型的只读计划里的分流口径（提交时用它给"画幅来源"兜底） */
+  const strategyForType = useCallback(
+    (assetType: ProductionAssetType): Record<string, unknown> =>
+      planStrategyByType[`${assetType}:${SUBMIT_STAGE}:${settings.aspectRatio}`] ?? {},
+    [planStrategyByType, settings.aspectRatio],
+  )
+
+  /** 返工能力在**当前页签类型**下的如实说明（端点没上线时按类型取词，不让场景说"参考图"） */
+  const reworkHintFor = useCallback(
+    (assetType: ProductionAssetType): string => {
+      if (reworkAvailability.available) return ''
+      if (reworkAvailability.reasonCode === 'not_deployed') return referenceReworkUnavailableHint(assetType)
+      return reworkAvailability.reason || referenceReworkUnavailableHint(assetType)
+    },
+    [reworkAvailability],
+  )
 
   useEffect(() => {
     planCacheRef.current.clear()
     setPlanTargetsByType({})
-  }, [settings.useReference, settings.aspectRatio])
+    setPlanStrategyByType({})
+  }, [settings.aspectRatio])
 
   useEffect(() => {
     if (tabAssets.length > 0 && isSubmittableAssetType(tab)) void loadPlan(tab)
   }, [loadPlan, tab, tabAssets.length])
+
+  // 返工能力的可用性：只读读一次接口清单，**绝不**用"试着调一次"来探测（那会真的出图花钱）
+  useEffect(() => {
+    let cancelled = false
+    void fetchReferenceReworkAvailability().then((state) => {
+      if (!cancelled) setReworkAvailability(state)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   /* -------------------------------------------------------------- 任务更新 */
 
@@ -402,6 +576,11 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
       planByType: Map<string, AssetImagePlanTargetLike[]>,
       options?: {
         /**
+         * 走哪条流程：默认「生成参考图」；`regenerate_with_existing_reference` 是
+         * **可选返工流程**（使用已有参考图重新生成，单独入口 + 二次确认）。
+         */
+        flow?: ProductionFlow
+        /**
          * 强制按"再来一次"处理（失败项重试用）。
          *
          * 失败项所在的资产可能还没有图片，单看 `hasImage` 会误判成首轮 →
@@ -412,6 +591,7 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
       },
     ): Promise<void> => {
       if (!effectiveProjectId) return
+      const flow: ProductionFlow = options?.flow ?? DEFAULT_FLOW
       stopRef.current = false
       roundRef.current += 1
       const round = roundRef.current
@@ -421,6 +601,7 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         ...queuedPlaceholder(asset),
         key: `${asset.key}#${round}-${index}`,
         round,
+        flow,
         operation: asset.hasImage ? 'regenerate' : operation,
         status: 'queued',
       }))
@@ -471,9 +652,7 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
           const response = await submitAssetImages({
             project_id: effectiveProjectId,
             asset_type: asset.type as 'character' | 'scene' | 'prop',
-            stage: stageForSettings(settings),
             asset_ids: [asset.id],
-            use_primary_reference: settings.useReference,
             aspect_ratio: settings.aspectRatio,
             prompt_overrides: overrideNeeded ? [{ asset_id: asset.id, prompt: promptOverride }] : [],
             // 0 = 首轮；>0 = 重试/重新生成（换一个新的幂等键，才会真的再出一张）
@@ -493,7 +672,7 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
             })
             continue
           }
-          const normalized = resolveResultStatus(result)
+          const normalized = resolveResultStatus(result, asset.type)
           updateTask(taskKey, {
             status: normalized.status,
             outcome: normalized.outcome,
@@ -502,6 +681,13 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
             imageUrl: normalized.imageUrl,
             sourceTaskId: normalized.sourceTaskId || String(planTarget?.source_task_id ?? ''),
             prompt: promptOverride || String(planTarget?.prompt ?? ''),
+            // 结果类型标签与画幅**按回包**记下来（卡片显示 / 技术详情都读它）
+            resultKind: normalized.resultKind,
+            resultLabel: normalized.resultLabel,
+            aspectRatio: normalized.aspectRatio || String(planTarget?.aspect_ratio ?? ''),
+            aspectRatioSource:
+              normalized.aspectRatioSource ||
+              aspectRatioSourceFromStrategy(strategyForType(asset.type)),
             errorMessage: normalized.status === 'failed' ? normalized.reason : '',
             note: normalized.status === 'failed' ? '' : normalized.reason,
           })
@@ -521,10 +707,10 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
       }
       setRunning(false)
     },
-    [effectiveProjectId, planTargetForAsset, pollTask, promptDrafts, settings, updateTask],
+    [effectiveProjectId, planTargetForAsset, pollTask, promptDrafts, settings, strategyForType, updateTask],
   )
 
-  /** 取只读计划（不触网、不花钱），供确认框里的"带垫图条数"与提交时的提示词/幂等键使用。 */
+  /** 取只读计划（不触网、不花钱），供确认框与提交时的提示词/幂等键使用。 */
   const preparePlans = useCallback(
     async (picked: ProductionAsset[]): Promise<Map<string, AssetImagePlanTargetLike[]>> => {
       const planByType = new Map<string, AssetImagePlanTargetLike[]>()
@@ -543,23 +729,123 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
     [loadPlan],
   )
 
+  /**
+   * 提交一次返工（可选流程）：走 `/image-pipeline/reference-regenerate`。
+   *
+   * 复用同一套任务队列/卡片/进度/轮询，只是端点与流程名不同——不另造第二套生成逻辑。
+   */
+  const submitReferenceRework = useCallback(
+    async (asset: ProductionAsset) => {
+      if (!effectiveProjectId) return
+      stopRef.current = false
+      roundRef.current += 1
+      const round = roundRef.current
+      const taskKey = `${asset.key}#${round}-rework`
+      const edited = String(promptDrafts[asset.key] ?? '').trim()
+      const previousAttempt = attemptRef.current.get(asset.key) ?? 0
+      const attemptPlan = buildAttemptPlan(edited, {
+        hasEditedPrompt: Boolean(edited),
+        previousAttempt,
+      })
+      setTasks((prev) => [
+        ...prev,
+        {
+          ...queuedPlaceholder(asset),
+          key: taskKey,
+          round,
+          flow: 'regenerate_with_existing_reference',
+          operation: 'regenerate',
+          status: 'submitting',
+          attempt: attemptPlan.attempt,
+          prompt: attemptPlan.prompt,
+        },
+      ])
+      const decision = gateRef.current.begin(asset.key)
+      if (!decision.allowed) {
+        updateTask(taskKey, { status: 'stopped', errorMessage: decision.message })
+        return
+      }
+      setRunning(true)
+      try {
+        const response = await callReferenceRegenerate({
+          project_id: effectiveProjectId,
+          asset_type: asset.type,
+          asset_id: asset.id,
+          prompt: attemptPlan.prompt || undefined,
+          reference_image_id: asset.imageId ?? null,
+          target_ratio: settings.aspectRatio,
+          attempt: attemptPlan.attempt,
+        })
+        attemptRef.current.set(asset.key, attemptPlan.attempt + 1)
+        const result = pickResultForAsset(Array.isArray(response?.results) ? response.results : [], asset.id)
+        gateRef.current.finish(asset.key, String(result?.source_task_id ?? response?.source_task_id ?? ''))
+        if (!result) {
+          updateTask(taskKey, {
+            status: 'failed',
+            errorMessage: '这次没有返回结果，请打开「查看详情」核对该次响应。',
+          })
+          return
+        }
+        const copy = resultArtifactCopy(asset.type)
+        const normalized = resolveResultStatus(result, asset.type)
+        const referenceNote = response?.reference_label
+          ? `${copy.existingImageAction}：${copy.existingImageInputLabel} = ${response.reference_label}`
+          : `${copy.existingImageAction}：${copy.existingImageInputLabel} = 该资产已有的图片`
+        updateTask(taskKey, {
+          status: normalized.status,
+          outcome: normalized.outcome,
+          serviceTaskId: normalized.serviceTaskId,
+          ossUrl: normalized.ossUrl,
+          imageUrl: normalized.imageUrl,
+          sourceTaskId: normalized.sourceTaskId || String(response?.source_task_id ?? ''),
+          prompt: attemptPlan.prompt || String(response?.prompt ?? ''),
+          // 返工流程的回包同样带 result_kind / result_label / aspect_ratio（与默认主流程同形）
+          resultKind: normalized.resultKind || String(response?.result_kind ?? ''),
+          resultLabel: normalized.resultLabel || String(response?.result_label ?? ''),
+          aspectRatio: normalized.aspectRatio || String(response?.aspect_ratio ?? ''),
+          aspectRatioSource: normalized.aspectRatioSource || String(response?.aspect_ratio_source ?? ''),
+          errorMessage: normalized.status === 'failed' ? normalized.reason : '',
+          note: normalized.status === 'failed' ? '' : `${referenceNote}；${normalized.reason}`.replace(/；$/, ''),
+        })
+        if (normalized.status === 'generating' && normalized.serviceTaskId) {
+          void pollTask(taskKey, normalized.serviceTaskId)
+        }
+      } catch (error) {
+        gateRef.current.release(asset.key)
+        const failure = classifyGenerationFailure(error, 'image')
+        updateTask(taskKey, { status: 'failed', errorMessage: failureText(failure), note: '' })
+      } finally {
+        setRunning(false)
+      }
+    },
+    [effectiveProjectId, pollTask, promptDrafts, settings.aspectRatio, updateTask],
+  )
+
   /* ----------------------------------------------------------- 单项生成/重生成 */
 
   const submitSingle = useCallback(
     async (asset: ProductionAsset) => {
       if (!isSubmittableAssetType(asset.type)) {
-        Modal.warning({ title: '暂时不能生成', content: SUPPORT_HINT, okText: '知道了' })
+        Modal.warning({
+        title: `暂时不能${generateActionLabel(asset.type)}`,
+        content: supportHint(asset.type),
+        okText: '知道了',
+      })
         return
       }
       const planByType = await preparePlans([asset])
       const singleScope = summarizeSelection(productionAssets, [asset.key])
-      const target = planTargetForAsset(asset, planByType.get(asset.type) ?? [])
       const confirmation = buildBatchConfirmation({
         scope: singleScope,
         settings,
         mode: runtimeMode,
         operation: 'generate',
-        withReference: target?.reference_image ? 1 : 0,
+        projectVideoRatio,
+        aspectRatioSource: aspectRatioSourceFromStrategy(strategyForType(asset.type)),
+        aspectRatioValue:
+          typeof strategyForType(asset.type).aspect_ratio === 'string'
+            ? String(strategyForType(asset.type).aspect_ratio)
+            : null,
       })
       if (confirmation.blocked) {
         Modal.warning({ title: confirmation.title, content: confirmation.blockedReason, okText: '知道了' })
@@ -581,31 +867,39 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         onOk: proceed,
       })
     },
-    [planTargetForAsset, preparePlans, productionAssets, runtimeMode, settings, submitRound],
+    [preparePlans, productionAssets, projectVideoRatio, runtimeMode, settings, strategyForType, submitRound],
   )
 
   const regenerateOne = useCallback(
     async (asset: ProductionAsset) => {
       if (!isSubmittableAssetType(asset.type)) {
-        Modal.warning({ title: '暂时不能重新生成', content: SUPPORT_HINT, okText: '知道了' })
+        Modal.warning({
+        title: `暂时不能${generateActionLabel(asset.type, 'regenerate')}`,
+        content: supportHint(asset.type),
+        okText: '知道了',
+      })
         return
       }
       const planByType = await preparePlans([asset])
       const scopeForOne = summarizeSelection(productionAssets, [asset.key])
-      const target = planTargetForAsset(asset, planByType.get(asset.type) ?? [])
       const confirmation = buildBatchConfirmation({
         scope: scopeForOne,
         settings,
         mode: runtimeMode,
         operation: 'regenerate',
-        withReference: target?.reference_image ? 1 : 0,
+        projectVideoRatio,
+        aspectRatioSource: aspectRatioSourceFromStrategy(strategyForType(asset.type)),
+        aspectRatioValue:
+          typeof strategyForType(asset.type).aspect_ratio === 'string'
+            ? String(strategyForType(asset.type).aspect_ratio)
+            : null,
       })
       if (confirmation.blocked) {
         Modal.warning({ title: confirmation.title, content: confirmation.blockedReason, okText: '知道了' })
         return
       }
       Modal.confirm({
-        title: `重新生成「${asset.name}」的图片？`,
+        title: `重新生成「${asset.name}」的${resultArtifactCopy(asset.type).noun}？`,
         width: 560,
         okText: confirmation.okText,
         cancelText: confirmation.cancelText,
@@ -615,7 +909,78 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         },
       })
     },
-    [planTargetForAsset, preparePlans, productionAssets, runtimeMode, settings, submitRound],
+    [preparePlans, productionAssets, projectVideoRatio, runtimeMode, settings, strategyForType, submitRound],
+  )
+
+  /**
+   * **可选返工流程**：用该资产已有的图片重新生成（单独入口 + 二次确认）。
+   *
+   * 与默认主流程的区别（用户明确要求分清）：
+   * - 默认主流程走 `/image-pipeline/submit`（上游服务端点，按提示词直接生成，**不传已有图片**）；
+   * - 本流程走 `/image-pipeline/reference-regenerate`（Jellyfish 自己的图片通道，
+   *   把该资产**已有的图片**真的传进请求），**只在该资产已有图片时可用**；
+   * - 端点还没上线时**禁用并如实说明「该能力正在接入」**，不假装可用；
+   * - 文案**按资产类型取词**：人物叫参考图，场景 / 道具 / 服装用各自的图名。
+   */
+  const regenerateWithExistingReference = useCallback(
+    async (asset: ProductionAsset) => {
+      const copy = resultArtifactCopy(asset.type)
+      if (!canRegenerateWithExistingReference(asset)) {
+        Modal.warning({
+          title: '这一项还不能这样重生成',
+          content: `该资产还没有${copy.noun}：请先用默认流程「${copy.generateAction}」出一张，再考虑用它保一致性。`,
+          okText: '知道了',
+        })
+        return
+      }
+      if (!reworkAvailability.available) {
+        Modal.warning({
+          title: '该能力正在接入',
+          content: reworkHintFor(asset.type),
+          okText: '知道了',
+        })
+        return
+      }
+      const referenceLabel = asset.hasPrimary ? '该资产当前的定版图片' : '该资产当前的首选图片'
+      const confirmation = buildRegenerateWithReferenceConfirmation({
+        assetName: asset.name,
+        referenceLabel,
+        mode: runtimeMode,
+        assetType: asset.type,
+      })
+      Modal.confirm({
+        title: confirmation.title,
+        width: 560,
+        okText: confirmation.okText,
+        cancelText: confirmation.cancelText,
+        content: (
+          <div className="space-y-2">
+            {asset.thumbnail ? (
+              <div className="flex items-center gap-2 rounded border border-slate-200 p-2">
+                <img src={asset.thumbnail} alt={asset.name} className="h-14 w-14 rounded object-cover" />
+                <span className="text-[11px] text-slate-500">
+                  {`${copy.existingImageInputLabel}（${referenceLabel}）`}
+                </span>
+              </div>
+            ) : null}
+            <ul className="list-disc pl-5 text-xs leading-5">
+              {confirmation.lines.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+            <Alert
+              type={runtimeMode === 'real' ? 'warning' : 'info'}
+              showIcon
+              message={<span className="text-xs">{confirmation.costWarning}</span>}
+            />
+          </div>
+        ),
+        onOk: () => {
+          void submitReferenceRework(asset)
+        },
+      })
+    },
+    [reworkAvailability, reworkHintFor, runtimeMode, submitReferenceRework],
   )
 
   const retryTask = useCallback(
@@ -623,7 +988,7 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
       const asset = assetByKey.get(task.assetKey)
       if (!asset) return
       if (!isSubmittableAssetType(asset.type)) {
-        Modal.warning({ title: '这一项不能重试', content: SUPPORT_HINT, okText: '知道了' })
+        Modal.warning({ title: '这一项不能重试', content: supportHint(asset.type), okText: '知道了' })
         return
       }
       const planByType = await preparePlans([asset])
@@ -668,22 +1033,42 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         return
       }
       const picked = scope.assets.filter((asset) => isSubmittableAssetType(asset.type))
+      const groups = groupAssetsByType(picked)
+      const ratioStrategy = strategyForType(picked[0]?.type ?? tab)
+      const confirmationInput = {
+        scope,
+        settings,
+        mode: runtimeMode,
+        operation,
+        // 人物固定 16:9 那句话要同时给出项目自己的成片画幅
+        projectVideoRatio,
+        aspectRatioSource: aspectRatioSourceFromStrategy(ratioStrategy),
+        aspectRatioValue: typeof ratioStrategy.aspect_ratio === 'string' ? String(ratioStrategy.aspect_ratio) : null,
+      }
       if (picked.length === 0) {
-        const blocked = buildBatchConfirmation({ scope, settings, mode: runtimeMode, operation, withReference: null })
+        const blocked = buildBatchConfirmation(confirmationInput)
         Modal.warning({ title: blocked.title, content: blocked.blockedReason, okText: '知道了' })
         return
       }
       const planByType = await preparePlans(picked)
-      const withReference = picked.filter((asset) =>
-        Boolean(planTargetForAsset(asset, planByType.get(asset.type) ?? [])?.reference_image),
-      ).length
-      const confirmation = buildBatchConfirmation({ scope, settings, mode: runtimeMode, operation, withReference })
+      const confirmation = buildBatchConfirmation(confirmationInput)
       if (confirmation.blocked) {
         Modal.warning({ title: confirmation.title, content: confirmation.blockedReason, okText: '知道了' })
         return
       }
+      /**
+       * **按 asset_type 分组提交**（用户点名）。
+       *
+       * 出图提交接口一次只接受一个 asset_type，所以混选时逐组提交（每组自己一轮、自己的结果类型标签），
+       * 而不是把人物 / 场景 / 道具混成一批当成同一种类型处理。
+       */
       const proceed = () => {
-        void submitRound(operation, picked, planByType)
+        void (async () => {
+          for (const group of groups) {
+            // eslint-disable-next-line no-await-in-loop
+            await submitRound(operation, group.items, planByType)
+          }
+        })()
       }
       // 一次点击只产生一轮任务：不确认就绝不提交
       if (!confirmation.required) {
@@ -699,7 +1084,7 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         onOk: proceed,
       })
     },
-    [busyNow, planTargetForAsset, preparePlans, runtimeMode, scope, settings, submitRound],
+    [busyNow, preparePlans, projectVideoRatio, runtimeMode, scope, settings, strategyForType, submitRound, tab],
   )
 
   const handleStop = () => {
@@ -967,7 +1352,7 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
             {record.name}
           </span>
           {!isSubmittableAssetType(record.type) ? (
-            <Tooltip title={SUPPORT_HINT}>
+            <Tooltip title={supportHint(record.type)}>
               <Tag bordered={false} className="mr-0 text-gray-400">
                 暂不支持批量出图
               </Tag>
@@ -1067,7 +1452,9 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
                 disabled={busyNow}
                 onClick={() => (record.hasImage ? void regenerateOne(record) : void submitSingle(record))}
               >
-                {record.hasImage ? '重新生成' : '生成'}
+                {record.hasImage
+                  ? generateActionLabel(record.type, 'regenerate')
+                  : generateActionLabel(record.type)}
               </Button>
             ) : null}
             {onOpenAssetEditor ? (
@@ -1079,6 +1466,16 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
                       key: 'generate',
                       label: '进入该资产出图页',
                       onClick: () => onOpenAssetEditor(toSignalAsset(record), { generate: true }),
+                    },
+                    { type: 'divider' },
+                    {
+                      key: 'rework',
+                      // 按类型取词：人物 = 使用已有参考图重新生成；场景/道具/服装用各自的图名
+                      label: reworkAvailability.available
+                        ? existingImageActionLabel(record.type)
+                        : `${existingImageActionLabel(record.type)}（该能力正在接入）`,
+                      disabled: !canRegenerateWithExistingReference(record) || !reworkAvailability.available,
+                      onClick: () => void regenerateWithExistingReference(record),
                     },
                   ],
                 }}
@@ -1195,6 +1592,12 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
               {`已选 ${scope.total} 项（人物 ${scope.byType.character} / 场景 ${scope.byType.scene} / 道具 ${scope.byType.prop} / 服装 ${scope.byType.costume}）`}
             </Tag>
             <Tag color="blue" bordered={false}>{`预计生成 ${scope.estimatedImages} 张`}</Tag>
+            {/* 选中项按类型分组：每一组生成什么图，说清各是哪一类（不让场景/道具并进「参考图」） */}
+            {pickedGroups.map((group) => (
+              <Tag key={group.assetType} bordered={false} color={group.copy.tone}>
+                {`${group.copy.label} ${group.count}`}
+              </Tag>
+            ))}
             {scope.unsupportedCount > 0 ? (
               <Tag color="gold" bordered={false}>{`服装 ${scope.unsupportedCount} 项暂不支持批量出图`}</Tag>
             ) : null}
@@ -1203,17 +1606,13 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
 
         {/* 生成设置：只给用户能理解的选项 */}
         <div className="flex flex-wrap items-center gap-4 rounded-md bg-slate-50 px-3 py-2">
-          <Space size={6}>
-            <span className="text-xs text-slate-600">用定版图当垫图</span>
-            <Switch
-              size="small"
-              checked={settings.useReference}
-              onChange={(checked) => setSettings((prev) => ({ ...prev, useReference: checked }))}
-            />
-            <Tooltip title="打开后会用各资产已定版的图当垫图；没有定版图的资产会按纯提示词出图">
-              <span className="text-[11px] text-gray-400">决定镜头一致性</span>
-            </Tooltip>
-          </Space>
+          {/* 出图方式（如实陈述，**按页签类型取词**：人物 = 参考图，场景/道具 = 各自的资产图） */}
+          <span className="text-xs text-slate-600">{tabCopy.outputModeStatement}</span>
+          <Tag>
+            {canBatchWithReference(tab)
+              ? `${BATCH_REFERENCE_FLOW_LABEL}：只对人物开放（本页签可用）`
+              : `${BATCH_REFERENCE_FLOW_LABEL}：只对人物开放，${tabCopy.noun}不参与`}
+          </Tag>
           <Space size={6}>
             <span className="text-xs text-slate-600">画面比例</span>
             <Select
@@ -1223,6 +1622,10 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
               onChange={(value) => setSettings((prev) => ({ ...prev, aspectRatio: value }))}
               options={ASPECT_RATIO_OPTIONS.map((item) => ({ label: item.label, value: item.value }))}
             />
+            {/* 人物参考图的画幅是写死的：这里的选项对人物不生效（如实说明，不给假开关） */}
+            {tabRatioNotice.applies ? (
+              <span className="text-[11px] text-gray-400">{`（人物参考图固定 ${tabRatioNotice.referenceRatio}，这里的选项对人物不生效）`}</span>
+            ) : null}
           </Space>
           <Space size={6}>
             <span className="text-xs text-slate-600">张数</span>
@@ -1234,8 +1637,21 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
           </Tag>
         </div>
 
+        {/*
+          **人物参考图固定 16:9，不等于项目最终视频画幅**（用户点名要写在页面上）。
+          这里同时给出项目自己的成片画幅，两个值不同时一眼就能看出区别。
+        */}
+        {tabRatioNotice.applies ? (
+          <Alert
+            type="info"
+            showIcon
+            message={<span className="text-xs">{tabRatioNotice.statement}</span>}
+          />
+        ) : null}
+
         <Space size={8} wrap>
-          <Tooltip title="默认只勾选没有图片的资产，不会覆盖已有图片或已有定版图">
+          {/* 批量按钮**按类型取名**：人物 = 批量生成参考图；场景/道具 = 各自的资产图；混选时按类型分组列出 */}
+          <Tooltip title="默认只勾选还没有图片的资产，不会覆盖已有图片或已有定版图">
             <Button
               type="primary"
               icon={<ThunderboltOutlined />}
@@ -1243,21 +1659,30 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
               disabled={busyNow || scope.submittableCount === 0}
               onClick={() => void startBatch('generate')}
             >
-              {`批量生成选中项（${scope.submittableCount}）`}
+              {batchActionLabel(pickedAssets, 'generate')}
             </Button>
           </Tooltip>
-          <Tooltip title="对已选中有图片的资产再生成一张（会二次确认；不会自动替换现有图片或定版）">
+          <Tooltip title="对已有图片的资产按提示词再生成一张（会二次确认；不会自动替换现有图片或定版）">
             <Button
-              disabled={busyNow || scope.withExistingImage === 0}
+              disabled={busyNow || pickedRegenerateAssets.length === 0}
               onClick={() => void startBatch('regenerate')}
             >
-              {`批量重新生成选中项（${scope.withExistingImage}）`}
+              {batchActionLabel(pickedRegenerateAssets, 'regenerate')}
             </Button>
           </Tooltip>
           <Button danger disabled={!unsettled} onClick={handleStop}>
             停止后续
           </Button>
-          <Button icon={<CloseCircleOutlined />} disabled={tasks.length === 0} onClick={() => setTasks([])}>
+          <Button
+            icon={<CloseCircleOutlined />}
+            disabled={tasks.length === 0}
+            onClick={() => {
+              setTasks([])
+              // 本地恢复内容一起清掉，避免刷新后又"回来"
+              clearRoundFromStorage(getBrowserStorage(), roundKey)
+              setRestoredNote('')
+            }}
+          >
             清空结果卡片
           </Button>
           <Button size="small" icon={<ReloadOutlined />} disabled={!onReload} onClick={() => onReload?.()}>
@@ -1296,6 +1721,32 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         ) : null}
       </div>
 
+      {/*
+        刷新后恢复的说明（缺陷 D5）：说白了是"只读恢复"——
+        不会因为恢复而重新提交、也不会重复计费。
+      */}
+      {restoredNote ? (
+        <Alert
+          type="info"
+          showIcon
+          closable
+          message={<span className="text-xs">{restoredNote}</span>}
+          onClose={() => setRestoredNote('')}
+          action={
+            <Button
+              size="small"
+              onClick={() => {
+                setTasks([])
+                clearRoundFromStorage(getBrowserStorage(), roundKey)
+                setRestoredNote('')
+              }}
+            >
+              清空恢复内容
+            </Button>
+          }
+        />
+      ) : null}
+
       {/* 结果卡片 */}
       {tasks.length > 0 ? (
         <div className="space-y-2">
@@ -1329,6 +1780,13 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
                   const asset = assetByKey.get(item.assetKey)
                   if (asset) void regenerateOne(asset)
                 }}
+                onRegenerateWithExistingReference={(item) => {
+                  const asset = assetByKey.get(item.assetKey)
+                  if (asset) void regenerateWithExistingReference(asset)
+                }}
+                canUseExistingReference={canRegenerateWithExistingReference(assetByKey.get(task.assetKey))}
+                reworkAvailable={reworkAvailability.available}
+                reworkUnavailableHint={reworkHintFor(task.assetType)}
                 onRetry={(item) => void retryTask(item)}
                 onAdopt={(item) => void adoptTask(item)}
                 onSetPrimary={(item) => void setPrimary(item)}
@@ -1419,9 +1877,7 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
                   >
                     用大模型生成/完善
                   </Button>
-                  <span className="text-[11px] text-gray-400">
-                    {promptEditorPlanTarget?.reference_image ? '本次会带定版垫图' : '本次没有可用垫图（按纯提示词出图）'}
-                  </span>
+                  <span className="text-[11px] text-gray-400">{OUTPUT_MODE_STATEMENT}</span>
                 </Space>
               </div>
             </Spin>
@@ -1444,8 +1900,13 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
                 {`${detailTask.assetName}（${getProjectSignalAssetTypeLabel(detailTask.assetType)}）`}
               </Descriptions.Item>
               <Descriptions.Item label="来龙去脉">{`本轮第 ${detailTask.round} 轮 · ${
-                detailTask.operation === 'regenerate' ? '重新生成' : '生成'
+                FLOW_LABEL[detailTask.flow] ?? resultArtifactCopy(detailTask.assetType).generateAction
               }`}</Descriptions.Item>
+              <Descriptions.Item label="图片类型">
+                {`${buildResultKindLabel(detailTask)}${detailTask.aspectRatio ? `｜画幅 ${detailTask.aspectRatio}` : ''}${
+                  detailTask.aspectRatioSource === 'character_reference_fixed' ? '（人物参考图固定口径）' : ''
+                }`}
+              </Descriptions.Item>
               <Descriptions.Item label="这次用的提示词">
                 <span className="text-xs">{detailTask.prompt || '（还没有提示词）'}</span>
               </Descriptions.Item>
@@ -1497,8 +1958,9 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
                 <Space size={6} wrap>
                   <Tag bordered={false}>{`当前页签 ${ASSET_TYPE_LABEL[tab]}`}</Tag>
                   <Tag bordered={false}>{`计划条目 ${currentPlanTargets.length}`}</Tag>
-                  <Tag color={referenceCount > 0 ? 'blue' : 'default'} bordered={false}>{`带垫图 ${referenceCount}`}</Tag>
-                  <Tag bordered={false}>{describeSettings(settings)}</Tag>
+                  <Tag bordered={false}>{tabCopy.outputModeStatement}</Tag>
+                  <Tag bordered={false}>{describeSettings(settings, tab)}</Tag>
+                  {tabRatioNotice.applies ? <Tag bordered={false}>{tabRatioNotice.statement}</Tag> : null}
                 </Space>
                 {planError ? <Alert type="error" showIcon message="出图计划读取失败" description={planError} /> : null}
                 {planWarnings.length > 0 ? (
@@ -1511,8 +1973,8 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
                 <Descriptions size="small" column={1} bordered>
                   {currentPlanTargets.slice(0, 10).map((target, index) => (
                     <Descriptions.Item key={`${target.source_task_id}-${index}`} label={target.name || target.source_asset_id}>
-                      {`幂等键 ${target.source_task_id}｜提示词来源 ${target.prompt_source ?? ''}｜垫图 ${
-                        target.reference_image || '无'
+                      {`幂等键 ${target.source_task_id}｜提示词来源 ${target.prompt_source ?? ''}｜计划里的已有图片输入字段：${
+                        target.reference_image || '（默认流程不传）'
                       }`}
                     </Descriptions.Item>
                   ))}

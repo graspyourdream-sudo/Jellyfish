@@ -26,19 +26,19 @@ import {
   type ImagePromptSlot,
 } from '../../../../../services/llmPipelineApi'
 import type { ProjectSignalAsset, ProjectSignalAssetType } from '../hooks/useProjectStepSignals'
+import {
+  ASSET_PROMPT_CATEGORY,
+  ASSET_PROMPT_CATEGORY_LABEL,
+  buildUnsupportedSlotAlert,
+  describePromptRowAsset,
+  describePromptRowExisting,
+  describePromptRowSlot,
+  describePromptRowState,
+  mergeLoadedAssetPrompts,
+} from './assetPromptSlots.ts'
 
-/** 资产类型 → 生成提示词时使用的槽位（= 生图计划读取的那一列）。 */
-export const ASSET_PROMPT_CATEGORY: Partial<Record<ProjectSignalAssetType, string>> = {
-  character: 'character_image_front',
-  scene: 'scene_image_front',
-  costume: 'costume_image_front',
-}
-
-export const ASSET_PROMPT_CATEGORY_LABEL: Record<string, string> = {
-  character_image_front: '角色正面图片',
-  scene_image_front: '场景正面图片',
-  costume_image_front: '服装正面图片',
-}
+/** 槽位表与文案都在 `assetPromptSlots` 里（纯逻辑，可单测）；这里只做转出，避免旧引用失效。 */
+export { ASSET_PROMPT_CATEGORY, ASSET_PROMPT_CATEGORY_LABEL }
 
 type AssetRow = {
   key: string
@@ -119,7 +119,16 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
       }),
     )
     if (loaded.length) {
-      setRows((prev) => prev.map((row) => loaded.find((item) => item.key === row.key) ?? row) as AssetRow[])
+      /**
+       * **按 key 合并**，不是整行替换（缺陷 D1 的修复）。
+       *
+       * `loaded` 里的每一项只有 `{ key, existing }`；以前写的是
+       * `prev.map(row => loaded.find(...) ?? row)` —— 命中的行会被这个两字段对象**整行替换**，
+       * name / type / supported / category 全部丢失，界面立刻变成
+       * 「undefined（undefined）」+「不支持（无槽位）」+ 复选框禁用（不能勾选、不能生成），
+       * 有几项已保存提示词就有几行坏掉，还误报「有 N 个资产类型没有大模型槽位」。
+       */
+      setRows((prev) => mergeLoadedAssetPrompts(prev, loaded))
     }
   }, [assets])
 
@@ -234,7 +243,7 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
     if (saved) message.success(`已保存 ${saved} 个资产的图片提示词（生图会立刻读它们）`)
   }
 
-  const unsupported = rows.filter((row) => !row.supported)
+  const unsupportedAlert = buildUnsupportedSlotAlert(rows)
   const dryRunRows = rows.filter((row) => row.status === 'generated' && row.llmCalled === false)
   const failedCount = rows.filter((row) => row.status === 'failed').length
 
@@ -272,12 +281,12 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
         </Button>
       </Space>
 
-      {unsupported.length ? (
+      {unsupportedAlert ? (
         <Alert
           type="info"
           showIcon
-          message={`有 ${unsupported.length} 个资产类型没有大模型槽位（道具）`}
-          description="后端槽位表只定义了角色/场景/服装的图片提示词槽位，道具没有；这类资产请在上面用手工填写。"
+          message={unsupportedAlert.message}
+          description={unsupportedAlert.description}
         />
       ) : null}
 
@@ -348,14 +357,15 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
           getCheckboxProps: (row) => ({ disabled: !row.supported }),
         }}
         columns={[
-          { title: '资产', dataIndex: 'name', width: 150, render: (value: string, row) => `${value}（${row.type}）` },
-          { title: '槽位', dataIndex: 'category', width: 130, render: (value: string, row) => (row.supported ? ASSET_PROMPT_CATEGORY_LABEL[value] ?? value : '不支持（无槽位）') },
-          { title: '已有提示词', dataIndex: 'existing', width: 140, render: (value: string) => (value ? `${value.length} 字` : '—') },
+          { title: '资产', dataIndex: 'name', width: 150, render: (_: unknown, row) => describePromptRowAsset(row) },
+          { title: '槽位', dataIndex: 'category', width: 130, render: (_: unknown, row) => describePromptRowSlot(row) },
+          { title: '已有提示词', dataIndex: 'existing', width: 140, render: (_: unknown, row) => describePromptRowExisting(row) },
           {
             title: '状态 / 生成结果（可编辑）',
             dataIndex: 'draft',
             render: (value: string, row) => {
-              if (!row.supported) return <span className="text-[11px] text-gray-400">该资产类型没有大模型槽位</span>
+              const unsupportedState = describePromptRowState(row)
+              if (unsupportedState) return <span className="text-[11px] text-gray-400">{unsupportedState}</span>
               const label =
                 row.status === 'saved'
                   ? '已保存'

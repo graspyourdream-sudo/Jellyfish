@@ -1,9 +1,13 @@
 /**
  * 出图结果卡片（要求 11）。
  *
- * 只展示用户能决定的东西：生成图、资产名称与类型、当前状态、以及
+ * 只展示用户能决定的东西：生成图、**图片类型标签**、资产名称与类型、当前状态、以及
  * 「查看详情 / 编辑提示词 / 重新生成 / 采纳 / 设为定版 / 已定版标识」这几个动作。
  * 任务号、归一化状态、模型名、供应商一律**不在这里出现**（它们在默认收起的「技术详情」里）。
+ *
+ * 图片类型标签与按钮文案**都按 asset_type 取**（用户点名）：
+ * 人物 = 参考图；场景 / 道具 / 服装 = 各自的资产图 / 设定图，
+ * 卡片上不许把场景 / 道具的结果说成「参考图」。
  */
 
 import { useState } from 'react'
@@ -17,9 +21,11 @@ import {
 import {
   ASSET_TYPE_LABEL,
   describeTaskStatus,
+  isPlaceholderUrl,
   type ProductionAsset,
   type ProductionTask,
 } from './assetProduction'
+import { buildResultKindTag, resultArtifactCopy } from './assetResultKind.ts'
 
 const TONE_COLOR: Record<string, string> = {
   green: 'green',
@@ -36,7 +42,18 @@ export type AssetResultCardProps = {
   busy: boolean
   onViewDetail: (task: ProductionTask) => void
   onEditPrompt: (task: ProductionTask) => void
+  /** 默认主流程：按提示词再生成一张参考图 */
   onRegenerate: (task: ProductionTask) => void
+  /**
+   * 可选返工流程：使用**已有参考图**重新生成（走 Jellyfish 自己的图片通道）。
+   * 该资产还没有参考图时不给这个入口。
+   */
+  onRegenerateWithExistingReference: (task: ProductionTask) => void
+  /** 该资产是否已有参考图（返工流程的前置条件） */
+  canUseExistingReference: boolean
+  /** 返工端点是否已上线（没上线就禁用并如实说明） */
+  reworkAvailable: boolean
+  reworkUnavailableHint: string
   onRetry: (task: ProductionTask) => void
   onAdopt: (task: ProductionTask) => void
   onSetPrimary: (task: ProductionTask) => void
@@ -47,7 +64,19 @@ export function AssetResultCard(props: AssetResultCardProps) {
   const { task, asset, busy } = props
   const [imageBroken, setImageBroken] = useState(false)
   const status = describeTaskStatus(task.status)
-  const previewUrl = task.adoptedUrl || task.ossUrl || task.imageUrl
+  /** 按类型取的结果文案：人物 = 参考图；场景/道具/服装 = 各自的图名（不让场景出现「参考图」） */
+  const copy = resultArtifactCopy(task.assetType, {
+    resultKind: task.resultKind,
+    resultLabel: task.resultLabel,
+  })
+  /** 卡片上的**图片类型标签**：消费后端回包的 result_kind / result_label */
+  const kindTag = buildResultKindTag(task.assetType, {
+    resultKind: task.resultKind,
+    resultLabel: task.resultLabel,
+  })
+  // 演练占位地址是不可达域名：不要拿它去发请求（页面会白报一堆网络错误），直接说明"这是演练占位"
+  const rawUrl = task.adoptedUrl || task.ossUrl || task.imageUrl
+  const previewUrl = rawUrl && !isPlaceholderUrl(rawUrl) ? rawUrl : ''
   const canAdopt = task.status === 'done' && !task.adoptedImageId
   // 「设为定版」在结果可用时就可以点：它内部会先把这张保存进资产、再设为定版；
   // 资产已有定版时会先弹二次确认（硬边界 B），不会静默替换。
@@ -79,6 +108,18 @@ export function AssetResultCard(props: AssetResultCardProps) {
             <Tag color="purple" className="mr-0" bordered={false}>
               {ASSET_TYPE_LABEL[task.assetType]}
             </Tag>
+            {/* 图片类型标签：本次这张到底属于哪一类结果（人物参考图 / 场景资产图 / 道具资产图 / 服装设定图） */}
+            <Tooltip
+              title={
+                kindTag.fromServer
+                  ? '这是本次出图结果自带的图片类型（后端按资产类型分流返回）'
+                  : '后端回包里没有带图片类型字段，这里按资产类型给出的图片类型'
+              }
+            >
+              <Tag color={kindTag.tone} className="mr-0" bordered={false}>
+                {kindTag.label}
+              </Tag>
+            </Tooltip>
             <span className="truncate text-sm font-medium text-slate-900" title={task.assetName}>
               {task.assetName}
             </span>
@@ -141,8 +182,25 @@ export function AssetResultCard(props: AssetResultCardProps) {
               编辑提示词
             </Button>
             <Button size="small" icon={<ReloadOutlined />} loading={busy} onClick={() => props.onRegenerate(task)}>
-              重新生成
+              {copy.regenerateAction}
             </Button>
+            {props.canUseExistingReference ? (
+              <Tooltip
+                title={
+                  props.reworkAvailable
+                    ? `该资产已有${copy.noun}：把这张作为输入重新生成一张（会先与你确认用哪张、会不会产生费用）`
+                    : props.reworkUnavailableHint
+                }
+              >
+                <Button
+                  size="small"
+                  disabled={!props.reworkAvailable || busy}
+                  onClick={() => props.onRegenerateWithExistingReference(task)}
+                >
+                  {copy.existingImageAction}
+                </Button>
+              </Tooltip>
+            ) : null}
             {canRetry ? (
               <Button size="small" onClick={() => props.onRetry(task)}>
                 重试这一项
