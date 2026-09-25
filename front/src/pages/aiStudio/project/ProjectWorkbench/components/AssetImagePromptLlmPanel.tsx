@@ -605,11 +605,28 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
       <div className="cs-group-title">
         <ThunderboltOutlined /> 大模型生成图片提示词
       </div>
+      {/* 日常操作区只说用户语言；接口路径/编排实现等内部信息收进默认收起的「技术详情」 */}
       <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] leading-5 text-slate-600">
-        这里的「生成」调用后端的 LLM 编排接口（/studio/llm/image-prompt/preview），真的会调用大模型。
-        保存的位置就是生图实际读取的那份资产提示词，保存后上面的「生图计划预览」会把提示词来源标成「已保存提示词」——
-        用它能当场验证这一步确认保存的内容真的被生图使用了。
+        根据项目风格、资产资料和本章剧情生成图片提示词。每项会调用一次文本模型，保存前可以检查和修改结果；
+        保存的位置就是生图实际读取的那份资产提示词。
       </div>
+      <Collapse
+        size="small"
+        ghost
+        items={[
+          {
+            key: 'prompt-gen-tech',
+            label: '技术详情：这一屏怎么工作的',
+            children: (
+              <div className="space-y-1 text-[11px] leading-5 text-slate-500">
+                <div>提示词生成走后端 LLM 编排接口（`POST /studio/llm/image-prompt/preview`），每项一次调用。</div>
+                <div>保存后「生图计划预览」会把提示词来源标成「已保存提示词」—— 用它可当场验证保存内容真的被生图使用。</div>
+                <div>失败即停、不自动重试；被质量拦截的提示词不会保存。</div>
+              </div>
+            ),
+          },
+        ]}
+      />
 
       <Space wrap size={12} align="center">
         <Checkbox checked={onlyMissing} onChange={(event) => setOnlyMissing(event.target.checked)}>
@@ -699,10 +716,11 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
         ]}
       />
 
+      {/* 用户语言：说清"点一次 = 花一次钱"，不写接口名、不写模型 ID、不写状态码 */}
       <div className="text-[11px] text-gray-500">
-        每点一次「生成图片提示词」＝对该资产**一次真实大模型调用**（会花钱、按次计费）；
+        每项会调用一次文本模型（按次计费，会花钱）；
         <span className="text-slate-700">任何一次失败都会立即停止且不自动重试</span>
-        ，剩余项会标成「未开始」由你决定要不要继续。演练模式下不会真的调用、也不产生费用。
+        ，剩余项会标成「未开始」由你决定要不要继续。
       </div>
 
       {unsupportedAlert ? (

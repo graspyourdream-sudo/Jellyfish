@@ -590,6 +590,81 @@ export function fetchChapterAssetCandidates(chapterId: string): Promise<ChapterA
   return callApi(`/api/v1/studio/chapters/${encodeURIComponent(chapterId)}/asset-candidates`)
 }
 
+/* ------------------------------------------- 章节资产资料（按项目 + 章节持久化那份） */
+
+/**
+ * 一条章节资产资料行（`chapter_asset_profiles`）。
+ *
+ * 这是「资产资料」的**事实来源**：模型产出在 `fields`，人工修改在 `manual_overrides`，
+ * 用户补充在 `user_notes`；三者刻意分开，重新分析不会覆盖人工内容。
+ * 页面上的「补充/修改资产资料」写的就是 `manual_overrides` / `user_notes`。
+ */
+export interface ChapterAssetProfileRecord {
+  id: number
+  project_id: string
+  chapter_id: string
+  asset_type: string
+  type_label: string
+  name: string
+  name_key: string
+  group_key: string
+  aliases: string[]
+  /** 生效资料（模型资料 ⊕ 人工修改）—— 出图与「生成依据」读的就是它 */
+  fields: Record<string, string>
+  manual_overrides: Record<string, string>
+  user_notes: string[]
+  profile_source: string
+  plot_identity: string
+  temporary_notes: string[]
+  shot_refs: Record<string, unknown>[]
+  evidence: Record<string, unknown>[]
+  asset_id: string | null
+  status: string
+  status_label: string
+  source_hash: string
+  source_summary: Record<string, unknown>
+  missing_fields: string[]
+  missing_visual_fields: string[]
+  completeness: number
+  generated_at: string | null
+  confirmed_at: string | null
+  manual_edited_at: string | null
+  updated_at: string | null
+  has_pending_change?: boolean
+}
+
+export interface ChapterAssetProfileRecords {
+  chapter_id: string
+  project_id: string
+  items: ChapterAssetProfileRecord[]
+  run: Record<string, unknown> | null
+  content_changed: boolean
+  summary: Record<string, number | Record<string, number>>
+  note: string
+}
+
+/** 读本章的资产资料行（只读：不调模型、不写库）。 */
+export function fetchChapterAssetProfileRecords(chapterId: string): Promise<ChapterAssetProfileRecords> {
+  return callApi(`/api/v1/studio/chapters/${encodeURIComponent(chapterId)}/asset-profiles/records`)
+}
+
+/**
+ * 保存「补充 / 修改资产资料」（写 `manual_overrides` / `user_notes`）。
+ *
+ * 只写人工内容：模型侧资料一个字不动，重新分析也不会覆盖它；
+ * 本接口**不生成提示词、不生成图片、不覆盖已有提示词**。
+ */
+export function updateChapterAssetProfileRecord(
+  chapterId: string,
+  recordId: number,
+  body: { fields?: Record<string, string>; notes?: string[]; aliases?: string[] },
+): Promise<ChapterAssetProfileRecord> {
+  return callApiPatch(
+    `/api/v1/studio/chapters/${encodeURIComponent(chapterId)}/asset-profiles/records/${recordId}`,
+    body as AnyRecord,
+  )
+}
+
 /* ------------------------------------------------- 九槽位定义（用于手工填写） */
 
 export interface ImagePromptSlotSpec {

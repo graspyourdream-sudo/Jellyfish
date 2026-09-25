@@ -94,7 +94,7 @@ export const DISPLAY_STEPS: DisplayStep[] = [
     key: 'asset_prep',
     label: '资产准备',
     description:
-      '从剧本/分镜提取人物、场景、道具、服装 → 审核候选 → 关联资产库已有资产或新建 → 图片提示词 → 上传或生成图片 → 设为定版',
+      '按本章剧本整理人物、场景、道具、服装 → 补齐资产资料 → 生成图片提示词 → 生成或上传图片 → 设为定版',
     stepKeys: ['extract_assets', 'image_prep'],
   },
   {

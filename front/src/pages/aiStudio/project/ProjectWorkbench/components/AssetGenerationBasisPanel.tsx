@@ -1,3 +1,4 @@
+import type React from 'react'
 /**
  * 「生成依据」面板（用户点名：**默认收起**）。
  *
@@ -50,6 +51,14 @@ export type AssetGenerationBasisPanelProps = {
   defaultOpen?: boolean
   /** 是否显示「技术详情：本次用到的字段名」（默认显示；只在展开时渲染） */
   showTechnical?: boolean
+  /**
+   * 面板下方的操作区（可选）：例如「补充/修改资产资料」入口。
+   *
+   * 为什么要一个插槽：用户要求这个入口要出现在**每项资产的「生成依据」附近**，
+   * 而「生成依据」由本组件渲染 —— 插槽能让入口跟着依据走，不必在每个调用点各写一遍定位逻辑。
+   * 折叠收起时也显示（用户不必先展开依据才能补资料）。
+   */
+  footer?: React.ReactNode
 }
 
 export function AssetGenerationBasisPanel(props: AssetGenerationBasisPanelProps) {
@@ -59,7 +68,7 @@ export function AssetGenerationBasisPanel(props: AssetGenerationBasisPanelProps)
   const availability = describeBasisAvailability(basis)
   const defaultActiveKey = props.defaultOpen ? ['basis'] : []
 
-  return (
+  const panel = (
     <Collapse
       ghost
       size="small"
@@ -137,6 +146,14 @@ export function AssetGenerationBasisPanel(props: AssetGenerationBasisPanelProps)
         },
       ]}
     />
+  )
+
+  if (!props.footer) return panel
+  return (
+    <div className="space-y-1">
+      {panel}
+      <div className="pl-1">{props.footer}</div>
+    </div>
   )
 }
 
