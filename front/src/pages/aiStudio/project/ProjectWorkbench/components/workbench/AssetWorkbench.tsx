@@ -463,6 +463,8 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
                     />
                     <AssetImagePromptLlmPanel
                       projectId={projectId ?? ''}
+                      chapterId={chapterId}
+                      preselectAllMissing
                       assets={toSignalAssets(data).filter((asset) =>
                         selectedKeys.includes(`${asset.type}:${asset.id}`),
                       )}

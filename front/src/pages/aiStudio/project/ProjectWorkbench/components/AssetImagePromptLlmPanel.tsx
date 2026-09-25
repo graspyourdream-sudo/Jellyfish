@@ -38,7 +38,12 @@ import {
   saveAssetImagePromptsBatch,
 } from './assetProductionApi'
 import { AssetGenerationBasisPanel } from './AssetGenerationBasisPanel'
-import { buildRequestStructureText, type GenerationBasisExtras } from './assetGenerationBasis.ts'
+import {
+  buildRequestStructureText,
+  readGenerationBasis,
+  summarizeGenerationBasis,
+  type GenerationBasisExtras,
+} from './assetGenerationBasis.ts'
 import { PromptQualityAlert, PromptQualityTag } from './PromptQualityAlert'
 import {
   buildPromptDifferenceLines,
@@ -60,6 +65,15 @@ import {
   type PromptRequestFieldSupport,
 } from './assetPromptRequestContract.ts'
 import type { ProjectSignalAsset, ProjectSignalAssetType } from '../hooks/useProjectStepSignals'
+import {
+  buildRestoredDraftLine,
+  buildRestoredDraftRowFields,
+  clearAssetPromptDraft,
+  loadAssetPromptDraftPlan,
+  matchAssetPromptDraftEntries,
+  resolveRestoredDraftSaveGuard,
+  saveAssetPromptDraft,
+} from './workbench/assetPromptDrafts.ts'
 import {
   ASSET_PROMPT_CATEGORY,
   ASSET_PROMPT_CATEGORY_LABEL,
@@ -111,6 +125,24 @@ type AssetRow = {
   qualityPayload: unknown
   /** ④ 本次**真的发出去**的请求结构（脱敏后展示） */
   requestStructure: string
+  /**
+   * 这一行的正文是不是**本机草稿**（生成过、还没保存，靠它活过刷新）恢复回来的。
+   *
+   * 恢复来的行会打上「草稿（未保存）」标签，与绿色「已保存」严格区分；
+   * 用户一旦重新生成或保存成功，这几个字段立刻清空（草稿不再代表当前正文）。
+   */
+  restoredFromDraft: boolean
+  /** 恢复当时的那一版正文：用来判"用户改过没有" */
+  restoredPrompt: string
+  /** 恢复当时这条能不能保存（生成时就判不可用的，恢复后也不许绕过） */
+  restoredSavable: boolean
+  /** 恢复时的质量结论（只用于回显，不冒充现在的判定） */
+  restoredQualityLabel: string
+  restoredQualityReason: string
+  /** 恢复时的**依据摘要**（用户语言一句话；整份依据回包不进草稿） */
+  restoredBasisSummary: string
+  /** 草稿的生成时间 */
+  restoredAt: number
 }
 
 /** 默认只勾选这么多个缺失资产，放大批量必须人工点「全选缺失」。 */
@@ -120,12 +152,34 @@ const CONFIRM_THRESHOLD = 10
 
 type AssetImagePromptLlmPanelProps = {
   projectId?: string
+  /**
+   * 当前集（章节）：本机草稿按 **项目 + 集** 分键，换项目 / 换集互不串。
+   *
+   * 不给就是一个"不分集"的桶（键里用固定段名），不会和别的项目串上；
+   * 两个调用方（工作台的批量入口、第 2 步图片准备）都会把当前集传进来。
+   */
+  chapterId?: string | null
   assets: ProjectSignalAsset[]
   /** 保存成功后通知外层重算本步骤信号（摘要与资产表要跟着变） */
   onSaved?: () => void
+  /**
+   * 调用方**已经替用户选好了这批资产**（例如工作台顶部"生成图片提示词（4）"）时置 true：
+   * 默认勾选这批里的全部缺失项，不再套用 `DEFAULT_SELECT_LIMIT` 的"只勾前 3 个"保护。
+   *
+   * 为什么需要：上限保护的目的是防止"一次勾几十个一键烧钱"，而当上游已经是一个
+   * **用户明确选过的子集**时，再默默砍掉一部分会让"按钮说 4、实际只发 3"，
+   * 用户看到的数量与实际调用不一致（这正是本轮要修的）。
+   */
+  preselectAllMissing?: boolean
 }
 
-export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetImagePromptLlmPanelProps) {
+export function AssetImagePromptLlmPanel({
+  projectId,
+  chapterId,
+  assets,
+  onSaved,
+  preselectAllMissing = false,
+}: AssetImagePromptLlmPanelProps) {
   const [rows, setRows] = useState<AssetRow[]>([])
   const [selectedKeys, setSelectedKeys] = useState<string[]>([])
   const [onlyMissing, setOnlyMissing] = useState(true)
@@ -133,6 +187,13 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
   const [running, setRunning] = useState(false)
   const [savingKey, setSavingKey] = useState('')
   const stopRef = useRef(false)
+  /**
+   * 本机草稿的恢复说明（空串 = 这次没有恢复出可回填的草稿）。
+   *
+   * 只用来**告诉用户发生了什么**：这一段是只读恢复的产物，页面不会因为恢复了草稿
+   * 就去保存或重新生成任何一行。
+   */
+  const [draftNote, setDraftNote] = useState('')
   /** 后端槽位表：道具槽位补上后这里会自动出现它（前端不再硬编码"道具没有槽位"） */
   const [slotSpecs, setSlotSpecs] = useState<AssetPromptSlotSpecLike[]>([])
   /** 这次批量生成时**对所有选中资产**的补充要求（④ 项依据；后端声明了对应字段才会真的发出去） */
@@ -216,13 +277,23 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
         basisPayload: null,
         qualityPayload: null,
         requestStructure: '',
+        restoredFromDraft: false,
+        restoredPrompt: '',
+        restoredSavable: true,
+        restoredQualityLabel: '',
+        restoredQualityReason: '',
+        restoredBasisSummary: '',
+        restoredAt: 0,
       })
     }
     setRows(next)
     // 缺失项默认只勾**前 3 个**（`hasImagePrompt !== true` 视为缺失）：
     // 一次几十个资产就是几十次真实大模型调用，默认全勾等于把按钮做成"一键烧钱"。
     const missing = next.filter((row) => row.supported && assets.find((a) => a.id === row.id)?.hasImagePrompt !== true)
-    setSelectedKeys(missing.slice(0, DEFAULT_SELECT_LIMIT).map((row) => row.key))
+    // 上游已明确选好子集（工作台批量入口）→ 全选这批缺失项；否则仍只勾前 3 个（防一键烧钱）
+    setSelectedKeys(
+      (preselectAllMissing ? missing : missing.slice(0, DEFAULT_SELECT_LIMIT)).map((row) => row.key),
+    )
     // 已有内容的资产：拉一次详情，把已保存的提示词显示出来（用于对照与"不覆盖"判断）
     const withExisting = next.filter((row) => assets.find((a) => a.id === row.id)?.hasImagePrompt === true)
     const loaded = await Promise.all(
@@ -241,7 +312,29 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
         }
       }),
     )
-    if (loaded.length) {
+    /* ---- 草稿恢复（只读）开始 -------------------------------------------------
+     * 为什么要有这一段：点一次「生成图片提示词（N）」就是 N 次**真实付费**调用。
+     * 今天真出过一次事故 —— 4 次调用都跑完了，用户还没点「保存到资产」页面就被关掉，
+     * 已经付过费的 4 条提示词全丢（资产里还是空的）。所以生成结果会立刻写进本机草稿，
+     * 这里负责把它**回填**到编辑器里，等用户自己检查、修改、再点「保存到资产」。
+     *
+     * 这一段里**只允许读**：读本机草稿 + 回填行。
+     *   - 不保存到资产（用户没点，就一个字节都不进资产）；
+     *   - 不重新生成（那要再花一次钱，而且用户没要求）；
+     *   - 不发任何请求（下面这些函数全是纯函数 / 本地读写）。
+     * 测试 `workbench/assetPromptDrafts.test.ts` 会按这两个标记切片扫描，
+     * 这一段里出现任何提交 / 生成入口的名字都会直接失败。
+     * ------------------------------------------------------------------------ */
+    const draftPlan = loadAssetPromptDraftPlan({
+      projectId: projectId ?? '',
+      chapterId,
+      rows: next.map((row) => ({ type: row.type, id: row.id, category: row.category })),
+    })
+    const matchedDrafts = draftPlan.restored
+      ? matchAssetPromptDraftEntries(next, draftPlan.entries).matched
+      : []
+    setDraftNote(draftPlan.note)
+    if (loaded.length || matchedDrafts.length) {
       /**
        * **按 key 合并**，不是整行替换（缺陷 D1 的修复）。
        *
@@ -250,10 +343,22 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
        * name / type / supported / category 全部丢失，界面立刻变成
        * 「undefined（undefined）」+「不支持（无槽位）」+ 复选框禁用（不能勾选、不能生成），
        * 有几项已保存提示词就有几行坏掉，还误报「有 N 个资产类型没有大模型槽位」。
+       *
+       * 本机草稿同样只往**已经存在的那一行**上回填（`matchedDrafts` 只认类型 + 资产 + 槽位全对上的），
+       * 不凭空造行；草稿本身只在浏览器里，一次写入都不发生。
        */
-      setRows((prev) => mergeLoadedAssetPrompts(prev, loaded))
+      setRows((prev) => {
+        const merged = loaded.length ? mergeLoadedAssetPrompts(prev, loaded) : prev
+        if (!matchedDrafts.length) return merged
+        const byRowKey = new Map(matchedDrafts.map((item) => [item.row.key, item.entry]))
+        return merged.map((row) => {
+          const draftEntry = byRowKey.get(row.key)
+          return draftEntry ? { ...row, ...buildRestoredDraftRowFields(draftEntry) } : row
+        })
+      })
     }
-  }, [assets, slotSpecs])
+    /* ---- 草稿恢复（只读）结束 ---------------------------------------------- */
+  }, [assets, chapterId, preselectAllMissing, projectId, slotSpecs])
 
   useEffect(() => {
     void loadRows()
@@ -287,6 +392,14 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
       userSupplement,
       requestSupport,
     })
+    /**
+     * 这一版的**质量结论**：既用来立刻落草稿（下面就要写），也是"能不能保存到资产"的唯一依据。
+     * 后端结构化判定优先，读不到就前端自查（与批量出图的拦截是同一份逻辑）。
+     */
+    const draftVerdict = describePromptPanelRowQuality(
+      { name: row.name, type: row.type, draft: preview.prompt, existing: row.existing },
+      { serverQuality: preview.qualityPayload, serverWarnings: preview.warnings },
+    )
     setRows((prev) =>
       prev.map((item) =>
         item.key === row.key
@@ -303,10 +416,47 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
               error: preview.slotMissing
                 ? '后端这次没有返回这个类型的槽位（槽位表可能还在补）：可以手工填写后保存到资产。'
                 : '',
+              // 这一行是刚生成的新版本，之前恢复来的草稿不再是"当前正文"
+              restoredFromDraft: false,
+              restoredPrompt: '',
+              restoredSavable: true,
+              restoredQualityLabel: '',
+              restoredQualityReason: '',
+              restoredBasisSummary: '',
+              restoredAt: 0,
             }
           : item,
       ),
     )
+    /**
+     * 生成成功 → **立刻**把这一版写进本机草稿（`localStorage`，不发任何请求、不写库）。
+     *
+     * 为什么写在 `setRows` 之后而不是等用户点保存：这一版正文是**已经付过费**的产物，
+     * 只要页面被关掉 / 刷新，它就会凭空消失（真实事故）。草稿仍然不是"已保存到资产"：
+     * 资产里的提示词只有用户自己点「保存到资产」才会变。
+     *
+     * 写草稿本身失败（隐私模式 / 超配额）**不影响本次生成结果**：静默降级，页面照常用。
+     */
+    saveAssetPromptDraft({
+      projectId: projectId ?? '',
+      chapterId,
+      entry: {
+        assetType: row.type,
+        assetId: row.id,
+        assetName: row.name,
+        slot: row.category,
+        prompt: preview.prompt,
+        llmCalled: preview.llmCalled === true,
+        latencyMs: preview.latencyMs,
+        warnings: preview.warnings,
+        // 只存"人话那一句"依据摘要（本次用到：项目风格 / 规范化资料 N 项…），不存回包原始片段
+        basisSummary: summarizeGenerationBasis(readGenerationBasis(preview.basisPayload)),
+        qualityLabel: draftVerdict.label,
+        qualityReason: draftVerdict.reason,
+        savable: canSavePromptToAsset(draftVerdict, preview.prompt),
+        savedAt: Date.now(),
+      },
+    })
   }
 
   const runBatch = async (targets: AssetRow[]) => {
@@ -369,6 +519,17 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
       message.error(`这一行不能保存：${verdict.reason}${verdict.fixes[0] ? `；怎么修：${verdict.fixes[0]}` : ''}`)
       return false
     }
+    /**
+     * 恢复来的草稿：正文**没改过**且生成时就被判"不可用" → 仍然不许保存。
+     *
+     * 否则刷新一次就把当时的质量拦截绕过去了（生成时不让存的东西，刷新后突然能存）。
+     * 用户按原因改好正文之后，这条判定自动失效（`resolveRestoredDraftSaveGuard` 只认"没改过"的那一版）。
+     */
+    const restoredGuard = resolveRestoredDraftSaveGuard(row)
+    if (restoredGuard.blocked) {
+      message.error(`这条本机草稿在生成时就判为不可用：${restoredGuard.reason}；按原因改好正文即可保存。`)
+      return false
+    }
     // 合并写回：只改这一行那一个槽位，该资产其它槽位原样保留（保存接口是整列替换）
     const nextPrompts: Record<string, string> = { ...row.existingMap, [row.category]: text }
     /**
@@ -392,7 +553,36 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
           nextPrompts,
           replacedSlots.length > 0 ? { confirm_replace_image_prompt: true } : {},
         )
-        setRows((prev) => prev.map((item) => (item.key === row.key ? { ...item, status: 'saved', existing: text } : item)))
+        /**
+         * 保存成功 → 清掉这一行的**本机草稿**。
+         *
+         * 不清的话，页面上会同时存在"已保存到资产"和"本机草稿"两份同一内容的副本，
+         * 用户没法判断哪一份才是生图会读的那一份（以后改了草稿还会以为资产跟着变了）。
+         * 只删这一行（资产 + 槽位）：同一资产别的槽位、别的资产的草稿都不动。
+         */
+        clearAssetPromptDraft({
+          projectId: projectId ?? '',
+          chapterId,
+          target: { assetType: row.type, assetId: row.id, slot: row.category },
+        })
+        setRows((prev) =>
+          prev.map((item) =>
+            item.key === row.key
+              ? {
+                  ...item,
+                  status: 'saved',
+                  existing: text,
+                  restoredFromDraft: false,
+                  restoredPrompt: '',
+                  restoredSavable: true,
+                  restoredQualityLabel: '',
+                  restoredQualityReason: '',
+                  restoredBasisSummary: '',
+                  restoredAt: 0,
+                }
+              : item,
+          ),
+        )
         onSaved?.()
         return true
       } catch (error) {
@@ -448,6 +638,11 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
         skipped += 1
         continue
       }
+      // 恢复来的草稿：没改过且生成时就判不可用的，照样跳过（刷新不许把质量拦截绕过去）
+      if (resolveRestoredDraftSaveGuard(row).blocked) {
+        skipped += 1
+        continue
+      }
       saveable.push(row)
     }
     /**
@@ -478,10 +673,34 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
           const body = buildAssetPromptBatchSaveBody({ items, confirmedReplace })
           await saveAssetImagePromptsBatch(projectId, body)
           const savedKeys = new Set(saveable.map((row) => row.key))
+          /**
+           * 保存成功 → 逐行清掉**本机草稿**（只清这次真的写进资产的那几行）。
+           *
+           * 与逐行保存同一口径：资产里已经有正式的那一份了，草稿再留着只会让人分不清。
+           */
+          saveable.forEach((row) => {
+            clearAssetPromptDraft({
+              projectId: projectId ?? '',
+              chapterId,
+              target: { assetType: row.type, assetId: row.id, slot: row.category },
+            })
+          })
           setRows((prev) =>
             prev.map((item) =>
               savedKeys.has(item.key)
-                ? { ...item, status: 'saved', existing: String(item.draft ?? '').trim(), existingMap: { ...item.existingMap, [item.category]: String(item.draft ?? '').trim() } }
+                ? {
+                    ...item,
+                    status: 'saved',
+                    existing: String(item.draft ?? '').trim(),
+                    existingMap: { ...item.existingMap, [item.category]: String(item.draft ?? '').trim() },
+                    restoredFromDraft: false,
+                    restoredPrompt: '',
+                    restoredSavable: true,
+                    restoredQualityLabel: '',
+                    restoredQualityReason: '',
+                    restoredBasisSummary: '',
+                    restoredAt: 0,
+                  }
                 : item,
             ),
           )
@@ -609,7 +828,19 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
       <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] leading-5 text-slate-600">
         根据项目风格、资产资料和本章剧情生成图片提示词。每项会调用一次文本模型，保存前可以检查和修改结果；
         保存的位置就是生图实际读取的那份资产提示词。
+        <span className="text-slate-700">
+          生成结果会立刻存成本机草稿（放在你自己的浏览器里）：页面被刷新或关掉也不会丢，但只有点「保存到资产」才会写进资产。
+        </span>
       </div>
+      {/* 本机草稿恢复：只读提示 —— 恢复不会自动保存、不会自动重新生成（那会再花一次钱） */}
+      {draftNote ? (
+        <Alert
+          type="info"
+          showIcon
+          message="已恢复本机草稿（还没保存到资产）"
+          description={<span className="text-xs">{draftNote}</span>}
+        />
+      ) : null}
       <Collapse
         size="small"
         ghost
@@ -835,33 +1066,47 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
             render: (value: string, row) => {
               const unsupportedState = describePromptRowState(row)
               if (unsupportedState) return <span className="text-[11px] text-gray-400">{unsupportedState}</span>
+              /**
+               * 标签必须把「本机草稿（未保存）」和绿色「已保存」分开：两者内容可能一模一样，
+               * 混在一起用户会以为资产里已经有了（而实际上生图读的还是旧的那一份）。
+               */
+              const draftOnly = row.restoredFromDraft && row.status === 'generated'
               const label =
                 row.status === 'saved'
                   ? '已保存'
-                  : row.status === 'failed'
-                    ? '失败'
-                    : row.status === 'stopped'
-                      ? '未开始（已停止）'
-                      : row.status === 'running'
-                        ? '生成中'
-                        : row.status === 'generated'
-                          ? '已生成'
-                          : '待生成'
+                  : draftOnly
+                    ? '草稿（未保存）'
+                    : row.status === 'failed'
+                      ? '失败'
+                      : row.status === 'stopped'
+                        ? '未开始（已停止）'
+                        : row.status === 'running'
+                          ? '生成中'
+                          : row.status === 'generated'
+                            ? '已生成'
+                            : '待生成'
               const color =
                 row.status === 'saved'
                   ? 'green'
-                  : row.status === 'failed'
-                    ? 'red'
-                    : row.status === 'stopped'
-                      ? 'default'
-                      : row.status === 'running'
-                        ? 'blue'
-                        : 'gold'
+                  : draftOnly
+                    ? 'blue'
+                    : row.status === 'failed'
+                      ? 'red'
+                      : row.status === 'stopped'
+                        ? 'default'
+                        : row.status === 'running'
+                          ? 'geekblue'
+                          : 'gold'
               // 这一行**实际会用**的提示词（本次草稿优先，其次已保存的那条）：质量按它判
               const verdict = describePromptPanelRowQuality(row, {
                 serverQuality: row.qualityPayload,
                 serverWarnings: row.warnings,
               })
+              /**
+               * 恢复来的草稿：正文没改过、且生成时就判不可用的，**仍然不许保存**（与生成当时同一口径）。
+               * 改过正文之后这条判定自动失效 —— 见 `resolveRestoredDraftSaveGuard`。
+               */
+              const restoredGuard = resolveRestoredDraftSaveGuard(row)
               const generateHint = describePromptRowGenerateHint(row)
               return (
                 <div className="space-y-1">
@@ -871,6 +1116,10 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
                     {row.error ? <span className="text-[11px] text-amber-600">{row.error}</span> : null}
                   </Space>
                   {generateHint ? <div className="text-[11px] text-gray-500">{generateHint}</div> : null}
+                  {/* 恢复来的草稿：说清"这是本机草稿、什么时候生成的"，不冒充已保存 */}
+                  {row.restoredFromDraft ? (
+                    <div className="text-[11px] text-gray-500">{buildRestoredDraftLine(row)}</div>
+                  ) : null}
                   <Input.TextArea
                     rows={3}
                     value={value}
@@ -887,7 +1136,12 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
                       size="small"
                       type="primary"
                       loading={savingKey === row.key}
-                      disabled={row.status !== 'generated' || !row.llmCalled || !canSavePromptToAsset(verdict, row.draft)}
+                      disabled={
+                        row.status !== 'generated' ||
+                        !row.llmCalled ||
+                        !canSavePromptToAsset(verdict, row.draft) ||
+                        restoredGuard.blocked
+                      }
                       onClick={() => void saveOne(row)}
                     >
                       保存到资产
@@ -897,6 +1151,12 @@ export function AssetImagePromptLlmPanel({ projectId, assets, onSaved }: AssetIm
                     ) : null}
                     {row.status === 'generated' && row.llmCalled && !canSavePromptToAsset(verdict, row.draft) ? (
                       <span className="text-[11px] text-red-500">提示词不可用：先按上面的原因改好再保存</span>
+                    ) : null}
+                    {/* 恢复来的草稿：生成当时就不许保存的那种（改好正文后可保存） */}
+                    {restoredGuard.blocked && canSavePromptToAsset(verdict, row.draft) ? (
+                      <span className="text-[11px] text-red-500">
+                        {`恢复的草稿在生成时就判为不可用：${restoredGuard.reason}（改好正文后即可保存）`}
+                      </span>
                     ) : null}
                     {row.latencyMs ? <span className="text-[11px] text-gray-400">{`${row.latencyMs} ms`}</span> : null}
                   </Space>

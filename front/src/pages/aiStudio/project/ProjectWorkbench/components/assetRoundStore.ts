@@ -14,9 +14,26 @@
  *
  * 为什么必须这么小心：出图是真实付费调用。若"恢复"顺手把在途项重新提交一遍，
  * 刷新一次就等于再花一次钱。所以恢复路径里**没有任何提交/轮询入口**，只有纯函数与读写。
+ *
+ * 实现位置：TTL / 上限裁剪 / 序列化容错 / `StorageLike` 都来自 `localSnapshotStore.ts`
+ * （与「提示词草稿」`workbench/assetPromptDrafts.ts` 共用同一套口径），本文件只保留
+ * 「本轮结果」自己的字段与恢复语义。
  */
 
 import type { ProductionTask, ProductionTaskStatus } from './assetProduction.ts'
+// 通用件（TTL / 上限 / 序列化容错 / 存储抽象）在两处本地草稿里共用，见 localSnapshotStore.ts
+import {
+  cleanId,
+  getBrowserStorage,
+  isFreshTimestamp,
+  parseJsonRecord,
+  safeReadItem,
+  safeRemoveItem,
+  safeWriteItem,
+  scopedStorageKey,
+  trimNewestBy,
+  type StorageLike,
+} from './localSnapshotStore.ts'
 
 export const ROUND_STORE_PREFIX = 'jellyfish.asset-production.round'
 export const ROUND_STORE_VERSION = 1
@@ -25,12 +42,15 @@ export const ROUND_STORE_MAX_TASKS = 60
 /** 快照最长保留时间（超过就作废，避免拿几天前的进度当"本轮"）。 */
 export const ROUND_STORE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
-/** 只依赖这三个方法的存储抽象（浏览器传 `localStorage`，测试传假实现）。 */
-export type StorageLike = {
-  getItem: (key: string) => string | null
-  setItem: (key: string, value: string) => void
-  removeItem: (key: string) => void
-}
+/**
+ * 存储抽象与浏览器存储都来自 `localSnapshotStore.ts`，这里**原样转出**：
+ * 既有调用方（`AssetProductionArea` / `assetRoundStore.test.ts`）从本模块引用它们，
+ * 不能让它们的导入路径失效。
+ */
+export type { StorageLike }
+export { getBrowserStorage }
+/** 「没有集」的桶名与键拼装规则共用一份（`localSnapshotStore.ts`），避免两处各写一套。 */
+export { NO_CHAPTER_SCOPE } from './localSnapshotStore.ts'
 
 export type RoundSnapshot = {
   version: number
@@ -42,22 +62,14 @@ export type RoundSnapshot = {
   tasks: ProductionTask[]
 }
 
-export const NO_CHAPTER_SCOPE = 'all-chapters'
-
-function cleanId(value: unknown): string {
-  return String(value ?? '').trim()
-}
-
 /**
- * 存储键：按 **project_id + chapter_id** 分键。
+ * 存储键：按 **project_id + chapter_id** 分键（拼接规则见 `scopedStorageKey`）。
  *
  * 为什么带上集：同一个项目里，第 2 步是**集级**的（URL 上的 `?chapter=`），
  * 不带上集就会出现「切到另一集还显示上一集的结果卡片」。
  */
 export function roundStoreKey(projectId: string, chapterId?: string | null): string {
-  const project = cleanId(projectId) || 'unknown-project'
-  const chapter = cleanId(chapterId) || NO_CHAPTER_SCOPE
-  return `${ROUND_STORE_PREFIX}.${project}.${chapter}`
+  return scopedStorageKey(ROUND_STORE_PREFIX, projectId, chapterId)
 }
 
 /** 排序用时间：优先 `updatedAt`，其次 `createdAt`（取不到按 0）。 */
@@ -72,21 +84,14 @@ function taskTime(task: Pick<ProductionTask, 'updatedAt' | 'createdAt'>): number
  * 上限裁剪：只保留**最新的 `max` 条**，并保持它们原来的先后顺序。
  *
  * 注意保留的是"最新的"而不是"前 N 条"：结果卡片是按轮次追加的，
- * 截断头部才符合"最近一轮能看到"的直觉。
+ * 截断头部才符合"最近一轮能看到"的直觉。通用实现在 `trimNewestBy`。
  */
 export function trimRoundTasks<T extends Pick<ProductionTask, 'updatedAt' | 'createdAt'>>(
   tasks: readonly T[],
   max: number = ROUND_STORE_MAX_TASKS,
 ): T[] {
-  const limit = Math.max(0, Math.floor(Number.isFinite(max) ? max : ROUND_STORE_MAX_TASKS))
-  if (tasks.length <= limit) return [...tasks]
-  if (limit === 0) return []
-  const indexed = tasks.map((task, index) => ({ task, index, time: taskTime(task) }))
-  indexed.sort((a, b) => (b.time - a.time !== 0 ? b.time - a.time : b.index - a.index))
-  return indexed
-    .slice(0, limit)
-    .sort((a, b) => a.index - b.index)
-    .map((item) => item.task)
+  const limit = Number.isFinite(max) ? max : ROUND_STORE_MAX_TASKS
+  return trimNewestBy(tasks, limit, taskTime)
 }
 
 /** 组装快照（含裁剪）。 */
@@ -128,25 +133,15 @@ export function parseRoundSnapshot(
   raw: string | null | undefined,
   expected: { projectId: string; chapterId?: string | null; now?: number; maxAgeMs?: number },
 ): RoundSnapshot | null {
-  const text = String(raw ?? '').trim()
-  if (!text) return null
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    return null
-  }
-  const snapshot = parsed as Partial<RoundSnapshot> | null
-  if (!snapshot || typeof snapshot !== 'object') return null
+  const parsed = parseJsonRecord(raw)
+  if (!parsed) return null
+  const snapshot = parsed as Partial<RoundSnapshot>
   if (Number(snapshot.version) !== ROUND_STORE_VERSION) return null
   if (cleanId(snapshot.projectId) !== cleanId(expected.projectId)) return null
   if (cleanId(snapshot.chapterId) !== cleanId(expected.chapterId)) return null
   const savedAt = Number(snapshot.savedAt)
-  if (!Number.isFinite(savedAt) || savedAt <= 0) return null
-  const now = Number.isFinite(expected.now) ? Number(expected.now) : Date.now()
-  const maxAge = Number.isFinite(expected.maxAgeMs) ? Number(expected.maxAgeMs) : ROUND_STORE_TTL_MS
-  if (savedAt > now + 60_000) return null
-  if (now - savedAt > maxAge) return null
+  const maxAge = Number.isFinite(Number(expected.maxAgeMs)) ? Number(expected.maxAgeMs) : ROUND_STORE_TTL_MS
+  if (!isFreshTimestamp(savedAt, { now: expected.now, maxAgeMs: maxAge })) return null
   const tasks = Array.isArray(snapshot.tasks) ? snapshot.tasks.filter(isTaskLike) : []
   return {
     version: ROUND_STORE_VERSION,
@@ -218,13 +213,7 @@ export function loadRoundPlan(
   key: string,
   expected: { projectId: string; chapterId?: string | null; now?: number },
 ): RoundRestorePlan {
-  if (!storage) return planRoundRestore(null)
-  let raw: string | null = null
-  try {
-    raw = storage.getItem(key)
-  } catch {
-    return planRoundRestore(null)
-  }
+  const raw = safeReadItem(storage, key)
   return planRoundRestore(parseRoundSnapshot(raw, expected))
 }
 
@@ -239,31 +228,9 @@ export function saveRoundToStorage(
     clearRoundFromStorage(storage, key)
     return false
   }
-  try {
-    storage.setItem(key, serializeRoundSnapshot(buildRoundSnapshot(args)))
-    return true
-  } catch {
-    return false
-  }
+  return safeWriteItem(storage, key, serializeRoundSnapshot(buildRoundSnapshot(args)))
 }
 
 export function clearRoundFromStorage(storage: StorageLike | null | undefined, key: string): void {
-  if (!storage) return
-  try {
-    storage.removeItem(key)
-  } catch {
-    // 清不掉也不影响使用
-  }
-}
-
-/** 浏览器存储（SSR / 隐私模式下可能取不到）。 */
-export function getBrowserStorage(): StorageLike | null {
-  try {
-    if (typeof window === 'undefined') return null
-    const storage = window.localStorage
-    if (!storage) return null
-    return storage
-  } catch {
-    return null
-  }
+  safeRemoveItem(storage, key)
 }

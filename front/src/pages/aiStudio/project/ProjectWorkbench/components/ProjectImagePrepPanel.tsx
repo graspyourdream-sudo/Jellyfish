@@ -371,7 +371,15 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
           gate={gate}
           onReload={onReload}
           onOpenAssetEditor={openAssetEditor}
-          promptPanel={<AssetImagePromptLlmPanel projectId={projectId} assets={assets} onSaved={onReload} />}
+          promptPanel={
+            <AssetImagePromptLlmPanel
+              projectId={projectId}
+              // 当前集：本机草稿按「项目 + 集」分键，换集不会串到上一集的草稿上
+              chapterId={detail.focusChapterId}
+              assets={assets}
+              onSaved={onReload}
+            />
+          }
         />
       </Spin>
 
