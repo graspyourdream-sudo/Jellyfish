@@ -80,6 +80,24 @@ MIN_SPECIFIC_CHARS = 2
 NEAR_DUPLICATE_RATIO = 0.9
 NEAR_DUPLICATE_MIN_CHARS = 16
 
+# ---------------------------------------------------------------------------
+# 「已保存提示词」的质量结论（三档，页面/批量出图**共用一份**判定）
+# ---------------------------------------------------------------------------
+
+#: 可用：这段已保存的提示词能直接出图。
+VERDICT_OK = "ok"
+#: 不可用但不是"旧数据要重判"：还没有保存过提示词（或本章还没有分析资料）。
+VERDICT_BLOCKED = "blocked"
+#: 旧数据里保存下来的、按现在的门禁**不允许出图**的内容（空话 / 只有名字+通用词 / 跨资产重复）。
+VERDICT_NEEDS_REGENERATION = "needs_regeneration"
+
+#: 质量结论的中文说明（用户看得懂，不含状态码、不含模型名）。
+VERDICT_LABELS: dict[str, str] = {
+    VERDICT_OK: "提示词可用",
+    VERDICT_BLOCKED: "还不能出图",
+    VERDICT_NEEDS_REGENERATION: "需要重新生成提示词",
+}
+
 
 #: 通用摄影/画质/构图词：这些词对**任何**资产都成立，因此不构成"该资产的特征"。
 GENERIC_PROMPT_WORDS: tuple[str, ...] = (
@@ -340,6 +358,139 @@ def check_cross_asset_duplicates(
     return issues
 
 
+# ---------------------------------------------------------------------------
+# 「旧数据里的已保存提示词」质量重判（只标记，不删改、不调模型）
+# ---------------------------------------------------------------------------
+
+
+#: 命中这些码的**已保存**提示词一律标「需要重新生成」并从批量出图里排除。
+NEEDS_REGENERATION_CODES: frozenset[str] = frozenset(
+    {
+        CODE_EMPTY_PROMPT,
+        CODE_VAGUE_FILLER,
+        CODE_NAME_ONLY_GENERIC,
+        CODE_DUPLICATE_TEXT,
+        CODE_NEAR_DUPLICATE_TEXT,
+    }
+)
+
+
+def saved_prompt_texts(prompts: Any) -> dict[str, str]:
+    """``{槽位: 非空文本}``：只有键、值为空的槽位不算「已保存」。"""
+    if not isinstance(prompts, Mapping):
+        return {}
+    return {
+        str(slot): str(text).strip()
+        for slot, text in prompts.items()
+        if str(text or "").strip()
+    }
+
+
+def user_reason_for_issue(issue: PromptQualityIssue, *, other_name: str = "") -> str:
+    """把一条质量问题翻译成**用户看得懂的中文原因**（不含状态码、不含模型名、不含路径）。
+
+    ``other_name`` 只在跨资产重复时有意义：从"被看的那一方"的角度说"与谁重复"。
+    """
+    if issue.code == CODE_VAGUE_FILLER:
+        return (
+            f"这条提示词是旧规则下保存的：含「{issue.matched or '外观信息不足'}」这类空话，"
+            "没有任何可出图的信息。"
+        )
+    if issue.code == CODE_NAME_ONLY_GENERIC:
+        return "只有资产名 + 通用摄影词（景别/机位/背景/画质），没有该资产自己的特征。"
+    if issue.code == CODE_EMPTY_PROMPT:
+        return "这一格提示词是空的，不能当作「提示词已就绪」。"
+    if issue.code == CODE_DUPLICATE_TEXT:
+        return f"与「{other_name or issue.asset_name}」的提示词逐字相同，模型没有按资产特征区分。"
+    if issue.code == CODE_NEAR_DUPLICATE_TEXT:
+        return f"与「{other_name or issue.asset_name}」的提示词高度重复，两个不同资产共用了一段内容。"
+    return issue.message
+
+
+def audit_saved_prompts(entries: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """对**已经保存**的提示词逐资产做一次质量重判（**只判定，不写库、不调用模型**）。
+
+    为什么要有它：新门禁上线**之前**保存的提示词里，有大量"外观信息不足，需人工补充"、
+    "只有资产名 + 通用摄影词"、以及"两个不同人物共用同一段话"的内容。它们留在
+    ``image_prompts`` 里，页面就会继续显示"可以生成图片"、批量出图也会照单全收。
+    用户明确要求：这些必须标成「需要重新生成」并**排除出批量**，但不许自动删改。
+
+    判定**完全复用**本模块既有的 :func:`check_prompt_map`（空 / 空话 / 只有名字+通用词）
+    与 :func:`check_cross_asset_duplicates`（跨资产逐字相同 / 高度重复），不另写一套。
+
+    ``entries`` 每项形如
+    ``{"asset_key": "character:char-1", "asset_name": "苏晚棠", "asset_type": "character",
+      "prompts": {"character_image_front": "…"}}``。
+
+    返回 ``{asset_key: {"verdict", "reasons", "needs_regeneration", "codes", "issues",
+    "saved_slots", "reason"}}``：
+
+    - ``verdict``：``ok``（可用）/ ``needs_regeneration``（旧数据要重生成）/ ``blocked``（还没有提示词）；
+    - ``reasons``：中文原因列表（页面直接展示）；
+    - ``needs_regeneration``：**批量出图必须据此排除**。
+    """
+    audits: dict[str, dict[str, Any]] = {}
+    names: dict[str, str] = {}
+    flat: list[tuple[str, str, str]] = []
+
+    for index, entry in enumerate(entries):
+        asset_key = str(entry.get("asset_key") or f"asset-{index}")
+        asset_name = str(entry.get("asset_name") or "")
+        asset_type = str(entry.get("asset_type") or "")
+        saved = saved_prompt_texts(entry.get("prompts"))
+        names[asset_key] = asset_name or asset_key
+        audit: dict[str, Any] = {
+            "asset_key": asset_key,
+            "asset_name": asset_name,
+            "asset_type": asset_type,
+            "verdict": VERDICT_OK,
+            "reasons": [],
+            "codes": [],
+            "issues": [],
+            "saved_slots": sorted(saved),
+            "saved_total": len(saved),
+            "needs_regeneration": False,
+            "reason": "",
+        }
+        if not saved:
+            audit["verdict"] = VERDICT_BLOCKED
+            audit["reasons"].append("还没有保存这项资产的图片提示词，不能直接出图。")
+            audits[asset_key] = audit
+            continue
+        for slot, text in saved.items():
+            flat.append((asset_key, f"{asset_name or asset_key}（{slot}）", text))
+        for issue in check_prompt_map(
+            saved, asset_key=asset_key, asset_name=asset_name, asset_type=asset_type
+        ):
+            audit["issues"].append(issue.to_read())
+            audit["codes"].append(issue.code)
+            audit["reasons"].append(user_reason_for_issue(issue))
+        audits[asset_key] = audit
+
+    # 跨资产：两个**不同**资产拿到逐字相同 / 高度重复的内容 → 双方都要重新生成
+    for issue in check_cross_asset_duplicates(flat):
+        other_key = str((issue.detail or {}).get("other_asset_key") or "")
+        for viewer_key in (issue.asset_key, other_key):
+            audit = audits.get(viewer_key)
+            if audit is None or issue.code in audit["codes"]:
+                continue
+            other_name = (
+                str((issue.detail or {}).get("other_asset_name") or "")
+                if viewer_key == issue.asset_key
+                else issue.asset_name
+            )
+            audit["issues"].append(issue.to_read())
+            audit["codes"].append(issue.code)
+            audit["reasons"].append(user_reason_for_issue(issue, other_name=other_name))
+
+    for audit in audits.values():
+        audit["needs_regeneration"] = bool(set(audit["codes"]) & NEEDS_REGENERATION_CODES)
+        if audit["needs_regeneration"]:
+            audit["verdict"] = VERDICT_NEEDS_REGENERATION
+        audit["reason"] = "；".join(audit["reasons"])
+    return audits
+
+
 def raise_for_quality(issues: Sequence[PromptQualityIssue]) -> None:
     """有质量问题就抛结构化 HTTP 错误（409 = 跨资产冲突，422 = 内容不合法）。"""
     if not issues:
@@ -488,7 +639,13 @@ __all__ = [
     "IMAGE_PROMPT_CONFIRM_FIELD",
     "MIN_SPECIFIC_CHARS",
     "NEAR_DUPLICATE_RATIO",
+    "NEEDS_REGENERATION_CODES",
     "PromptQualityIssue",
+    "VERDICT_BLOCKED",
+    "VERDICT_LABELS",
+    "VERDICT_NEEDS_REGENERATION",
+    "VERDICT_OK",
+    "audit_saved_prompts",
     "check_cross_asset_duplicates",
     "check_prompt_map",
     "check_single_prompt",
@@ -498,6 +655,8 @@ __all__ = [
     "image_prompt_replace_conflicts",
     "normalize_for_compare",
     "raise_for_quality",
+    "saved_prompt_texts",
     "strip_generic_words",
+    "user_reason_for_issue",
     "validate_asset_image_prompts",
 ]

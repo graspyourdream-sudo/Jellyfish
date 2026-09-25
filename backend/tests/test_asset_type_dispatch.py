@@ -68,6 +68,11 @@ PREVIEW_URL = "/api/v1/studio/image-pipeline/plan/preview"
 
 PROJECT_ID = "proj-1"
 
+#: 已保存的提示词（**必须带资产特征**：只有资产名 + 通用摄影词的内容会被
+#: 「旧提示词质量关卡」排除出批量出图，见 ``test_asset_workbench`` 的同名用例）
+CHARACTER_SAVED_PROMPT = "林晓：齐耳短发，深色职业套装，白衬衫黑西裤，正面展示"
+SCENE_SAVED_PROMPT = "破庙内：塌陷屋顶透下月光，青砖地面散落碎瓦，歪斜供桌，冷蓝色调"
+
 #: (asset_type, asset_id, 名称, 提示词槽位, 结果类型标签, 结果中文标签)
 DISPATCH_CASES = [
     ("character", "char-1", "林晓", "character_image_front", "characterReference", "人物参考图"),
@@ -379,7 +384,7 @@ async def test_submit_plan_character_ratio_is_not_the_project_video_ratio() -> N
     db, engine = await build_session()
     async with db:
         await _seed_project(db, default_video_ratio="9:16")
-        await _seed_asset(db, asset_type="character", asset_id="char-1", name="林晓", saved_prompt="林晓正面")
+        await _seed_asset(db, asset_type="character", asset_id="char-1", name="林晓", saved_prompt=CHARACTER_SAVED_PROMPT)
         targets, _warnings = await build_targets(
             db, project_id=PROJECT_ID, asset_type="character", stage="character_sheet"
         )
@@ -398,8 +403,8 @@ async def test_batch_reference_mode_refuses_non_character_but_keeps_character() 
     db, engine = await build_session()
     async with db:
         await _seed_project(db)
-        await _seed_asset(db, asset_type="character", asset_id="char-1", name="林晓", saved_prompt="林晓正面")
-        await _seed_asset(db, asset_type="scene", asset_id="scene-1", name="破庙夜景", saved_prompt="破庙夜景")
+        await _seed_asset(db, asset_type="character", asset_id="char-1", name="林晓", saved_prompt=CHARACTER_SAVED_PROMPT)
+        await _seed_asset(db, asset_type="scene", asset_id="scene-1", name="破庙夜景", saved_prompt=SCENE_SAVED_PROMPT)
 
         char_targets, char_warnings = await build_targets(
             db, project_id=PROJECT_ID, asset_type="character", stage="reference_batch"
@@ -517,7 +522,7 @@ async def test_regenerate_character_ratio_ignores_requested_other_value(
     bodies: list[dict] = []
     async with db:
         await _seed_project(db)
-        await _seed_asset(db, asset_type="character", asset_id="char-1", name="林晓", saved_prompt="林晓正面")
+        await _seed_asset(db, asset_type="character", asset_id="char-1", name="林晓", saved_prompt=CHARACTER_SAVED_PROMPT)
         await _seed_llm(db)
         data = await regenerate_with_existing_reference(
             db,
@@ -552,7 +557,7 @@ async def test_regenerate_non_character_keeps_its_own_ratio(
     bodies: list[dict] = []
     async with db:
         await _seed_project(db)
-        await _seed_asset(db, asset_type="scene", asset_id="scene-1", name="破庙夜景", saved_prompt="破庙夜景")
+        await _seed_asset(db, asset_type="scene", asset_id="scene-1", name="破庙夜景", saved_prompt=SCENE_SAVED_PROMPT)
         await _seed_llm(db)
         data = await regenerate_with_existing_reference(
             db,
@@ -607,8 +612,8 @@ def _seed_route(factory: async_sessionmaker[AsyncSession]) -> None:
     async def run() -> None:
         async with factory() as db:
             await _seed_project(db, default_video_ratio="9:16")
-            await _seed_asset(db, asset_type="character", asset_id="char-1", name="林晓", saved_prompt="林晓正面")
-            await _seed_asset(db, asset_type="scene", asset_id="scene-1", name="破庙夜景", saved_prompt="破庙夜景")
+            await _seed_asset(db, asset_type="character", asset_id="char-1", name="林晓", saved_prompt=CHARACTER_SAVED_PROMPT)
+            await _seed_asset(db, asset_type="scene", asset_id="scene-1", name="破庙夜景", saved_prompt=SCENE_SAVED_PROMPT)
             await db.commit()
 
     asyncio.run(run())

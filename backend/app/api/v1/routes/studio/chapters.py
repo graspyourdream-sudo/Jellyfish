@@ -27,6 +27,7 @@ from app.services.common import (
 from app.schemas.studio.projects import ChapterCreate, ChapterRead, ChapterUpdate
 from app.services.studio.chapter_asset_candidates import build_chapter_asset_candidates
 from app.services.studio.asset_overlays import load_chapter_overlays
+from app.services.studio.asset_workbench import build_chapter_asset_workbench
 from app.services.studio.chapter_asset_profile_confirm import confirm_chapter_asset_profiles
 from app.services.studio.chapter_asset_profiles import (
     build_chapter_asset_profiles,
@@ -325,6 +326,37 @@ async def get_chapter_asset_profiles(
     """
     try:
         data = await build_chapter_asset_profiles(db, chapter_id=chapter_id, allow_generate=False)
+    except HTTPException as exc:
+        return error_envelope(code=exc.status_code, detail=exc.detail)
+    return success_response(data)
+
+
+@router.get(
+    "/{chapter_id}/asset-workbench",
+    response_model=ApiResponse[dict[str, Any]],
+    summary="资产生产工作台（第2步的单一数据源：一项资产只出现一次，四个页签共用）",
+)
+async def get_chapter_asset_workbench(
+    chapter_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[dict[str, Any]]:
+    """**只读**入口：这一页要看的资产都在这份响应里，页面不再各拉一张表。
+
+    - ``analysis``：本章资产资料的状态（尚未生成 / 已生成 / 内容已变化 / 只有资料行），
+      以及"下一步该点哪个按钮"的中文提示（``hint``）；
+    - ``summary``：由 ``items`` **现算**的计数（顶部统计与列表同源，不允许两套算法）；
+    - ``items``：一项资产一行 —— 资料、剧本依据、提示词与质量、图片状态、下一步状态；
+      四个页签（人物 / 场景 / 道具 / 服装）按 ``asset_type`` 分流，同一资产只出现一次；
+    - ``pending_review``：**只收真正需要人工**的（别名指向两个不同资产、同名异类、
+      同一名称的候选关联了不同资产、候选里有服装但还没有服装资产）；
+      无冲突的候选按既有 ``auto_confirm_unconflicted`` 口径自动合并 / 自动匹配；
+    - ``technical``：候选条数、聚合组、匹配诊断等后台维度（前端默认收起）。
+
+    **本接口不调用任何模型、不出图、不写库**：内容变化时只如实回报
+    ``analysis.status="stale"``，不改写任何行（标记 stale 仍走既有读路径）。
+    """
+    try:
+        data = await build_chapter_asset_workbench(db, chapter_id=chapter_id)
     except HTTPException as exc:
         return error_envelope(code=exc.status_code, detail=exc.detail)
     return success_response(data)
