@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo } from 'react'
-import { Button, Card, Dropdown, Empty, Segmented, Select, Space, Tag, Tooltip } from 'antd'
+import React, { useCallback, useEffect, useMemo } from 'react'
+import { Alert, Button, Card, Dropdown, Empty, Segmented, Select, Space, Tag, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
 import {
   EllipsisOutlined,
@@ -22,6 +22,7 @@ import { EditTab } from './tabs/EditTab'
 import { SettingsTab } from './tabs/SettingsTab'
 import { getChapterStudioPath, getProjectEditorPath } from './routes'
 import { useProject, useChapters } from './hooks/useProjectData'
+import type { ProjectSignalAsset, ProjectSignalAssetType } from './hooks/useProjectStepSignals'
 import { getChapterPreparationState } from './chapterPreparation'
 import {
   DEFAULT_PROJECT_STEP,
@@ -37,7 +38,7 @@ import { getDisplayStep, getDisplayStepIndex } from './projectSteps'
 import { ProjectStepNav } from './components/ProjectStepNav'
 import { ProjectStepSummaryStrip } from './components/ProjectStepSummaryStrip'
 import { ProjectExtractCandidatesPanel } from './components/ProjectExtractCandidatesPanel'
-import { ProjectImagePrepPanel } from './components/ProjectImagePrepPanel'
+import { AssetWorkbench } from './components/workbench/AssetWorkbench'
 import { ProjectStudioStepPanel } from './components/ProjectStudioStepPanel'
 import { EpisodeVideoPromptBoard } from './components/EpisodeVideoPromptBoard'
 import { ProjectDevInfo } from './components/ProjectDevInfo'
@@ -47,6 +48,9 @@ const CHAPTER_PARAM = 'chapter'
 const TAB_PARAM = 'tab'
 const CREATE_PARAM = 'create'
 const EDIT_PARAM = 'edit'
+/** 第 2 步的显式面板开关：`legacy_extract` = 改版前的提取确认页（见下方注释） */
+const PANEL_PARAM = 'panel'
+const LEGACY_EXTRACT_PANEL = 'legacy_extract'
 
 /**
  * 旧 `?tab=` 深链 → 六步映射。其它页面（MainLayout / ChapterPrep / ChapterStudio /
@@ -338,58 +342,129 @@ const ProjectWorkbench: React.FC = () => {
     )
   }
 
+  /**
+   * 打开既有资产编辑页（原第 2 步面板里的同一套跳转口径，改版后由工作台卡片调用）。
+   *
+   * `generate=true` 时带上 `?generate=1`：资产编辑页会自动打开该资产的出图确认弹窗。
+   * 两条路径都带项目作用域（character 走项目角色路由，其余带 returnTo），
+   * 避免出现「从资产库进入 → 缺项目作用域 → 出图静默失败」。
+   */
+  const openAssetEditor = useCallback(
+    (asset: ProjectSignalAsset, options?: { generate?: boolean }) => {
+      if (!projectId) return
+      const assetType = asset.type
+      const generateParam = options?.generate ? '?generate=1' : ''
+      if (assetType === 'character') {
+        navigate(`/projects/${projectId}/roles/${asset.id}/edit${generateParam}`)
+        return
+      }
+      const segment = assetType === 'scene' ? 'scenes' : assetType === 'prop' ? 'props' : 'costumes'
+      const tabByType: Record<Exclude<ProjectSignalAssetType, 'character'>, 'scenes' | 'props' | 'costumes'> = {
+        scene: 'scenes',
+        prop: 'props',
+        costume: 'costumes',
+      }
+      const returnTo = encodeURIComponent(`/projects/${projectId}?step=extract_assets&tab=${tabByType[assetType]}`)
+      navigate(`/assets/${segment}/${asset.id}/edit?returnTo=${returnTo}${options?.generate ? '&generate=1' : ''}`)
+    },
+    [navigate, projectId],
+  )
+
   const renderStepContent = () => {
     if (!activeStep) return null
     if (activeStep === 'script') return <ChaptersTab />
     if (activeStep === 'extract_assets' || activeStep === 'image_prep') {
       /**
-       * 用户看到的第 2 步「资产准备」= 内部 extract_assets + image_prep **同屏连续完成**：
-       * 提取候选 → 审核 → 关联资产库已有 / 新建 → 图片提示词 → 上传或生成图片 → 设为定版。
-       * 两个内部 key 都渲染这一屏，所以旧深链（?step=image_prep）依然可用，只是不再单独占一步。
+       * 用户看到的第 2 步「资产准备」= **一个资产生产工作台**（`AssetWorkbench`）。
+       *
+       * 内部两个 step（`extract_assets` / `image_prep`）渲染的是**同一屏**，
+       * 所以旧深链（`?step=image_prep`）依然可用，只是不再单独占一步。
+       *
+       * 为什么不再是旧的两块面板上下拼接：旧结构里上游表 → 资产生产表 → 提示词表
+       * 各有一套选择与展示，同一批资产被重复选择和重复展示，主页面还摊开了大量后台维度。
+       *
+       * 旧的 `ProjectExtractCandidatesPanel` / `ProjectImagePrepPanel` 文件**保留**，
+       * 并且仍然可达：`?step=extract_assets&panel=legacy_extract` 渲染原样的一屏
+       * （入口收在「技术详情」里的一条链接，以及「待处理 N 项」抽屉没有对应资产时的兜底），
+       * 所以"写入前逐条人工确认"的能力不会因为改版而丢失。
        */
-      return (
-        <div className="h-full min-h-0 flex flex-col overflow-auto pr-1">
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <span className="text-xs text-gray-500">
-              第 2 步「资产准备」：先提取候选并确认写入，再在下面把每个资产的图片提示词、图片与定版补齐，
-              全部在同一步完成。
-            </span>
-            <Segmented
-              size="small"
-              value={assetSubTab}
-              onChange={(value) => {
-                const nextSubTab = String(value)
-                if (isAssetSubTab(nextSubTab)) setAssetSubTab(nextSubTab)
-              }}
-              options={ASSET_SUB_TABS.map((key) => ({
-                label: ASSET_SUB_TAB_LABELS[key],
-                value: key,
-              }))}
+      if (searchParams.get(PANEL_PARAM) === LEGACY_EXTRACT_PANEL) {
+        return (
+          <div className="h-full min-h-0 flex flex-col overflow-auto pr-1">
+            <Alert
+              type="info"
+              showIcon
+              className="mb-2"
+              message="这是改版前的提取确认页（入口保留，不再是第 2 步的主界面）"
+              description={
+                <span className="text-xs">
+                  第 2 步的默认界面是资产生产工作台；这一页保留用于写入前的逐条人工确认。
+                  <Button
+                    type="link"
+                    size="small"
+                    onClick={() =>
+                      updateSearchParams((next) => {
+                        next.delete(PANEL_PARAM)
+                      })
+                    }
+                  >
+                    回到资产生产工作台
+                  </Button>
+                </span>
+              }
             />
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs text-gray-500">写入前的人工确认：关联已有资产或新建。</span>
+              <Segmented
+                size="small"
+                value={assetSubTab}
+                onChange={(value) => {
+                  const nextSubTab = String(value)
+                  if (isAssetSubTab(nextSubTab)) setAssetSubTab(nextSubTab)
+                }}
+                options={ASSET_SUB_TABS.map((key) => ({
+                  label: ASSET_SUB_TAB_LABELS[key],
+                  value: key,
+                }))}
+              />
+            </div>
+            <ProjectExtractCandidatesPanel
+              projectId={projectId ?? null}
+              chapterId={focusChapter?.id ?? null}
+              chapterLabel={chapterLabel}
+              onReload={reloadSignals}
+            />
+            <div className="mt-3 min-h-0">
+              {assetSubTab === 'roles' && <RolesTab />}
+              {assetSubTab === 'scenes' && <ScenesTab />}
+              {assetSubTab === 'props' && <PropsTab />}
+              {assetSubTab === 'costumes' && <CostumesTab />}
+              {assetSubTab === 'actors' && <ActorsTab />}
+            </div>
           </div>
-          {/* ① 提取 → 审核候选 → 确认写入（关联库资产或新建） */}
-          <ProjectExtractCandidatesPanel
-            projectId={projectId ?? null}
-            chapterId={focusChapter?.id ?? null}
-            chapterLabel={chapterLabel}
-            onReload={reloadSignals}
-          />
-          {/* ② 同一步内继续：资产清单与状态 → 图片提示词 → 图片 → 定版 */}
-          <ProjectImagePrepPanel
-            assets={projectAssets}
-            detail={stepDetail}
-            loading={signalsLoading}
-            onReload={reloadSignals}
-          />
-          {/* ③ 项目资产明细（角色 / 场景 / 道具 / 服装 / 演员）：两个入口都保留 */}
-          <div className="mt-3 min-h-0">
-            {assetSubTab === 'roles' && <RolesTab />}
-            {assetSubTab === 'scenes' && <ScenesTab />}
-            {assetSubTab === 'props' && <PropsTab />}
-            {assetSubTab === 'costumes' && <CostumesTab />}
-            {assetSubTab === 'actors' && <ActorsTab />}
-          </div>
-        </div>
+        )
+      }
+      return (
+        <AssetWorkbench
+          projectId={projectId ?? null}
+          chapter={{
+            id: focusChapter?.id ?? null,
+            index: focusChapter?.index ?? null,
+            title: focusChapter?.title ?? '未选择章节',
+            rawText: focusChapter?.rawText ?? '',
+            scriptChars: (focusChapter?.rawText ?? '').replace(/\s/g, '').length,
+          }}
+          assets={projectAssets}
+          detail={stepDetail}
+          loading={signalsLoading}
+          onReload={reloadSignals}
+          onOpenAssetEditor={openAssetEditor}
+          onOpenLegacyExtractConfirm={() =>
+            updateSearchParams((next) => {
+              next.set(PANEL_PARAM, LEGACY_EXTRACT_PANEL)
+            })
+          }
+        />
       )
     }
     if (activeStep === 'video_prompt') {

@@ -21,7 +21,7 @@
  *   - 只用已验证的内联链路；出图服务不支持的资产类型（服装）在**提交前**明确拦住并说明原因。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   Alert,
@@ -112,6 +112,7 @@ import {
   type ProductionAssetType,
   type ProductionFlow,
   type ProductionTask,
+  type TaskProgressSummary,
 } from './assetProduction'
 import {
   BATCH_REFERENCE_FLOW_LABEL,
@@ -145,6 +146,7 @@ import {
 } from './assetProductionApi'
 import { AssetResultCard } from './AssetResultCard'
 import { AssetGenerationBasisPanel } from './AssetGenerationBasisPanel'
+import { AssetProfileEditEntry } from './AssetProfileEditEntry'
 import { buildRequestStructureText, type GenerationBasisExtras } from './assetGenerationBasis.ts'
 import { PromptQualityAlert, PromptQualityTag } from './PromptQualityAlert'
 import {
@@ -201,7 +203,45 @@ type AssetProductionAreaProps = {
   onOpenAssetEditor?: (asset: ProjectSignalAsset, options?: { generate?: boolean }) => void
   /** 大模型批量生成提示词面板（由外层注入，避免重复实现） */
   promptPanel?: ReactNode
+  /**
+   * 嵌进「资产工作台」时置 true。
+   *
+   * 含义：本区**自己的**选择器 / 类型页签 / 资产表 / 批量按钮行 / 顶部状态条整块不渲染 ——
+   * 那些属于工作台的**唯一主操作区**（同一项资产只在工作台卡片里出现一次，不重复展示）。
+   * 保留的是本区真正的机制：出图计划、批量提交、轮询、结果卡片、采纳 / 定版、提示词弹窗、
+   * 质量闸门与各处二次确认。
+   */
+  embedded?: boolean
+  /** 结果卡片的网格类名（默认两栏；工作台按参考项目口径传 auto-fill 260px） */
+  resultGridClassName?: string
+  /** 进度回调：工作台的 sticky 顶部条用同一份任务进度（不另建一套轮询） */
+  onProgress?: (summary: TaskProgressSummary, busy: boolean) => void
 }
+
+/**
+ * 命令式入口：工作台卡片上的勾选与「批量生成 / 批量重新生成 / 单项重新生成」
+ * 直接交给本区**已经在跑的**那套提交机制，而不是在工作台里另写一套。
+ */
+export type AssetProductionAreaHandle = {
+  /** 用**指定的**资产键跑一轮（operation = 生成 / 重新生成） */
+  runBatch: (operation: BatchOperation, assetKeys: readonly string[]) => void
+  /** 只同步选择，不提交（例如工作台点「只选未生成项」） */
+  setSelection: (assetKeys: readonly string[]) => void
+  /** 打开某个资产的提示词编辑弹窗（工作台的「修改提示词 / 重新生成提示词」） */
+  openPromptEditor: (assetKey: string) => void
+  /** 停止后续：只把「还没开始」的项标成已停止，已完成的结果与定版一个都不动 */
+  stop: () => void
+  /** 清空结果卡片（连同本地恢复内容），不动任何已落库的资产图片与定版 */
+  clearResults: () => void
+  /**
+   * 生成设置里的画面比例（工作台顶部条那个下拉）。
+   *
+   * 为什么要打通：顶部条改了比例却只改了个显示值 = 假开关。
+   * 这里把值推进本区**真正用于提交**的 `settings`。
+   */
+  setAspectRatio: (value: string) => void
+}
+
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -265,8 +305,9 @@ function toSignalAsset(asset: ProductionAsset): ProjectSignalAsset {
   }
 }
 
-export function AssetProductionArea(props: AssetProductionAreaProps) {
-  const { projectId, assets, gate, onReload, onOpenAssetEditor, promptPanel } = props
+export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetProductionAreaProps>(
+  function AssetProductionArea(props, ref) {
+  const { projectId, assets, gate, onReload, onOpenAssetEditor, promptPanel, embedded, resultGridClassName, onProgress } = props
   const navigate = useNavigate()
   const { projectId: routeProjectId } = useParams<{ projectId: string }>()
   const [searchParams] = useSearchParams()
@@ -1323,15 +1364,23 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
   /* ------------------------------------------------------- 批量生成 / 重新生成 */
 
   const startBatch = useCallback(
-    async (operation: BatchOperation) => {
+    async (operation: BatchOperation, explicitKeys?: readonly string[]) => {
       if (busyNow) {
         message.info('本轮还在进行中；要中断后续请点「停止后续」。')
         return
       }
-      const picked = scope.assets.filter((asset) => isSubmittableAssetType(asset.type))
+      /**
+       * `explicitKeys` = 由**嵌入式调用方**（资产工作台的卡片勾选）显式给出的资产键。
+       *
+       * 为什么不直接用内部 `scope`：嵌进工作台后勾选发生在工作台卡片上，
+       * 提交范围必须与用户在卡片上看到的一致。范围与确认框里的数字都换成这一份，
+       * 保证"确认框说的"和"实际提交的"是同一批。
+       */
+      const runScope = explicitKeys ? summarizeSelection(productionAssets, explicitKeys) : scope
+      const picked = runScope.assets.filter((asset) => isSubmittableAssetType(asset.type))
       const ratioStrategy = strategyForType(picked[0]?.type ?? tab)
       const confirmationInput = {
-        scope,
+        scope: runScope,
         settings,
         mode: runtimeMode,
         operation,
@@ -1419,8 +1468,32 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         onOk: () => proceed(allowedAssets),
       })
     },
-    [busyNow, preparePlans, projectVideoRatio, promptQualityGateFor, runtimeMode, scope, settings, strategyForType, submitRound, tab],
+    [busyNow, preparePlans, productionAssets, projectVideoRatio, promptQualityGateFor, runtimeMode, scope, settings, strategyForType, submitRound, tab],
   )
+
+  /* ------------------------------------------------ 嵌入式（资产工作台）入口 */
+
+  /** 把工作台的选择同步进来：只改选择，不提交、不触网。 */
+  const syncSelection = useCallback((assetKeys: readonly string[]) => {
+    setSelectedKeys(Array.from(assetKeys))
+  }, [])
+
+  /** 工作台的主按钮 / 单项重新生成：交给上面同一套提交机制。 */
+  const runBatchWithKeys = useCallback(
+    (operation: BatchOperation, assetKeys: readonly string[]) => {
+      void startBatch(operation, assetKeys)
+    },
+    [startBatch],
+  )
+
+  /**
+   * 把本轮任务进度交给外层（工作台 sticky 顶部条显示**同一份**数字）。
+   *
+   * 只上报、不复制逻辑：数字仍然是 `summarizeTaskProgress(tasks)` 的结果。
+   */
+  useEffect(() => {
+    onProgress?.(progress, busyNow)
+  }, [onProgress, progress, busyNow])
 
   const handleStop = () => {
     stopRef.current = true
@@ -1625,6 +1698,46 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [planTargetForAsset, planTargetsByType, promptDrafts, settings],
+  )
+
+  /** 工作台卡片上的「修改提示词 / 重新生成提示词」：按资产键打开本区**同一个**编辑弹窗。 */
+  const openPromptEditorByKey = useCallback(
+    (assetKey: string) => {
+      const asset = assetByKey.get(assetKey)
+      if (asset) void openPromptEditor(asset)
+    },
+    [assetByKey, openPromptEditor],
+  )
+
+  /** 停止后续 / 清空结果：与结果区那两个按钮是**同一份**逻辑，只是入口挪到了顶部条。 */
+  const stopRun = useCallback(() => {
+    stopRef.current = true
+    const next = applyStopToQueue(tasks)
+    setTasks(next)
+    message.info(describeStopEffect(summarizeTaskProgress(next)))
+  }, [tasks])
+
+  const clearResults = useCallback(() => {
+    setTasks([])
+    clearRoundFromStorage(getBrowserStorage(), roundKey)
+    setRestoredNote('')
+  }, [roundKey])
+
+  const applyAspectRatio = useCallback((value: string) => {
+    setSettings((prev) => ({ ...prev, aspectRatio: String(value || prev.aspectRatio) }))
+  }, [])
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      runBatch: runBatchWithKeys,
+      setSelection: syncSelection,
+      openPromptEditor: openPromptEditorByKey,
+      stop: stopRun,
+      clearResults,
+      setAspectRatio: applyAspectRatio,
+    }),
+    [applyAspectRatio, clearResults, openPromptEditorByKey, runBatchWithKeys, stopRun, syncSelection],
   )
 
   const generatePrompt = useCallback(
@@ -2005,6 +2118,13 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
 
   return (
     <div className="space-y-3">
+      {/*
+        顶部状态条 / 类型页签 / 选择工具条 / 资产表：**只在非嵌入模式**（旧页面）渲染。
+        嵌进资产工作台时，这些属于工作台自己的唯一主操作区与卡片区，
+        同一项资产只在工作台卡片里出现一次（用户点名的"重复展示"问题）。
+      */}
+      {!embedded ? (
+        <>
       {/* 顶部状态：用户语言（不给原始状态值） */}
       <Alert
         type={
@@ -2031,6 +2151,8 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
           ) : null
         }
       />
+        </>
+      ) : null}
 
       {/* 生成配置没就绪时，在**花钱之前**用用户语言讲清楚 */}
       {imageModelState !== 'configured' ? (
@@ -2047,7 +2169,8 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         />
       ) : null}
 
-      {/* 分页签：人物 / 场景 / 道具 / 服装 */}
+      {/* 分页签：人物 / 场景 / 道具 / 服装（嵌入模式下由工作台的页签负责） */}
+      {!embedded ? (
       <Segmented
         block
         value={tab}
@@ -2058,8 +2181,11 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
           return { label: `${ASSET_TYPE_LABEL[type]} ${done}/${typeAssets.length}`, value: type }
         })}
       />
+      ) : null}
 
       <div className="space-y-3 rounded-lg border border-slate-200 p-3">
+        {!embedded ? (
+          <>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Space size={4} wrap>
             <Button
@@ -2215,6 +2341,9 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
           </Button>
         </Space>
 
+          </>
+        ) : null}
+
         {/* 进度：数字全部来自真实任务状态 */}
         {tasks.length > 0 ? (
           <div className="space-y-1">
@@ -2289,7 +2418,8 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
               </Button>
             ) : null}
           </div>
-          <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+          {/* 结果卡片网格：嵌入时按参考项目的 auto-fill 260px 口径（一屏能看更多张） */}
+          <div className={resultGridClassName ?? 'grid grid-cols-1 gap-2 lg:grid-cols-2'}>
             {visibleCards.map((task) => (
               <AssetResultCard
                 key={task.key}
@@ -2322,6 +2452,13 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         </div>
       ) : null}
 
+      {/*
+        资产清单表 / 生成依据面板 / 大模型批量提示词面板：
+        嵌入模式下由工作台的**卡片网格 + 详情抽屉**承担（同一项资产只出现一次），
+        这里整块不渲染；弹窗（编辑提示词 / 生成依据 / 确认框）仍然照常工作。
+      */}
+      {!embedded ? (
+        <>
       {/* 资产清单（当前页签）：选择与单项操作 */}
       <Table<ProductionAsset>
         rowKey="key"
@@ -2363,6 +2500,15 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
               extras={basisExtrasFor(asset)}
               caption={`针对「${asset.name}」${basisPayloadFor(asset) ? '' : '（还没有它的生成依据）'}`}
               showTechnical={false}
+              footer={
+                /* 用户可见的「补充/修改资产资料」入口：就贴在生成依据旁边 */
+                <AssetProfileEditEntry
+                  chapterId={chapterId}
+                  asset={asset}
+                  hasImagePrompt={asset.hasImagePrompt}
+                  onSaved={onReload}
+                />
+              }
             />
           ))}
           {basisAssets.length === 0 ? <span className="text-[11px] text-gray-400">当前页签还没有资产。</span> : null}
@@ -2375,6 +2521,8 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
       </div>
 
       {promptPanel ? <div className="border-t border-slate-200 pt-3">{promptPanel}</div> : null}
+        </>
+      ) : null}
 
       {/* 编辑提示词 */}
       <Modal
@@ -2490,6 +2638,14 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
             */}
             <AssetGenerationBasisPanel
               payload={basisPayloadFor(promptEditorAsset)}
+              footer={
+                <AssetProfileEditEntry
+                  chapterId={chapterId}
+                  asset={promptEditorAsset}
+                  hasImagePrompt={promptEditorAsset.hasImagePrompt}
+                  onSaved={onReload}
+                />
+              }
               extras={{
                 ...basisExtrasFor(promptEditorAsset),
                 // ⑤ 用**弹窗里当前这条草稿**：它就是保存/出图会用的那一条
@@ -2596,7 +2752,12 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
         ) : null}
       </Modal>
 
-      {/* 出图计划（只读）：默认收起的技术详情 */}
+      {/*
+        出图计划（只读）的技术详情：**只在非嵌入模式**渲染。
+        嵌进资产工作台时，工作台自己有唯一的「技术详情」（同样默认收起），
+        两块重复的折叠区会让用户以为有两套计划。
+      */}
+      {!embedded ? (
       <Collapse
         ghost
         size="small"
@@ -2639,9 +2800,16 @@ export function AssetProductionArea(props: AssetProductionAreaProps) {
           },
         ]}
       />
+      ) : null}
     </div>
   )
 }
+
+/**
+ * 上面是本组件的渲染主体；本行收尾 `forwardRef` 的包装。
+ * 下面两个函数是本文件的**独立**小组件（确认框 / 质量闸门正文），不属于上面的组件。
+ */
+)
 
 /** 确认框正文：范围明细 + 费用提示。 */
 function ConfirmationBody(props: { lines: string[]; costWarning: string; mode: 'dry_run' | 'real' }) {
