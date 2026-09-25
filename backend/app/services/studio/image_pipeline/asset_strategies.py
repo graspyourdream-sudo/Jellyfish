@@ -1,17 +1,23 @@
-"""按 ``asset_type`` 分流的**唯一一张表**：提示词模板 / 画幅 / 结果类型标签。
+"""按 ``asset_type`` 分流的**唯一一张表**：提示词模板 / 画幅 / 结果类型标签 / 出图通道。
 
 用户口径（2026-09 拍板，最高优先级）：
 
-| 类型 | 生成结果 | 结果类型标签（机器可读 / 中文） | 画幅 |
-|---|---|---|---|
-| ``character`` | 人物参考图 / 设定图（进「人物参考图库」，用户选一张定版） | ``characterReference`` / 「人物参考图」 | **固定 16:9** |
-| ``scene`` | 场景资产图 | ``sceneAssetImage`` / 「场景资产图」 | 自己的既有口径 |
-| ``prop`` | 道具资产图 | ``propAssetImage`` / 「道具资产图」 | 自己的既有口径 |
-| ``costume`` | 服装设定图 | ``costumeDesignImage`` / 「服装设定图」 | 自己的既有口径 |
+| 类型 | 生成结果 | 结果类型标签（机器可读 / 中文） | 画幅 | 出图通道 |
+|---|---|---|---|---|
+| ``character`` | 人物参考图 / 设定图（进「人物参考图库」，用户选一张定版） | ``characterReference`` / 「人物参考图」 | **固定 16:9** | 上游出图服务 |
+| ``scene`` | 场景资产图 | ``sceneAssetImage`` / 「场景资产图」 | 自己的既有口径 | 上游出图服务 |
+| ``prop`` | 道具资产图 | ``propAssetImage`` / 「道具资产图」 | 自己的既有口径 | 上游出图服务 |
+| ``costume`` | 服装设定图 | ``costumeDesignImage`` / 「服装设定图」 | 自己的既有口径 | **Jellyfish APIMart 图片通道** |
+
+**通道为什么必须分流**（不是可选项）：上游出图服务（人物及场景生产项目）的契约只接受
+``character`` / ``scene`` / ``prop``（见 :data:`external_image_client.SERVICE_ASSET_TYPES`），
+把服装当人物或场景发给它会被它拒绝 —— 那正是「套用人物参考图或场景模板」。
+所以服装走 Jellyfish **自己**的 APIMart 图片通道（与「使用已有参考图重新生成」同一条通道、
+同一套 provider 解析与守卫），并且**如实回报**本次用的是哪条通道。
 
 硬约束（都在这一个模块里落地，不要在别处再写第二份分流）：
 
-1. **这是唯一的分流表**：``/studio/image-pipeline/submit``（含 stage / 画幅解析）与
+1. **这是唯一的分流表**：``/studio/image-pipeline/submit``（含 stage / 画幅解析 / **通道**）与
    ``/studio/image-pipeline/reference-regenerate`` 都从这里取策略，不许各写一套；
 2. **人物参考图固定 16:9**：:data:`CHARACTER_REFERENCE_RATIO` 是**写死**的常量 ——
    它是「人物参考图（设定图）」的**图片口径**，**不是项目最终视频画幅**
@@ -62,6 +68,34 @@ RATIO_SOURCE_CHARACTER_FIXED = "character_reference_fixed"
 RATIO_SOURCE_REQUEST = "request"
 RATIO_SOURCE_DEFAULT = "default"
 
+# ---------------------------------------------------------------------------
+# 出图通道（机器可读 + 中文说明）
+# ---------------------------------------------------------------------------
+#
+# 通道只有两条，取值只有这三个（``mixed`` 只用在"一次请求同时用了两条通道"的汇总上）：
+#   vendor_service  上游出图服务（人物及场景生产项目，POST /api/service/asset-image-tasks）
+#   apimart         Jellyfish 自己的 APIMart 图片通道（POST {base_url}/images/generations）
+#   mixed           本次请求**逐项**用了上面两条（不是第三条通道）
+CHANNEL_VENDOR_SERVICE = "vendor_service"
+CHANNEL_APIMART = "apimart"
+CHANNEL_MIXED = "mixed"
+
+#: 通道的中文名（进响应，页面直接展示「本次用的是哪条通道」）
+CHANNEL_LABELS: dict[str, str] = {
+    CHANNEL_VENDOR_SERVICE: "上游出图服务",
+    CHANNEL_APIMART: "Jellyfish APIMart 图片通道",
+    CHANNEL_MIXED: "混合（逐项分流）",
+}
+
+#: 真实存在、会产生费用的出图通道（``mixed`` 不在其中：它是汇总口径，不是通道）
+REAL_CHANNELS: tuple[str, ...] = (CHANNEL_VENDOR_SERVICE, CHANNEL_APIMART)
+
+
+def channel_label(channel: str) -> str:
+    """通道的中文名（认不出来原样返回，不编造）。"""
+    key = str(channel or "").strip()
+    return CHANNEL_LABELS.get(key, key)
+
 
 @dataclass(frozen=True, slots=True)
 class AssetImageStrategy:
@@ -85,6 +119,19 @@ class AssetImageStrategy:
     generation_type: str = ""
     #: 画幅说明（人物专用文案；其它类型为空）
     ratio_note: str = ""
+    #: 出图通道（:data:`CHANNEL_VENDOR_SERVICE` / :data:`CHANNEL_APIMART`）—— 必填口径，
+    #: 调用方按它决定"这一项发给谁"，不许自己按类型再写一套 if。
+    channel: str = CHANNEL_VENDOR_SERVICE
+
+    @property
+    def channel_label(self) -> str:
+        """本次用的通道中文名（进响应/日志）。"""
+        return channel_label(self.channel)
+
+    @property
+    def uses_vendor_service(self) -> bool:
+        """是否走上游出图服务（服装走 False）。"""
+        return self.channel == CHANNEL_VENDOR_SERVICE
 
     @property
     def aspect_ratio(self) -> str:
@@ -105,6 +152,8 @@ class AssetImageStrategy:
             "aspect_ratio_note": self.ratio_note,
             "batch_reference_allowed": self.batch_reference_allowed,
             "generation_type": self.generation_type,
+            "channel": self.channel,
+            "channel_label": self.channel_label,
         }
 
 
@@ -157,6 +206,10 @@ STRATEGIES: dict[str, AssetImageStrategy] = {
         result_label="服装设定图",
         # 服装不在上游服务端点契约内 → 没有 generation_type（本表不编一个出来）
         generation_type="",
+        # 通道分流：服装走 Jellyfish 自己的 APIMart 图片通道（上游服务契约里没有 costume）。
+        # 这一条**不是**"降级"，而是唯一正确的通道；把服装发给上游会被对端拒绝，
+        # 按人物/场景模板处理更是错上加错。
+        channel=CHANNEL_APIMART,
     ),
 }
 
@@ -192,6 +245,46 @@ def strategy_for(asset_type: str) -> AssetImageStrategy:
 def supports_batch_reference(asset_type: str) -> bool:
     """该类型是否允许「按定版参考图批量出图」（**只有人物**）。"""
     return strategy_for(asset_type).batch_reference_allowed
+
+
+def channel_for(asset_type: str) -> str:
+    """该资产类型该走哪条出图通道（**唯一**口径；不认识的类型明确报错）。"""
+    return strategy_for(asset_type).channel
+
+
+def describe_channel_for(asset_type: str) -> str:
+    """该类型本次会走哪条通道的**中文人话说明**（进响应，不静默分流）。
+
+    服装这一条必须说清"为什么不是上游服务"：上游契约只接受 character/scene/prop，
+    把服装按人物/场景发过去正是要避免的"套模板"。
+    """
+    strategy = strategy_for(asset_type)
+    if strategy.channel == CHANNEL_APIMART:
+        return (
+            f"{strategy.result_label}（{strategy.asset_type}）走 {strategy.channel_label}："
+            "上游出图服务（人物及场景生产项目）的契约只接受 character/scene/prop，"
+            "服装不在其内，所以本次**不发给上游服务**，也**不会**按人物参考图或场景模板处理；"
+            "用的是 Jellyfish 自己的 APIMart 图片通道（参考图重生成同一条通道），只按服装提示词直出。"
+        )
+    return (
+        f"{strategy.result_label}（{strategy.asset_type}）走 {strategy.channel_label}"
+        f"（POST /api/service/asset-image-tasks），用该类型自己的模板 "
+        f"{strategy.prompt_template}。"
+    )
+
+
+def describe_mixed_channels(asset_types: list[str]) -> str:
+    """一次请求里同时出现多条通道时的中文说明（逐项分流，不是"一条通道全包"）。"""
+    used: list[str] = []
+    for asset_type in asset_types:
+        channel = channel_for(asset_type)
+        if channel not in used:
+            used.append(channel)
+    labels = "、".join(channel_label(item) for item in used)
+    return (
+        f"本次请求同时用到 {len(used)} 条出图通道（{labels}）：**逐项按 asset_type** 选通道与模板，"
+        "上游服务只接收 character/scene/prop，服装只走 APIMart 图片通道。"
+    )
 
 
 def is_character_only_kind(kind: str) -> bool:
@@ -249,6 +342,10 @@ def describe_batch_reference_refusal(asset_type: str) -> str:
 
 
 __all__ = [
+    "CHANNEL_APIMART",
+    "CHANNEL_LABELS",
+    "CHANNEL_MIXED",
+    "CHANNEL_VENDOR_SERVICE",
     "CHARACTER_ONLY_KINDS",
     "CHARACTER_REFERENCE_RATIO",
     "CHARACTER_REFERENCE_RATIO_NOTE",
@@ -261,12 +358,17 @@ __all__ = [
     "RATIO_SOURCE_CHARACTER_FIXED",
     "RATIO_SOURCE_DEFAULT",
     "RATIO_SOURCE_REQUEST",
+    "REAL_CHANNELS",
     "SLOT_BY_ASSET_TYPE",
     "STRATEGIES",
     "SUPPORTED_ASSET_TYPES",
     "AssetImageStrategy",
     "AspectRatioResolution",
+    "channel_for",
+    "channel_label",
     "describe_batch_reference_refusal",
+    "describe_channel_for",
+    "describe_mixed_channels",
     "is_character_only_kind",
     "resolve_aspect_ratio",
     "strategy_for",

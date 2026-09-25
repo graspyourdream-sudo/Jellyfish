@@ -60,6 +60,8 @@ from app.services.studio.llm_orchestration.registry import (
     SLOT_NEGATIVE_EXTRA,
     SLOT_STYLE_RULES,
     ImagePromptSlotSpec,
+    base_style_words,
+    slot_design_brief,
 )
 from app.services.studio.llm_orchestration.support import (
     build_run_meta,
@@ -199,7 +201,8 @@ def build_slot_layers(
         layers["camera_language"] = "中景平视，柔和主光"
         warnings.append(f"槽位 {spec.category.value} 缺少镜头语言，已用默认描述兜底。")
     if not layers["style"]:
-        layers["style"] = DEFAULT_STYLE_WORDS
+        # 没有风格词兜底时按**该槽位对应的资产类型**取基础风格词（服装不是人物口径）
+        layers["style"] = base_style_words(spec.entity_type or "")
     if not layers["quality"]:
         layers["quality"] = DEFAULT_QUALITY_WORDS
 
@@ -303,6 +306,7 @@ def postprocess_slots(
                     slot_category=str(category.value),
                     global_negative=global_negative,
                 ),
+                design_brief=slot_design_brief(str(category.value)),
                 savable=savable,
                 quality_issues=quality_issues,
                 structured_source=structured_source,
@@ -317,10 +321,21 @@ def build_prompt_layer_reference() -> str:
 
 
 def build_slot_list_text(categories: list[PromptCategory]) -> str:
+    """渲染「需要生成的槽位」段落。
+
+    有**专属设计口径**的槽位（目前是服装的正/侧两个槽位）会把口径一并写进去：
+    服装提示词必须落到款式 / 颜色 / 材质 / 配饰 / 穿着人物 / 身份时代 / 使用场合上，
+    **不是**人物参考图或场景模板那一套。口径文字只有一个来源
+    （``registry.slot_design_brief`` → ``asset_profiles`` 的字段表）。
+    """
     lines = []
     for category in categories:
         spec = IMAGE_PROMPT_SLOT_BY_CATEGORY[str(category.value)]
-        lines.append(f"- {category.value}（{spec.label}）：{spec.view_hint}")
+        brief = slot_design_brief(str(category.value))
+        line = f"- {category.value}（{spec.label}）：{spec.view_hint}"
+        if brief:
+            line += f"；{brief}"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -348,7 +363,10 @@ def build_dry_run_slots(
             "action_pose": f"{PLACEHOLDER_PREFIX} 动作姿态待模型生成",
             "environment": f"{PLACEHOLDER_PREFIX} 场景环境待模型生成",
             "camera_language": f"{PLACEHOLDER_PREFIX} {spec.view_hint}",
-            "style": ", ".join([DEFAULT_STYLE_WORDS, *SLOT_STYLE_RULES.get(str(category.value), ())]),
+            # 基础风格词按槽位对应的资产类型取（服装不是人物短剧画面口径）
+            "style": ", ".join(
+                [base_style_words(spec.entity_type or ""), *SLOT_STYLE_RULES.get(str(category.value), ())]
+            ),
             "quality": DEFAULT_QUALITY_WORDS,
         }
         prompt = assemble_image_prompt(layers)
@@ -364,6 +382,7 @@ def build_dry_run_slots(
                     slot_category=str(category.value),
                     global_negative=global_negative,
                 ),
+                design_brief=slot_design_brief(str(category.value)),
                 savable=savable,
                 quality_issues=quality_issues,
                 structured_source=structured_source,

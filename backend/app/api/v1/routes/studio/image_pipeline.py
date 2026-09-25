@@ -57,6 +57,15 @@ from app.services.studio.image_pipeline.image_pipeline import (
     summarize_results,
     summary_outcome,
 )
+from app.services.studio.image_pipeline.channel_submit import (
+    asset_type_label,
+    build_channel_groups,
+    channel_counts,
+    describe_channels,
+    request_items,
+    strategy_read,
+    submit_channel_groups,
+)
 from app.services.studio.image_pipeline.adopt import adopt_generated_image
 from app.services.studio.image_pipeline.prompt_package import build_prompt_package
 from app.services.studio.image_pipeline.reference_regenerate import (
@@ -121,7 +130,12 @@ async def preflight_guard(candidates: Any, *, hint: str = "") -> Any:
     summary="出图服务对接状态（DRY_RUN 下不探测）",
 )
 async def get_image_pipeline_status() -> ApiResponse[ImageServiceStatusRead]:
-    """返回出图服务基址、守卫状态与契约能力；DRY_RUN 下**不发起健康探测**。"""
+    """返回出图服务基址、守卫状态与契约能力；DRY_RUN 下**不发起健康探测**。
+
+    新增 ``channels``：资产类型 → 出图通道。人物/场景/道具走上游出图服务；
+    **服装走 Jellyfish 自己的 APIMart 图片通道**（上游契约里没有 costume），
+    页面据此说明「服装为什么不在上游服务里」，不需要自己硬编码。
+    """
     probe: dict[str, Any] | None = None
     skipped = ""
     if dry_run.dry_run_enabled():
@@ -136,6 +150,10 @@ async def get_image_pipeline_status() -> ApiResponse[ImageServiceStatusRead]:
         except dry_run.DryRunBlocked as exc:  # pragma: no cover - 上面已分支
             skipped = str(exc)
 
+    channels = {
+        asset_type: strategy.channel
+        for asset_type, strategy in image_pipeline_strategies.STRATEGIES.items()
+    }
     return success_response(
         ImageServiceStatusRead(
             base_url=image_client.service_base_url(),
@@ -143,6 +161,11 @@ async def get_image_pipeline_status() -> ApiResponse[ImageServiceStatusRead]:
             guard=dry_run.state(),
             service_asset_types=list(image_client.SERVICE_ASSET_TYPES),
             generation_types=dict(image_client.DEFAULT_GENERATION_TYPE),
+            channels=channels,
+            channel_notes=[
+                image_pipeline_strategies.describe_channel_for(asset_type)
+                for asset_type in image_pipeline_strategies.SUPPORTED_ASSET_TYPES
+            ],
             probe=probe,
             probe_skipped_reason=skipped,
         )
@@ -161,57 +184,77 @@ async def preview_image_plan(
     body: ImagePlanPreviewRequest,
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    """组装提交给出图服务的计划：幂等键、参考图来源、OSS 对象键模板，全部只读。
+    """组装提交计划：幂等键、参考图来源、OSS 对象键模板、**通道**，全部只读。
 
     默认主流程是**按提示词直接生成参考图**（不给参考图也能出图）；
-    ``reference_batch`` 只是额外把该资产已定版的那张图随请求带上去。
+    ``reference_batch`` 只是额外把该资产已定版的那张图随请求带上去（**只对人物开放**）。
+
+    **按 asset_type 分通道**（逐项分流，不静默）：人物/场景/道具 → 上游出图服务；
+    服装（costume）→ Jellyfish 自己的 APIMart 图片通道（上游契约里没有 costume）。
+    本接口传 ``items`` 就是混合批量：一次预览四类资产的通道与模板。
     """
     try:
-        targets, warnings = await build_targets(
+        groups, warnings = await build_channel_groups(
             db,
             project_id=body.project_id,
-            asset_type=body.asset_type,
+            items=request_items(body),
             stage=body.stage,
-            asset_ids=body.asset_ids,
-            prompt_overrides={item.asset_id: item.prompt for item in body.prompt_overrides},
-            use_primary_reference=body.use_primary_reference,
             aspect_ratio=body.aspect_ratio,
             image_model=body.image_model,
             negative_prompt=body.negative_prompt,
+            use_primary_reference=body.use_primary_reference,
             # 页面「生成依据」面板要按本章装配（没给章节就不装配，行为与之前一致）
             chapter_id=str(getattr(body, "chapter_id", "") or ""),
+            # 上游通道的组装实现就是本模块的 build_targets（行为不变）；
+            # 显式传进来，既有的"替换路由模块上的 build_targets"式单测接缝继续有效。
+            vendor_builder=build_targets,
         )
         references: dict[str, ReferenceImageRead] = {}
         if body.stage == "reference_batch" and body.use_primary_reference:
-            asset_ids = [target.source_asset_id for target in targets]
-            resolved = await resolve_references(db, asset_type=body.asset_type, asset_ids=asset_ids)
-            references = {
-                asset_id: ReferenceImageRead(
-                    asset_id=item.asset_id,
-                    asset_type=item.asset_type,
-                    file_id=item.file_id,
-                    url=item.url,
-                    view_angle=item.view_angle,
-                    quality_level=item.quality_level,
-                    is_primary=item.is_primary,
-                    resolved_from=item.resolved_from,
-                    warnings=list(item.warnings),
+            # 参考图只对人物开放：非人物类型即使有定版图也不带（既有口径，明确回报）
+            for group in groups:
+                if not image_pipeline_strategies.supports_batch_reference(group.asset_type):
+                    continue
+                resolved = await resolve_references(
+                    db,
+                    asset_type=group.asset_type,
+                    asset_ids=[target.source_asset_id for target in group.targets],
                 )
-                for asset_id, item in resolved.items()
-            }
+                references.update(
+                    {
+                        asset_id: ReferenceImageRead(
+                            asset_id=item.asset_id,
+                            asset_type=item.asset_type,
+                            file_id=item.file_id,
+                            url=item.url,
+                            view_angle=item.view_angle,
+                            quality_level=item.quality_level,
+                            is_primary=item.is_primary,
+                            resolved_from=item.resolved_from,
+                            warnings=list(item.warnings),
+                        )
+                        for asset_id, item in resolved.items()
+                    }
+                )
     except ValueError as exc:
         return _error_envelope(code=400, detail=str(exc))
     except HTTPException as exc:
         return _error_envelope(code=exc.status_code, detail=exc.detail)
 
+    targets = [target for group in groups for target in group.targets]
     plan_warnings = list(warnings)
     for reference in references.values():
         plan_warnings.extend(reference.warnings)
 
+    channel, channel_label, channel_notes = describe_channels(groups)
     data = ImagePlanPreviewRead(
         project_id=body.project_id,
-        asset_type=body.asset_type,
+        asset_type=asset_type_label(groups),
         stage=body.stage,
+        channel=channel,
+        channel_label=channel_label,
+        channel_notes=channel_notes,
+        groups=[group.to_read() for group in groups],
         targets=[target.to_read() for target in targets],
         references=list(references.values()),
         warnings=plan_warnings,
@@ -219,13 +262,11 @@ async def preview_image_plan(
             "target_count": len(targets),
             "with_reference": len([target for target in targets if target.reference_image]),
             "without_reference": len([target for target in targets if not target.reference_image]),
+            # 逐项分流的整数计数（混批时一眼看出"哪条通道各几项"）
+            "by_channel": channel_counts(targets),
         },
         # 按 asset_type 分流的出图口径（只增字段）：本次会生成什么类型、用什么画幅、模板名
-        strategy=(
-            image_pipeline_strategies.strategy_for(body.asset_type).to_read()
-            if body.asset_type in image_pipeline_strategies.STRATEGIES
-            else {}
-        ),
+        strategy=strategy_read(groups),
         dry_run=dry_run.dry_run_enabled(),
     )
     return success_response(data)
@@ -242,27 +283,39 @@ async def submit_image_plan(
 ) -> Any:
     """受守卫的出图提交。默认 DRY_RUN：返回占位 task_id 与不可达占位地址。
 
+    **按 asset_type 逐项分流通道**（不静默）：人物/场景/道具 → 上游出图服务；
+    服装（costume）→ Jellyfish 自己的 APIMart 图片通道（上游契约里没有 costume，
+    把服装当人物/场景发过去正是「套模板」）。每条结果都带 ``channel`` 如实回报，
+    汇总里另有 ``by_channel`` 整数计数。
+
+    一次提交里同时含多类资产（``items``）时为**混合批量**：逐项按类型选通道与模板，
+    任一项失败只影响它自己那一条结果，不会污染其它项的结论。
+
     提交前会逐张探活每一条参考图 URL（``preflight_guard``）：不可达就**一个请求都不提交**，
     返回结构化中文错误（哪张图 / 哪个资产 / 实际状态码 / 怎么修），且不产生任何付费调用。
     """
     try:
-        targets, warnings = await build_targets(
+        groups, warnings = await build_channel_groups(
             db,
             project_id=body.project_id,
-            asset_type=body.asset_type,
+            items=request_items(body),
             stage=body.stage,
-            asset_ids=body.asset_ids,
-            prompt_overrides={item.asset_id: item.prompt for item in body.prompt_overrides},
-            use_primary_reference=body.use_primary_reference,
             aspect_ratio=body.aspect_ratio,
             image_model=body.image_model,
             negative_prompt=body.negative_prompt,
             attempt=body.attempt,
+            use_primary_reference=body.use_primary_reference,
+            vendor_builder=build_targets,
         )
-        results = await submit_targets(
-            targets,
+        results = await submit_channel_groups(
+            db,
+            groups,
             wait_seconds=body.wait_seconds,
             preflight=preflight_guard,
+            vendor_submitter=submit_targets,
+            # 混合批量（items）：逐项兜底，任一项失败不污染其它项；
+            # 旧的单类型形态保持既有行为（异常照旧抛给路由映射成 400/409/502）。
+            isolate_errors=bool(getattr(body, "items", None)),
         )
     except ValueError as exc:
         return _error_envelope(code=400, detail=str(exc))
@@ -274,20 +327,28 @@ async def submit_image_plan(
         return _error_envelope(code=exc.status_code, detail=exc.detail)
     except dry_run.DryRunBlocked as exc:
         return _guard_blocked_envelope(exc)
+    except dry_run.RealCallNotConfirmed as exc:
+        return _guard_blocked_envelope(exc)
     except image_client.ImageServiceError as exc:
         return _error_envelope(
             code=502,
             detail={"code": "image_service_failed", "message": str(exc), "provider_status_code": exc.status_code},
         )
 
+    targets = [target for group in groups for target in group.targets]
     if not targets:
         warnings.append("没有可提交的目标，未发起任何请求。")
+    channel, channel_label, channel_notes = describe_channels(groups)
     summary = summarize_results(results)
     return success_response(
         ImageSubmitRead(
             project_id=body.project_id,
-            asset_type=body.asset_type,
+            asset_type=asset_type_label(groups),
             stage=body.stage,
+            channel=channel,
+            channel_label=channel_label,
+            channel_notes=channel_notes,
+            groups=[group.to_read() for group in groups],
             results=results,
             summary=summary,
             outcome=str(summary.get("outcome") or summary_outcome(results)),

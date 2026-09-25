@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.studio import Character, Costume, Prop, Scene
 from app.models.types import PromptCategory
+from app.services.studio.asset_prompt_quality import audit_saved_prompts
 from app.services.studio.llm_orchestration.json_utils import normalize_name
 from app.schemas.studio.image_pipeline import (
     ImageTaskResultRead,
@@ -44,7 +45,7 @@ from app.services.studio.llm_orchestration.context import build_profile_cards
 from app.services.studio.llm_orchestration.image_prompt import assemble_image_prompt
 from app.services.studio.llm_orchestration.registry import (
     DEFAULT_QUALITY_WORDS,
-    DEFAULT_STYLE_WORDS,
+    base_style_words,
     IMAGE_PROMPT_SLOT_BY_CATEGORY,
     SLOT_STYLE_RULES,
     ImagePromptSlotSpec,
@@ -121,6 +122,9 @@ class SubmissionTarget:
     #: 本次生成依据（只读）：项目风格 / 结构化资料 / 剧本片段与出场分镜 / 资料来自哪里。
     #: 页面「生成依据」面板直接读它 —— 这样**还没生成**时也能看到这份资产有什么资料。
     generation_basis: dict[str, Any] = field(default_factory=dict)
+    #: 本项该走哪条出图通道（见 ``asset_strategies``）：vendor_service / apimart。
+    #: 逐项如实带出来，页面据此标注「这一项发给了谁」，也便于混批时逐条对账。
+    channel: str = strategies.CHANNEL_VENDOR_SERVICE
     warnings: list[str] = field(default_factory=list)
 
     def to_read(self) -> SubmissionTargetRead:
@@ -144,6 +148,8 @@ class SubmissionTarget:
             aspect_ratio_source=self.aspect_ratio_source,
             prompt_template=self.prompt_template,
             generation_basis=dict(self.generation_basis),
+            channel=self.channel,
+            channel_label=strategies.channel_label(self.channel),
             warnings=list(self.warnings),
         )
 
@@ -231,12 +237,114 @@ def build_deterministic_prompt(*, name: str, asset_type: str, description: str, 
         "action_pose": view_hint or (slot_spec.view_hint if slot_spec else "自然展示"),
         "environment": "干净背景",
         "camera_language": "中景平视，柔和主光",
+        # 基础风格词按资产类型取：服装设定图不是人物短剧画面口径（不套人物模板）
         "style": ", ".join(
-            [DEFAULT_STYLE_WORDS, *(SLOT_STYLE_RULES.get(str(slot_category.value), ()) if slot_category else ())]
+            [
+                base_style_words(asset_type),
+                *(SLOT_STYLE_RULES.get(str(slot_category.value), ()) if slot_category else ()),
+            ]
         ),
         "quality": DEFAULT_QUALITY_WORDS,
     }
     return assemble_image_prompt(layers)
+
+
+def resolve_asset_prompt(
+    *,
+    row: Any,
+    asset_type: str,
+    slot_category: PromptCategory | None,
+    override: str = "",
+) -> tuple[str, str]:
+    """解析**一个资产**本次要用的生图提示词，返回 ``(prompt, prompt_source)``。
+
+    优先级（两条出图通道共用这一份实现，不许各写一套）：
+
+    1. ``override``（调用方用 P1 生成的提示词）→ ``request``；
+    2. 该资产**已保存**的槽位提示词（``image_prompts``，断点①）→ ``saved``；
+    3. 确定性模板（画像卡 + 槽位视角）→ ``template``。
+
+    为什么提出来：服装走的是 Jellyfish 自己的 APIMart 通道，但"用哪段提示词"必须与
+    人物/场景/道具**逐字同一套规则**，否则同一次批量里两类的提示词口径会悄悄跑偏。
+    """
+    if str(override or "").strip():
+        # 原样使用（不 trim）：与改动前逐字一致，幂等键哈希也不受影响
+        return str(override), PROMPT_SOURCE_REQUEST
+    saved = saved_image_prompt(row, slot_category)
+    if saved:
+        return saved, PROMPT_SOURCE_SAVED
+    spec = (
+        IMAGE_PROMPT_SLOT_BY_CATEGORY.get(str(slot_category.value)) if slot_category else None
+    )
+    # 注册表里没有该类型的槽位规格时才用分流表里的动作姿态兜底，而不是所有类型共用一句
+    # 「自然展示」——那样等于没有按类型分流模板。
+    view_hint = (spec.view_hint if spec else "") or ""
+    if not view_hint:
+        fallback = strategies.STRATEGIES.get(asset_type) or strategies.STRATEGIES["character"]
+        view_hint = fallback.default_view_hint
+    return (
+        build_deterministic_prompt(
+            name=str(getattr(row, "name", "") or getattr(row, "id", "")),
+            asset_type=asset_type,
+            description=str(getattr(row, "description", "") or ""),
+            view_hint=view_hint,
+        ),
+        PROMPT_SOURCE_TEMPLATE,
+    )
+
+
+def exclude_unusable_saved_prompts(
+    targets: list[SubmissionTarget],
+) -> tuple[list[SubmissionTarget], list[str]]:
+    """批量出图的**旧提示词质量关卡**：命中"需要重新生成"的资产直接排除，并如实回报。
+
+    为什么必须有这一关：``image_prompts`` 里存着新门禁上线**之前**保存的内容
+    （"外观信息不足，需人工补充"这类空话、只有资产名 + 通用摄影词、两个不同人物
+    拿到同一段话）。这些内容按现在的门禁根本不允许出图，但只要它们还在库里，
+    plan/submit 就会照单全收，花了真钱生成一堆废图。
+
+    口径（复用 ``asset_prompt_quality.audit_saved_prompts``，**不另写一套判定**）：
+
+    - 只判 ``prompt_source == saved`` 的目标：调用方显式传的提示词（request）是本次
+      刚产出的，模板兜底（template）不是"已保存的旧数据"，两者都不在这里判；
+    - 命中的目标**被排除出本批**（不进 targets、也就不会被提交），中文原因写进 warnings；
+    - **绝不删改**用户保存过的提示词：本函数只读，重新生成的入口在页面上由用户点。
+    """
+    judged = [target for target in targets if target.prompt_source == PROMPT_SOURCE_SAVED]
+    if not judged:
+        return targets, []
+    audits = audit_saved_prompts(
+        [
+            {
+                "asset_key": f"{target.asset_type}:{target.source_asset_id}",
+                "asset_name": target.name,
+                "asset_type": target.asset_type,
+                # 目标里的提示词就是"该资产这一格的已保存内容"（``resolve_asset_prompt``
+                # 只在解析出 saved 时才把它标成 saved），所以这里按槽位还原即可。
+                "prompts": {str(SLOT_BY_ASSET_TYPE.get(target.asset_type).value): target.prompt},
+            }
+            for target in judged
+        ]
+    )
+    excluded: list[tuple[SubmissionTarget, dict[str, Any]]] = []
+    for target in judged:
+        audit = audits.get(f"{target.asset_type}:{target.source_asset_id}") or {}
+        if audit.get("needs_regeneration"):
+            excluded.append((target, audit))
+    if not excluded:
+        return targets, []
+
+    excluded_ids = {id(target) for target, _audit in excluded}
+    kept = [target for target in targets if id(target) not in excluded_ids]
+    warnings = [
+        f"本批因提示词质量不合格排除 {len(excluded)} 项：这些提示词是旧规则下保存的，"
+        "需要重新生成后才能出图（原来的内容没有被改动）。"
+    ]
+    warnings.extend(
+        f"已排除「{target.name}」：{'；'.join(str(reason) for reason in (audit.get('reasons') or []))}"
+        for target, audit in excluded
+    )
+    return kept, warnings
 
 
 async def _load_asset_rows(
@@ -315,6 +423,9 @@ async def build_targets(
         raise ValueError(
             f"出图服务 V0 只支持 asset_type ∈ {list(client.SERVICE_ASSET_TYPES)}；"
             f"当前 {asset_type or '空'} 不在其契约内，无法提交。"
+            "（本函数组装的是**上游出图服务**通道的目标；服装（costume）走 Jellyfish 自己的 "
+            "APIMart 图片通道 —— 见 costume_channel.build_costume_targets，"
+            "出图入口会按 asset_type 自动分流，**不会**把服装当人物/场景/道具发给上游。）"
         )
 
     # 按类型分流：模板 / 画幅 / 结果类型标签（唯一一份实现在 asset_strategies）
@@ -368,26 +479,15 @@ async def build_targets(
         description = str(getattr(row, "description", "") or "")
         slot_category = strategy.prompt_slot
         slot_spec = IMAGE_PROMPT_SLOT_BY_CATEGORY.get(str(slot_category.value))
-        # 注册表里没有该类型的槽位规格时（目前只有道具）用分流表里的动作姿态兜底，
-        # 而不是所有类型共用一个「自然展示」——那样等于没有按类型分流模板。
-        view_hint = slot_spec.view_hint if slot_spec else strategy.default_view_hint
         override = overrides.get(row.id) or ""
-        saved = saved_image_prompt(row, slot_category)
-        if override:
-            prompt, prompt_source = override, PROMPT_SOURCE_REQUEST
-        elif saved:
-            # 断点①：上一环确认保存的提示词直接作为生图输入，不被模板覆盖
-            prompt, prompt_source = saved, PROMPT_SOURCE_SAVED
-        else:
-            prompt, prompt_source = (
-                build_deterministic_prompt(
-                    name=str(row.name or row.id),
-                    asset_type=asset_type,
-                    description=description,
-                    view_hint=view_hint,
-                ),
-                PROMPT_SOURCE_TEMPLATE,
-            )
+        # 断点①：上一环确认保存的提示词直接作为生图输入，不被模板覆盖。
+        # 解析规则与 APIMart 通道（服装）共用同一份实现，见 resolve_asset_prompt。
+        prompt, prompt_source = resolve_asset_prompt(
+            row=row,
+            asset_type=asset_type,
+            slot_category=slot_category,
+            override=override,
+        )
         target_warnings: list[str] = []
         reference = references.get(row.id)
         reference_url = ""
@@ -423,6 +523,7 @@ async def build_targets(
                 result_label=strategy.result_label,
                 aspect_ratio_source=ratio_resolution.source,
                 prompt_template=strategy.prompt_template,
+                channel=strategy.channel,
                 # 只在给了章节时装配依据（没给就不猜章节：**旧调用方行为一个字不变**）
                 generation_basis=(
                     build_generation_basis(
@@ -440,7 +541,9 @@ async def build_targets(
                 warnings=target_warnings,
             )
         )
-    return targets, warnings
+    # 关卡：旧数据里保存的、按现在门禁不能出图的提示词 → 排除出本批（如实回报原因）
+    guarded, gate_warnings = exclude_unusable_saved_prompts(targets)
+    return guarded, [*warnings, *gate_warnings]
 
 
 async def _load_generation_basis_context(
@@ -594,6 +697,8 @@ def _dry_run_result(target: SubmissionTarget) -> ImageTaskResultRead:
         result_label=target.result_label,
         aspect_ratio=target.aspect_ratio,
         aspect_ratio_source=target.aspect_ratio_source,
+        channel=target.channel,
+        channel_label=strategies.channel_label(target.channel),
         detail={
             "error_message": "",
             "http_status": None,
@@ -603,6 +708,9 @@ def _dry_run_result(target: SubmissionTarget) -> ImageTaskResultRead:
             "aspect_ratio": target.aspect_ratio,
             "aspect_ratio_source": target.aspect_ratio_source,
             "prompt_template": target.prompt_template,
+            "channel": target.channel,
+            "channel_label": strategies.channel_label(target.channel),
+            "channel_note": strategies.describe_channel_for(target.asset_type),
         },
     )
 
@@ -722,6 +830,8 @@ def _result_from_submission(
         result_label=target.result_label,
         aspect_ratio=target.aspect_ratio,
         aspect_ratio_source=target.aspect_ratio_source,
+        channel=target.channel,
+        channel_label=strategies.channel_label(target.channel),
         detail={
             "error_message": upstream_error,
             "http_status": _http_status_from_text(upstream_error) if upstream_error else None,
@@ -735,6 +845,8 @@ def _result_from_submission(
             "aspect_ratio": target.aspect_ratio,
             "aspect_ratio_source": target.aspect_ratio_source,
             "prompt_template": target.prompt_template,
+            "channel": target.channel,
+            "channel_label": strategies.channel_label(target.channel),
         },
     )
 
@@ -770,9 +882,13 @@ def summarize_results(results: list[ImageTaskResultRead]) -> dict[str, Any]:
     """
     by_status: dict[str, int] = {}
     by_outcome: dict[str, int] = {}
+    by_channel: dict[str, int] = {}
     outcomes: list[str] = []
     for item in results:
         by_status[item.status] = by_status.get(item.status, 0) + 1
+        channel = str(getattr(item, "channel", "") or "")
+        if channel:
+            by_channel[channel] = by_channel.get(channel, 0) + 1
         outcome = str(item.outcome or "") or normalize_outcome(
             status=item.status,
             ok=item.ok,
@@ -810,6 +926,9 @@ def summarize_results(results: list[ImageTaskResultRead]) -> dict[str, Any]:
         # —— 新字段：整数计数 + 归一化口径
         "outcome": summary_outcome(results),
         "by_outcome": by_outcome,
+        # 本次用了哪几条出图通道、各几条（**整数计数**；混批时逐项分流的落地证据）。
+        # 绝不出现 0/0：没有结果时是 {}（空映射），而不是除零或 None。
+        "by_channel": by_channel,
         "ok_count": ok_count,
         "failed_count": real_failed,
         "partial_failed_count": partial_count,
@@ -1042,6 +1161,7 @@ __all__ = [
     "build_source_task_id",
     "build_targets",
     "classify_status_token",
+    "exclude_unusable_saved_prompts",
     "normalize_outcome",
     "poll_task",
     "reference_candidates",

@@ -252,6 +252,21 @@ DEFAULT_QUALITY_WORDS = (
 
 DEFAULT_STYLE_WORDS = "realistic live-action short drama style, real human actor"
 
+#: 具体资产的**基础风格词**（没有专属条目时用 :data:`DEFAULT_STYLE_WORDS`）。
+#:
+#: 目前只有服装一条：服装设定图要的是"**这一套衣服本身**"（平铺 / 立架展示），
+#: 而 ``DEFAULT_STYLE_WORDS`` 里的 ``real human actor`` 是人物短剧画面的口径 ——
+#: 两者混用就是"套用人物模板"。人物 / 场景 / 道具沿用既有基础风格词，行为不变。
+STYLE_WORDS_BY_ASSET_TYPE: dict[str, str] = {
+    "costume": "realistic costume reference photography, garment design sheet",
+}
+
+
+def base_style_words(asset_type: str) -> str:
+    """该资产类型的基础风格词（没有专属条目就用全局默认）。"""
+    key = str(asset_type or "").strip().lower()
+    return STYLE_WORDS_BY_ASSET_TYPE.get(key, DEFAULT_STYLE_WORDS)
+
 DEFAULT_NEGATIVE_PROMPT = (
     "3D, CGI, cartoon, anime, illustration, game character, doll-like face, plastic skin, "
     "low quality, blurry, distorted hands, extra fingers, deformed body, bad anatomy, "
@@ -282,7 +297,44 @@ SLOT_NEGATIVE_EXTRA: dict[str, tuple[str, ...]] = {
     # 道具槽位专属负面词：道具图要的是「干净背景上的单件物品」，反面是人物/场景串味
     "prop_image_front": ("human figure", "hands holding object", "cluttered background", "multiple objects"),
     "prop_image_other": ("human figure", "cluttered background", "multiple objects"),
+    # 服装槽位专属负面词（此前这两个槽位**一条都没有** → 服装提示词拿不到任何服装专属排除项）：
+    # 服装设定图要的是「一套衣服本身」（平铺/立架），反面是人物肖像与场景串味。
+    # 注意：这些词里**刻意不含**任何人物参考图 / 场景模板的特征串
+    # （如 "full body character reference sheet" / "wide establishing shot"），
+    # 否则服装提示词里就会混进别的类型的口径。
+    "costume_image_front": ("real person portrait", "face close-up", "cluttered background", "multiple outfits"),
+    "costume_image_other": ("real person portrait", "face close-up", "cluttered background"),
 }
+
+
+#: 槽位 → 它的**设计口径**该按哪类资产的结构化字段来写。
+#:
+#: 为什么只有服装两张表：人物 / 场景 / 道具的图片提示词口径已经在各自槽位里写足了
+#: （``SLOT_STYLE_RULES`` + 画像卡里逐字段的结构化资料），本表**只补服装**这一条此前缺失的
+#: 环节——服装的正式提示词必须落到「款式 / 颜色 / 材质 / 配饰 / 穿着人物 / 身份时代 / 使用场合」
+#: 上，而不是人物参考图或场景模板的口径。口径文字由 ``asset_profiles`` 的字段表生成
+#: （唯一事实来源），所以字段表改了这里自动跟着改，不会两处跑偏。
+SLOT_DESIGN_BRIEF_ASSET_TYPES: dict[str, str] = {
+    "costume_image_front": "costume",
+    "costume_image_other": "costume",
+}
+
+
+def slot_design_brief(category: str) -> str:
+    """该槽位提示词必须写出的**设计口径**；没有专属口径时返回空串。
+
+    返回示例（服装）：``服装设计口径（必须逐项写出）：穿着人物、身份时代、款式、颜色、材质、配饰、使用场合``
+    """
+    asset_type = SLOT_DESIGN_BRIEF_ASSET_TYPES.get(str(category or "").strip())
+    if not asset_type:
+        return ""
+    from app.services.studio.asset_profiles import field_specs, type_label  # 延迟导入，避免导入环
+
+    labels = [spec.label for spec in field_specs(asset_type) if spec.visual]
+    if not labels:
+        return ""
+    return f"{type_label(asset_type)}设计口径（必须逐项写出）：" + "、".join(labels)
+
 
 
 # --------------------------------------------------------------------------

@@ -189,6 +189,15 @@ class ImagePromptSlotRead(BaseModel):
     layers: dict[str, str] = Field(default_factory=dict, description="分层结构：主体/动作/环境/镜头/风格/画质")
     prompt: str = Field("", description="拼接后的完整提示词")
     negative_prompt: str = Field("", description="该槽位的负面提示词")
+    design_brief: str = Field(
+        "",
+        description=(
+            "该槽位的**设计口径**（只读，新）：这一段提示词必须写出的具体维度。"
+            "服装槽位为「服装设计口径（必须逐项写出）：穿着人物、身份时代、款式、颜色、材质、配饰、使用场合」"
+            "（由 asset_profiles 的结构化字段表生成，模型与页面读同一份）；"
+            "人物 / 场景 / 道具的既有口径已在各自槽位规则里，本字段为空"
+        ),
+    )
     warnings: list[str] = Field(default_factory=list)
     #: 这段内容能不能被保存成"提示词已就绪"。后端质量拦截的**同一份判定**，
     #: 前端只负责展示与禁用按钮，不自己重写一套规则。

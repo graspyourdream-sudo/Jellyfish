@@ -1,4 +1,9 @@
-"""P3 路由层：挂载、统一信封、DRY_RUN 不触网、契约校验（costume 不在出图服务契约内）。"""
+"""P3 路由层：挂载、统一信封、DRY_RUN 不触网、按 asset_type 的通道分流。
+
+服装（costume）**不在上游出图服务的契约内**（它只接受 character/scene/prop），
+所以 `/plan/preview` 与 `/submit` 会把它分流到 **Jellyfish 自己的 APIMart 图片通道**
+并在响应里如实回报 ``channel="apimart"`` —— 不再像以前那样直接 400 拒绝。
+"""
 
 from __future__ import annotations
 
@@ -54,27 +59,32 @@ def test_status_route_never_probes_under_dry_run(client: TestClient) -> None:
     assert data["generation_types"]["character"] == "character_sheet"
 
 
-def test_plan_preview_rejects_costume_out_of_contract(client: TestClient) -> None:
+def test_plan_preview_routes_costume_to_apimart_channel(client: TestClient) -> None:
+    """服装不在上游契约内 → 分流到 APIMart 通道，并**如实回报**（不再 400 拒绝）。"""
     response = client.post(
         PLAN_URL,
         json={"project_id": "proj-1", "asset_type": "costume", "stage": "character_sheet"},
     )
 
-    assert response.status_code == 400
-    body = response.json()
-    assert body["code"] == 400
-    assert body["data"] is None
-    assert "只支持 asset_type" in body["meta"]["error"]["message"]
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["channel"] == "apimart"
+    assert data["strategy"]["result_kind"] == "costumeDesignImage"
+    assert data["strategy"]["result_label"] == "服装设定图"
+    assert any("APIMart" in note for note in data["channel_notes"])
 
 
-def test_submit_returns_structured_error_for_out_of_contract_asset(client: TestClient) -> None:
+def test_submit_accepts_costume_with_apimart_channel(client: TestClient) -> None:
+    """服装可以提交（走 APIMart 通道）；DRY_RUN 下返回占位结果，不触网。"""
     response = client.post(
         SUBMIT_URL,
         json={"project_id": "proj-1", "asset_type": "costume", "stage": "reference_batch"},
     )
 
-    assert response.status_code == 400
-    assert isinstance(response.json()["meta"]["error"], dict)
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["channel"] == "apimart"
+    assert data["outcome"] in {"dry_run", "empty"}
 
 
 def test_task_query_under_dry_run_does_not_reach_service(client: TestClient) -> None:
@@ -145,8 +155,9 @@ def test_dry_run_image_routes_never_touch_network(
 
     assert client.get(STATUS_URL).status_code == 200
     assert client.get(f"{BASE}/task/svc-1").status_code == 200
-    assert client.post(PLAN_URL, json={"project_id": "p", "asset_type": "costume"}).status_code == 400
-    assert client.post(SUBMIT_URL, json={"project_id": "p", "asset_type": "costume"}).status_code == 400
+    # 服装走 APIMart 通道：DRY_RUN 下同样是占位结果，依然一个字节都不出网
+    assert client.post(PLAN_URL, json={"project_id": "p", "asset_type": "costume"}).status_code == 200
+    assert client.post(SUBMIT_URL, json={"project_id": "p", "asset_type": "costume"}).status_code == 200
     assert client.post(PACKAGE_URL, json={"project_id": "project-missing"}).status_code == 404
     assert client.post(VIDEO_PLAN_URL, json={"shot_id": "shot-missing"}).status_code == 404
 

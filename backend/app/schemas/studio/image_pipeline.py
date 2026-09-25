@@ -80,6 +80,15 @@ class SubmissionTargetRead(BaseModel):
         ),
     )
     prompt_template: str = Field("", description="本类型使用的提示词模板名（新，审计用）")
+    channel: str = Field(
+        "",
+        description=(
+            "本项使用的出图通道（新，机器可读，由 asset_type 分流决定）："
+            "vendor_service＝上游出图服务（人物/场景/道具）；"
+            "apimart＝Jellyfish 自己的 APIMart 图片通道（服装不在上游契约内，走这条）"
+        ),
+    )
+    channel_label: str = Field("", description="本项出图通道的中文名（新）：上游出图服务 / Jellyfish APIMart 图片通道")
     generation_basis: dict[str, Any] = Field(
         default_factory=dict,
         description=(
@@ -138,6 +147,14 @@ class ImageTaskResultRead(BaseModel):
     aspect_ratio_source: str = Field(
         "", description="画幅来源（新）：character_reference_fixed / request / default"
     )
+    channel: str = Field(
+        "",
+        description=(
+            "本项实际使用的出图通道（新，如实回报，不静默）："
+            "vendor_service（上游出图服务）/ apimart（Jellyfish APIMart 图片通道）"
+        ),
+    )
+    channel_label: str = Field("", description="本项出图通道的中文名（新）")
     message: str = Field("", description="可展示的一句话说明（失败时优先装真实原因）")
     error_message: str = Field("", description="失败/部分失败的真实原因（新，优先取上游 error_message）")
     http_status: int | None = Field(None, description="上游报错时的 HTTP 状态码（新；取不到为空）")
@@ -158,6 +175,17 @@ class ImageServiceStatusRead(BaseModel):
     guard: dict[str, Any]
     service_asset_types: list[str]
     generation_types: dict[str, str]
+    channels: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "资产类型 → 出图通道（新）：character/scene/prop＝vendor_service（上游出图服务），"
+            "costume＝apimart（Jellyfish 自己的 APIMart 图片通道）。"
+            "页面据此说明「服装为什么不在上游服务里」"
+        ),
+    )
+    channel_notes: list[str] = Field(
+        default_factory=list, description="通道分流的中文说明（新）"
+    )
     probe: dict[str, Any] | None = Field(None, description="真实健康探测结果；DRY_RUN 下为 null")
     probe_skipped_reason: str = Field("", description="未探测的原因")
 
@@ -174,16 +202,64 @@ class PromptOverride(BaseModel):
     prompt: str
 
 
+class ImageSubmitItemRequest(BaseModel):
+    """**混合批量**的一项：一个资产类型 + 要出图的资产 ID（新）。
+
+    为什么要有它：一次提交里可以同时含 character / scene / prop / costume，
+    后端会**逐项**按 ``asset_type`` 选通道与模板（人物/场景/道具 → 上游出图服务；
+    服装 → Jellyfish APIMart 图片通道）。**不传 items 时仍是旧的单类型形态**
+    （顶层 ``asset_type`` + ``asset_ids``），既有调用方一个字都不用改。
+
+    每项只声明"生成什么类型的哪些资产"；``stage`` / 画幅 / 负面提示词 / 图片模型 /
+    attempt 等公共参数由请求顶层给出（避免同一批里出现互相矛盾的公共参数）。
+    """
+
+    asset_type: AssetTypeLiteral = Field(..., description="character / scene / prop / costume")
+    asset_ids: list[str] = Field(default_factory=list, description="为空表示项目内该类型全部资产")
+    prompt_overrides: list[PromptOverride] = Field(
+        default_factory=list, description="该项的逐资产提示词覆盖（用 P1 生成的提示词）"
+    )
+
+
+class ImageChannelPlanRead(BaseModel):
+    """一个资产类型分组的**通道与模板口径**（新，页面直接展示「这一组发给了谁」）。"""
+
+    asset_type: str
+    asset_ids: list[str] = Field(default_factory=list)
+    channel: str = Field("", description="vendor_service / apimart")
+    channel_label: str = ""
+    channel_note: str = Field("", description="中文说明：本次用的是哪条通道、为什么")
+    result_kind: str = ""
+    result_label: str = ""
+    prompt_template: str = ""
+    target_count: int = Field(0, description="本组的提交目标数（整数）")
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ImagePlanPreviewRequest(BaseModel):
     """出图提交计划预览请求（不触网）。"""
 
     project_id: str = Field(..., min_length=1)
-    asset_type: AssetTypeLiteral = Field("character", description="出图服务只支持 character/scene/prop")
+    asset_type: AssetTypeLiteral = Field(
+        "character",
+        description=(
+            "单类型形态的资产类型。**四类都支持**：人物/场景/道具走上游出图服务，"
+            "服装走 Jellyfish 自己的 APIMart 图片通道（上游契约里没有 costume）。"
+            "传了 items 时本字段被忽略。"
+        ),
+    )
+    items: list[ImageSubmitItemRequest] = Field(
+        default_factory=list,
+        description=(
+            "**混合批量**（新，可选）：一次提交里逐项声明资产类型与资产，后端逐项按 asset_type 选通道与模板。"
+            "为空时按旧的单类型形态处理（asset_type + asset_ids）"
+        ),
+    )
     stage: StageLiteral = Field(
         "character_sheet",
         description=(
             "character_sheet＝不随请求带参考图；reference_batch＝随请求带上已定版的参考图"
-            "（两者都是按提示词直接生成参考图，不需要已有图）"
+            "（两者都是按提示词直接生成参考图，不需要已有图；**参考图只对人物开放**）"
         ),
     )
     asset_ids: list[str] = Field(default_factory=list, description="为空表示项目内该类型全部资产")
@@ -227,8 +303,24 @@ class ImagePlanPreviewRead(BaseModel):
     """出图提交计划预览。"""
 
     project_id: str
-    asset_type: str
+    asset_type: str = Field(..., description="单类型形态的类型；混合批量（items）时为 mixed")
     stage: str
+    channel: str = Field(
+        "",
+        description=(
+            "本次请求按 asset_type 分流后会**涉及**的出图通道（新）：vendor_service / apimart；"
+            "一次请求同时涉及两条时为 mixed（逐项分流，不是第三条通道）。"
+            "逐条目标自己的通道在 targets[].channel，整数计数在 summary.by_channel"
+        ),
+    )
+    channel_label: str = Field("", description="本次通道的中文名（新）")
+    channel_notes: list[str] = Field(
+        default_factory=list,
+        description="通道分流的中文说明（新）：哪一类走哪条通道、为什么（服装不在上游契约内）",
+    )
+    groups: list[ImageChannelPlanRead] = Field(
+        default_factory=list, description="逐类型分组的通道/模板口径（新，混合批量时逐组一条）"
+    )
     targets: list[SubmissionTargetRead] = Field(default_factory=list)
     references: list[ReferenceImageRead] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
@@ -237,7 +329,7 @@ class ImagePlanPreviewRead(BaseModel):
         default_factory=dict,
         description=(
             "本次按 asset_type 分流的出图口径（新）：result_kind / result_label / aspect_ratio / "
-            "aspect_ratio_fixed / aspect_ratio_note / prompt_template / batch_reference_allowed"
+            "aspect_ratio_fixed / aspect_ratio_note / prompt_template / batch_reference_allowed / channel"
         ),
     )
     dry_run: bool = Field(True, description="当前守卫状态；preview 永远不触网")
@@ -251,8 +343,21 @@ class ImageSubmitRead(BaseModel):
     """出图提交结果。"""
 
     project_id: str
-    asset_type: str
+    asset_type: str = Field(..., description="单类型形态的类型；混合批量（items）时为 mixed")
     stage: str
+    channel: str = Field(
+        "",
+        description=(
+            "本次请求按 asset_type 分流后会**涉及**的出图通道（新）：vendor_service / apimart / "
+            "mixed（同时涉及两条）。**实际产出的**每条结果各自带 channel，"
+            "整数计数在 summary.by_channel —— 混批时以逐条结果为准"
+        ),
+    )
+    channel_label: str = Field("", description="本次通道的中文名（新）")
+    channel_notes: list[str] = Field(default_factory=list, description="通道分流的中文说明（新）")
+    groups: list[ImageChannelPlanRead] = Field(
+        default_factory=list, description="逐类型分组的通道/模板口径（新）"
+    )
     results: list[ImageTaskResultRead] = Field(default_factory=list)
     summary: dict[str, Any] = Field(default_factory=dict)
     outcome: str = Field(
@@ -268,7 +373,7 @@ class ImageSubmitRead(BaseModel):
     note: str = Field(
         "DRY_RUN 下为占位结果；真实模式下结果由出图服务上传 OSS，"
         "oss_url 才是长期资产地址（image_url 仅为本地/临时地址）。"
-        "summary 里的 ok_count / failed_count / oss_ready_count 是整数计数，"
+        "summary 里的 ok_count / failed_count / oss_ready_count / by_channel 是整数计数，"
         "outcome=partial_failed 表示「图片已生成但 OSS 未就绪」，不是成功。",
         description="边界说明",
     )

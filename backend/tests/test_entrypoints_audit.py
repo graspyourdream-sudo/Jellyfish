@@ -107,6 +107,39 @@ def _seed_audit_shot() -> None:
         conn.close()
 
 
+def _seed_audit_character() -> str:
+    """在当前测试库里种一个审计用角色（只写测试库）。
+
+    为什么需要：出图提交路由**只有真的有可提交资产**时才会走到付费出口守卫；
+    没有资产时它会正常返回 200（"没有可提交的资产"），根本碰不到拦截逻辑。
+    """
+    import sqlite3
+    from pathlib import Path as _Path
+
+    from app.config import settings
+
+    url = str(settings.database_url or "")
+    marker = "sqlite+aiosqlite:///"
+    if not url.startswith(marker):  # pragma: no cover - 只在非 sqlite 环境跳过
+        pytest.skip("审计用例需要 sqlite 测试库")
+    path = _Path(url[len(marker) :])
+    if not path.is_file() or ":memory:" in str(path):  # pragma: no cover
+        pytest.skip("审计用例需要一个已初始化的临时测试库（见 scripts/init_test_db.py）")
+
+    character_id = "audit-character"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO characters (id, project_id, name, description, image_prompts, style,"
+            " visual_style) VALUES (?,?,?,?,?,?,?)",
+            (character_id, "audit-project", "审计角色", "", "{}", "真人古装", "现实"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return character_id
+
+
 def _force_real_mode(monkeypatch: pytest.MonkeyPatch, *, confirm: bool) -> None:
     """打开真实模式开关；``confirm=False`` 时缺付费确认（另一条拦截原因）。"""
     monkeypatch.setenv(DRY_RUN_ENV, "0")
@@ -501,19 +534,47 @@ def test_image_and_video_outlets_are_asserted_unconditionally() -> None:
         assert "assert_outbound_allowed" in source, f"{name} 丢了付费出口断言"
 
 
-def test_submit_route_does_not_catch_unconfirmed_rejection() -> None:
-    """【缺口】``/studio/image-pipeline/submit`` 没接 ``RealCallNotConfirmed``。
+def test_submit_route_catches_unconfirmed_rejection_as_structured_409(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``/studio/image-pipeline/submit`` 必须把「真实模式未确认」转成结构化 409（**回归锁**）。
 
-    出图出口本身会正确拦住未确认模式，但路由的 except 列表里没有这个类型
-    （``image_pipeline.py:247-261``），于是异常穿透到 ``app.main`` 的兜底处理器，
-    变成 500「Internal server error」——结构化 409 与中文 ``how_to_enable`` 全丢。
+    历史：路由的 ``except`` 列表里没有 ``RealCallNotConfirmed``，未确认模式会穿透成
+    500「Internal server error」，结构化 409 与中文 ``how_to_enable`` 全丢。
+    这条用例原先就是**复现该缺口**的（断言源码里"没有"这个 except）；缺口已在
+    2026-09 修掉（路由显式接住并转 409），所以现在反过来锁住"必须接住"：
+    谁把 ``except`` 去掉，这里就会因为拿到 500 而失败。
+
+    只走**判定层**：守卫在发请求之前就抛异常，所以一个字节都不出站、零付费。
     """
     source = inspect.getsource(
         __import__("app.api.v1.routes.studio.image_pipeline", fromlist=["x"])
     )
     submit_body = source.split("async def submit_image_plan")[1].split("@router.")[0]
     assert "except dry_run.DryRunBlocked" in submit_body, "submit 至少要接住演练模式的拦截"
-    assert "RealCallNotConfirmed" not in submit_body, (
-        "缺口复现：submit 没接 RealCallNotConfirmed，未确认模式会变成 500 而不是结构化 409"
+    assert "RealCallNotConfirmed" in submit_body, (
+        "回归：submit 没接 RealCallNotConfirmed，未确认模式又会变成 500 而不是结构化 409"
     )
+
+    _seed_audit_shot()
+    character_id = _seed_audit_character()
+    _force_real_mode(monkeypatch, confirm=False)  # DRY_RUN=0 且未确认 → 必须拦
+    assert dry_run.mode() == dry_run.MODE_REAL_UNCONFIRMED
+
+    response = client.post(
+        "/api/v1/studio/image-pipeline/submit",
+        json={
+            "project_id": "audit-project",
+            "asset_type": "character",
+            "asset_ids": [character_id],
+            "stage": "character_sheet",
+        },
+    )
+    assert response.status_code == 409, f"未确认模式必须结构化 409，实际 {response.status_code}：{response.text[:200]}"
+    error = _blocked_error(response.json())
+    assert error["code"] == guard.BLOCKED_ERROR_CODE
+    assert error["reason"] == dry_run.BLOCKED_REASON_NOT_CONFIRMED
+    assert error["paid_call_made"] is False, "被拦 = 没有发起任何真实请求"
+    assert error["how_to_enable"], "必须给中文「怎么才允许真实调用」"
+    assert response.json()["data"] is None
 
