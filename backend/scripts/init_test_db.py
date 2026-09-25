@@ -15,7 +15,12 @@
 
 用法：
     python backend/scripts/init_test_db.py /tmp/jf_test/test.db
-    DATABASE_URL="sqlite+aiosqlite:////tmp/jf_test/test.db" pytest backend/tests -q
+
+注意：pytest 已经**自带隔离**（``tests/conftest.py`` 会在每次会话开始时新建一个
+全新临时库并覆盖 ``DATABASE_URL``），所以跑测试**不需要**先执行本脚本、
+也不需要手动设置 ``DATABASE_URL``：直接
+``cd backend && .venv/bin/python -m pytest tests/ -q`` 即可。
+本脚本留给「需要一份带种子的独立临时库」的特殊场景（例如手工自检）。
 
 退出码：0 成功；2 参数缺失或被安全规则拒绝。
 
