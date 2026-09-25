@@ -22,12 +22,13 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Spin, Tag, message } from 'antd'
+import { Alert, Button, Modal, Spin, Tag, message } from 'antd'
 
 import type { ProjectSignalAsset, ProjectStepSignalDetail } from '../../hooks/useProjectStepSignals'
 import { useGenerationGate } from '../../../../components/generationGate'
 import { GenerationGateBanner } from '../../../../components/GenerationGateBanner'
 import { AssetProductionArea, type AssetProductionAreaHandle } from '../AssetProductionArea'
+import { AssetImagePromptLlmPanel } from '../AssetImagePromptLlmPanel'
 import { AssetProfileEditEntry } from '../AssetProfileEditEntry'
 import { taskProgressLines, emptyTaskProgress, type TaskProgressSummary } from './taskProgress.ts'
 import { DEFAULT_ASPECT_RATIO } from '../assetProduction.ts'
@@ -102,6 +103,8 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
   const [contractFailed, setContractFailed] = useState('')
   const [reloading, setReloading] = useState(false)
   const [analysisRunning, setAnalysisRunning] = useState(false)
+  /** 「生成图片提示词」面板开关（只带选中的资产；里面那次点击才会真正调用模型） */
+  const [promptPanelOpen, setPromptPanelOpen] = useState(false)
   const [tab, setTab] = useState<WorkbenchAssetType>('character')
   const [selectedKeys, setSelectedKeys] = useState<string[]>([])
   const [scriptCollapsed, setScriptCollapsed] = useState(false)
@@ -255,6 +258,20 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
   }, [keysForRun])
 
   /** 卡片上的单项生成 / 重新生成：走同一套提交机制（并且同样会二次确认）。 */
+  /**
+   * 主按钮按状态机给的 `primaryAction` 分派：
+   * - `generate_prompts` / `rewrite_prompts` → 打开图片提示词面板（只带选中资产），
+   *   由面板自己的「生成图片提示词（N）」按钮负责计数、二次确认与失败即停（**点了才花钱**）；
+   * - `generate_images` → 走既有出图批量机制（含质量闸门与确认框）。
+   */
+  const handlePrimary = useCallback(() => {
+    if (command.primaryAction === 'generate_prompts' || command.primaryAction === 'rewrite_prompts') {
+      setPromptPanelOpen(true)
+      return
+    }
+    handleGenerate()
+  }, [command.primaryAction, handleGenerate])
+
   const handleGenerateOne = useCallback((item: AssetWorkbenchItem, operation: 'generate' | 'regenerate') => {
     productionRef.current?.runBatch(operation, [workbenchItemKey(item)])
   }, [])
@@ -344,7 +361,7 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
         command={command}
         progress={progress}
         busy={runBusy}
-        onGenerate={handleGenerate}
+        onGenerate={handlePrimary}
         onRegenerate={handleRegenerate}
         onSelectUngenerated={handleSelectUngenerated}
         onClearSelection={handleClearSelection}
@@ -428,6 +445,36 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
                     生成的图会先出现在这里：点「采纳」落到资产图片，点「设为定版」定下对外使用的那一张。
                   </span>
                 </div>
+                {/* 「生成图片提示词」：只带选中的资产；里面那次点击才会真的调用模型 */}
+                <Modal
+                  open={promptPanelOpen}
+                  title={`生成图片提示词 · 已选 ${selectedKeys.length} 项`}
+                  onCancel={() => setPromptPanelOpen(false)}
+                  footer={null}
+                  width={1040}
+                  destroyOnClose={false}
+                >
+                  <div className="space-y-2">
+                    <Alert
+                      type="info"
+                      showIcon
+                      message="每项会调用一次文本模型（按次计费，会花钱）"
+                      description="生成后请逐项检查再保存；任何一次失败都会立即停止、不自动重试。保存的位置就是生图实际读取的那份资产提示词。"
+                    />
+                    <AssetImagePromptLlmPanel
+                      projectId={projectId ?? ''}
+                      assets={toSignalAssets(data).filter((asset) =>
+                        selectedKeys.includes(`${asset.type}:${asset.id}`),
+                      )}
+                      onSaved={() => {
+                        setPromptPanelOpen(false)
+                        void loadWorkbench()
+                        onReload()
+                      }}
+                    />
+                  </div>
+                </Modal>
+
                 <AssetProductionArea
                   ref={productionRef}
                   projectId={projectId ?? ''}

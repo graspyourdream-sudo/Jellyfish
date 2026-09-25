@@ -147,11 +147,16 @@ export const ASSET_TYPE_LABEL: Record<ProductionAssetType, string> = {
 }
 
 /**
- * 出图服务当前**只接受**这三类资产（后端 `SERVICE_ASSET_TYPES`）。
- * 服装不在契约内 —— 选中服装时必须在**提交前**明确拦住并说明原因，
- * 不能静默丢弃，也不能让它进队列（本机没有 worker 的队列只会留下一条永远不执行的"排队中"）。
+ * 现在**四类都能出图**（人物 / 场景 / 道具 / 服装）：
+ *
+ * - 人物 / 场景 / 道具 → 上游出图服务（它的契约只有这三类，改不了）；
+ * - **服装 → Jellyfish 自己的 APIMart 图片通道**（服装设定图口径，不套用人物/场景模板）。
+ *
+ * 通道分流由后端按 `asset_type` 决定并如实回报（`channel` / `channel_label`），
+ * 前端只需要"四类平权"地允许提交。历史上这里只允许三类、并让服装显示
+ * 「暂不支持批量出图」—— 现在那条限制已经随服装链路补齐而移除。
  */
-export const SUBMITTABLE_ASSET_TYPES: ProductionAssetType[] = ['character', 'scene', 'prop']
+export const SUBMITTABLE_ASSET_TYPES: ProductionAssetType[] = ['character', 'scene', 'prop', 'costume']
 
 export function isSubmittableAssetType(type: ProductionAssetType): boolean {
   return SUBMITTABLE_ASSET_TYPES.includes(type)
@@ -508,7 +513,7 @@ export function buildBatchConfirmation(input: BatchConfirmationInput): Confirmat
       blockedReason:
         scope.total === 0
           ? '还没有选择要生成的资产。'
-          : '本次选中的资产里没有可以直接出图的类型：出图服务目前只支持人物、场景、道具；服装请先在资产页手工上传或生成图片。',
+          : '本次选中的资产里没有可以直接出图的类型：目前人物、场景、道具、服装都可以生成（服装走服装设定图口径）。',
       title: `无法${label}`,
       lines: [],
       costWarning: '',

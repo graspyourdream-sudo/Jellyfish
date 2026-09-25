@@ -244,7 +244,7 @@ export function WorkbenchCommandBar(props: WorkbenchCommandBarProps) {
           {!analyzed ? (
             <span>本章还没有分析：先点「分析本章资产」，生成按钮在分析完成前不可用。</span>
           ) : (
-            <span>{command.primaryDisabledReason || '选好资产后点主按钮即可批量生成'}</span>
+            <span>{command.primaryHint || command.primaryDisabledReason || '选好资产后点主按钮即可批量生成'}</span>
           )}
         </div>
       </div>

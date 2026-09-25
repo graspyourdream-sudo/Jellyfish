@@ -186,7 +186,7 @@ test('只有人物的确认框会说「参考图」；场景 / 道具的整份�
   })
 })
 
-test('服装（不在出图服务契约内）被拦住时的说明也不出现「参考图」', () => {
+test('服装可以出图（走服装设定图口径），说明里也不出现「参考图」', () => {
   const only = [asset('costume', 'k1', { hasImage: true, hasPrimary: true })]
   const confirmation = buildBatchConfirmation({
     scope: summarizeSelection(only, only.map((item) => item.key)),
@@ -194,8 +194,11 @@ test('服装（不在出图服务契约内）被拦住时的说明也不出现�
     mode: 'dry_run',
     operation: 'generate',
   })
-  assert.equal(confirmation.blocked, true)
-  assert.ok(!confirmation.blockedReason.includes('参考图'), confirmation.blockedReason)
+  // 服装已补齐生产链路：不再被拦，而是进入正常确认流程，并且口径写的是「服装设定图」
+  assert.equal(confirmation.blocked, false)
+  const text = [confirmation.title, ...confirmation.lines].join('\n')
+  assert.ok(!text.includes('参考图'), text)
+  assert.match(text, /服装/)
 })
 
 /* ------------------------------------------------------------- 分组与按钮 */

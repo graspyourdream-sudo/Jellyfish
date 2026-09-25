@@ -12,7 +12,7 @@
  *   1. 参考项目按"风格是否过期"推导 stale；Jellyfish 换成后端契约给的
  *      `prompt.quality.needs_regeneration`（旧提示词需要重新生成）；
  *   2. 参考项目只有人物 / 场景 / 道具三个页签，Jellyfish 是人物 / 场景 / 道具 / 服装四类，
- *      但服装**不在出图服务契约内**（`assetProduction.SUBMITTABLE_ASSET_TYPES`），
+ *      且**四类平权**（服装走 Jellyfish 自己的 APIMart 通道，见 assetProduction.SUBMITTABLE_ASSET_TYPES）；
  *      所以服装可以勾选、可以看资料，但不进批量生成；
  *   3. 参考项目把 `provider / 任务号 / 原始状态` 打在卡片副标题上（`labelFor`），
  *      Jellyfish 的用户口径相反：主界面只有用户语言，
@@ -32,7 +32,14 @@ export const WORKBENCH_TAB_LABEL: Record<WorkbenchAssetType, string> = {
 }
 
 /** 出图服务只接受人物 / 场景 / 道具：服装可以勾选但不进批量生成。 */
-export const WORKBENCH_SUBMITTABLE_TYPES: WorkbenchAssetType[] = ['character', 'scene', 'prop']
+/**
+ * 可出图的资产类型：**四类平权**（服装走 Jellyfish 自己的 APIMart 通道，
+ * 通道分流由后端按 `asset_type` 决定并如实回报）。
+ *
+ * 与 `assetProduction.SUBMITTABLE_ASSET_TYPES` 保持一致（那个模块负责请求组装）；
+ * 本文件是纯逻辑单测入口，刻意不引入跨模块 import，改一处记得同步另一处。
+ */
+export const WORKBENCH_SUBMITTABLE_TYPES: WorkbenchAssetType[] = ['character', 'scene', 'prop', 'costume']
 
 export function isWorkbenchSubmittable(type: WorkbenchAssetType): boolean {
   return WORKBENCH_SUBMITTABLE_TYPES.includes(type)
@@ -304,15 +311,28 @@ export type WorkbenchCommandCounts = {
   needsRegeneration: number
   /** 已选中、正在生成的项 */
   generating: number
-  /** 已选中、出图服务不支持的项（服装） */
+  /** 已选中、出图服务不支持的项（当前为空：四类都支持） */
   unsupported: number
   /** 已选中、可进批量但没有提示词的项 */
   withoutPrompt: number
+  /** 已选中、**还没有图片提示词**的项（主按钮这时先去做"生成提示词"） */
+  needsPrompt: number
 }
+
+/**
+ * 主按钮这一步到底是哪件事：
+ * - ``generate_prompts``：选中项还没有图片提示词 → 先写提示词（每项一次文本模型调用）；
+ * - ``rewrite_prompts``：提示词是旧规则下保存的/已过期 → 先重写提示词；
+ * - ``generate_images``：提示词可用 → 正常批量出图；
+ * - ``none``：暂时没有可执行项（按钮禁用并说明原因）。
+ */
+export type WorkbenchPrimaryAction = 'generate_prompts' | 'rewrite_prompts' | 'generate_images' | 'none'
 
 export type WorkbenchCommand = {
   /** 推荐操作的标题（一句话） */
   title: string
+  /** 主按钮按下去要做的事（见 WorkbenchPrimaryAction） */
+  primaryAction: WorkbenchPrimaryAction
   /** 明细行：已选 / 待生成 / 需重新生成 / 生成中 */
   detail: string
   /** 主按钮文案 */
@@ -320,6 +340,13 @@ export type WorkbenchCommand = {
   primaryDisabled: boolean
   /** 主按钮禁用时**为什么**（用户语言；可用时为空串） */
   primaryDisabledReason: string
+  /**
+   * 主按钮**可用**时的一句说明（例如"会调用 3 次文本模型（按次计费）"）。
+   *
+   * 为什么单列一个字段：`primaryDisabledReason` 按契约在可用时是空串，
+   * 但"点了会花几次钱"这件事必须在按钮旁边就看得见（用户明确要求）。
+   */
+  primaryHint: string
   /** 批量重新生成按钮文案 */
   regenerateLabel: string
   regenerateDisabled: boolean
@@ -348,6 +375,7 @@ function countSelected(
     generating: 0,
     unsupported: 0,
     withoutPrompt: 0,
+    needsPrompt: 0,
   }
   picked.forEach((item) => {
     if (needsPromptRegeneration(item)) counts.needsRegeneration += 1
@@ -359,10 +387,14 @@ function countSelected(
       counts.generating += 1
       return
     }
+    // 「待生成提示词」= 还没有可用的图片提示词（空 / 被质量拦下）：**先写提示词**才能出图。
+    // 用户口径：资料 -> 提示词 -> 生成 -> 结果 -> 定版；主按钮必须跟着"下一步真正能做的事"走。
+    const promptText = String(item.prompt?.text ?? '').trim()
+    if (!promptText) counts.needsPrompt += 1
     if (!isBatchEligible(item)) return
     if (hasImage(item)) counts.regeneratable += 1
-    else counts.generatable += 1
-    if (!String(item.prompt?.text ?? '').trim()) counts.withoutPrompt += 1
+    else if (promptText) counts.generatable += 1
+    if (!promptText) counts.withoutPrompt += 1
   })
   return counts
 }
@@ -382,8 +414,9 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
 
   const detail = [
     `已选 ${counts.selected}`,
-    `待生成 ${counts.generatable}`,
-    `需重新生成 ${counts.needsRegeneration}`,
+    `待写提示词 ${counts.needsPrompt}`,
+    `可生成图片 ${counts.generatable}`,
+    `提示词需重写 ${counts.needsRegeneration}`,
     `生成中 ${counts.generating}`,
   ].join(' · ')
 
@@ -393,8 +426,10 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
       title: '请先分析本章资产',
       detail,
       primaryLabel: '批量生成选中项',
+      primaryAction: 'none',
       primaryDisabled: true,
       primaryDisabledReason: hint,
+      primaryHint: '',
       regenerateLabel: '批量重新生成已选项',
       regenerateDisabled: true,
       counts,
@@ -403,6 +438,7 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
 
   const title = (() => {
     if (counts.selected === 0) return '选择本轮要生产的人物、场景或道具'
+    if (counts.needsPrompt > 0) return `${counts.needsPrompt} 项还没有图片提示词`
     if (counts.generatable > 0) return `本轮将处理 ${counts.generatable} 项资产`
     if (counts.generating > 0) return `${counts.generating} 项正在生成`
     if (counts.needsRegeneration > 0) return `${counts.needsRegeneration} 项提示词需要重新生成`
@@ -414,21 +450,32 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
   let primaryLabel = '批量生成选中项'
   let primaryDisabled = true
   let primaryDisabledReason = ''
+  let primaryHint = ''
+  // 主操作按"下一步真正能做的事"走：**先提示词，再图片**（资料 -> 提示词 -> 生成 -> 结果 -> 定版）
+  let primaryAction: WorkbenchPrimaryAction = 'none'
   if (busy) {
     primaryLabel = '正在提交批量任务…'
     primaryDisabledReason = '本轮还在进行中；要中断后续请点「停止后续」。'
+  } else if (counts.needsPrompt > 0) {
+    primaryAction = 'generate_prompts'
+    primaryLabel = `生成图片提示词（${counts.needsPrompt}）`
+    primaryDisabled = false
+    primaryHint = `会调用 ${counts.needsPrompt} 次文本模型（按次计费）；生成后请逐项检查再保存。`
   } else if (counts.generatable > 0) {
+    primaryAction = 'generate_images'
     primaryLabel = `批量生成选中项（${counts.generatable}）`
     primaryDisabled = false
+    primaryHint = `会为 ${counts.generatable} 项生成图片（按张计费，提交前还会再确认一次）。`
   } else if (counts.selected === 0) {
     primaryDisabledReason = '先勾选要生成的资产，或点「只选未生成项」。'
   } else if (counts.generating > 0) {
     primaryLabel = `批量生成中（${counts.generating}）`
     primaryDisabledReason = '选中的资产正在生成，等这一轮跑完再点。'
   } else if (counts.needsRegeneration > 0) {
-    primaryDisabledReason = '选中的资产里有提示词需要先重新生成提示词，暂时不能直接生成图片。'
-  } else if (counts.unsupported === counts.selected) {
-    primaryDisabledReason = '服装暂不支持批量出图：可以先保存资料与提示词，再单独处理。'
+    primaryAction = 'rewrite_prompts'
+    primaryLabel = `重写图片提示词（${counts.needsRegeneration}）`
+    primaryDisabled = false
+    primaryHint = `这些提示词是旧规则下保存的或已过期；会调用 ${counts.needsRegeneration} 次文本模型（按次计费）。`
   } else {
     primaryDisabledReason = '选中的资产都已有图片：需要再出一张请用「批量重新生成已选项」。'
   }
@@ -436,10 +483,13 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
   const regenerateDisabled = busy || counts.regeneratable === 0
   return {
     title,
+    primaryAction,
     detail,
     primaryLabel,
     primaryDisabled,
     primaryDisabledReason: primaryDisabled ? primaryDisabledReason : '',
+    // 可用时也给一句"点了会发生什么/花几次钱"（用户明确要求按钮旁就能看到）
+    primaryHint: primaryDisabled ? '' : primaryHint,
     regenerateLabel:
       counts.regeneratable > 0 ? `批量重新生成已选项（${counts.regeneratable}）` : '批量重新生成已选项',
     regenerateDisabled,

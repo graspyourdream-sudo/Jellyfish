@@ -204,9 +204,11 @@ test('已选 4 项里有 3 项待生成：主按钮带数量且可用，明细�
   assert.equal(command.counts.selected, 4)
   assert.equal(command.counts.generatable, 3)
   assert.equal(command.counts.generating, 1)
+  // 这 3 项已经有可用的图片提示词 → 主按钮就是"批量生成图片"（提示词那一步已经做完）
+  assert.equal(command.primaryAction, 'generate_images')
   assert.equal(command.primaryLabel, '批量生成选中项（3）')
   assert.equal(command.primaryDisabled, false)
-  assert.equal(command.detail, '已选 4 · 待生成 3 · 需重新生成 0 · 生成中 1')
+  assert.equal(command.detail, '已选 4 · 待写提示词 0 · 可生成图片 3 · 提示词需重写 0 · 生成中 1')
   assert.equal(command.title, '本轮将处理 3 项资产')
 })
 
@@ -225,7 +227,7 @@ test('只选中已有图片的项：主按钮禁用并说明去用「批量重�
   assert.equal(command.regenerateDisabled, false)
 })
 
-test('只选中旧提示词的项：主按钮禁用，理由说清是提示词要先重新生成（需求 8）', () => {
+test('只选中旧提示词的项：主按钮变成「重写图片提示词（N）」且**可用**（需求 8）', () => {
   const items = fixture()
   const command = deriveWorkbenchCommand({
     items,
@@ -234,9 +236,14 @@ test('只选中旧提示词的项：主按钮禁用，理由说清是提示词�
   })
   assert.equal(command.counts.needsRegeneration, 1)
   assert.equal(command.counts.generatable, 0)
-  assert.equal(command.primaryDisabled, true)
-  assert.match(command.primaryDisabledReason, /重新生成提示词/)
-  assert.match(command.detail, /需重新生成 1/)
+  // 用户口径：主按钮要给"下一步真正能做的事"，不能只把按钮灰掉让人无路可走
+  assert.equal(command.primaryAction, 'rewrite_prompts')
+  assert.equal(command.primaryDisabled, false)
+  assert.equal(command.primaryLabel, '重写图片提示词（1）')
+  // 可用时 primaryDisabledReason 按契约是空串；"会发生什么"由 primaryHint 承担
+  assert.equal(command.primaryDisabledReason, '')
+  assert.match(command.primaryHint, /重写|旧规则/)
+  assert.match(command.detail, /提示词需重写 1/)
 })
 
 test('一项都没选：不给假动作，提示先勾选或点「只选未生成项」', () => {
@@ -244,7 +251,8 @@ test('一项都没选：不给假动作，提示先勾选或点「只选未生�
   assert.equal(command.primaryDisabled, true)
   assert.match(command.primaryDisabledReason, /只选未生成项/)
   assert.equal(command.title, '选择本轮要生产的人物、场景或道具')
-  assert.equal(command.detail, '已选 0 · 待生成 0 · 需重新生成 0 · 生成中 0')
+  assert.equal(command.detail, '已选 0 · 待写提示词 0 · 可生成图片 0 · 提示词需重写 0 · 生成中 0')
+  assert.equal(command.primaryAction, 'none')
 })
 
 test('本轮正在提交：主按钮文案变成「正在提交批量任务…」且禁用（防连点）', () => {
@@ -259,15 +267,36 @@ test('本轮正在提交：主按钮文案变成「正在提交批量任务…�
   assert.equal(command.regenerateDisabled, true)
 })
 
-test('只选中服装：明确说清服装暂不支持批量出图（不静默丢弃）', () => {
+test('只选中服装：**不再**说"暂不支持"（服装已走 APIMart 通道，四类平权）', () => {
   const command = deriveWorkbenchCommand({
     items: fixture(),
     selectedKeys: ['costume:costume-1'],
     analysis: { generated: true },
   })
-  assert.equal(command.counts.unsupported, 1)
-  assert.equal(command.primaryDisabled, true)
-  assert.match(command.primaryDisabledReason, /服装/)
+  assert.equal(command.counts.unsupported, 0, '服装已经是受支持类型')
+  assert.doesNotMatch(command.primaryDisabledReason, /暂不支持/)
+  assert.doesNotMatch(command.title, /暂不支持/)
+  assert.doesNotMatch(command.primaryLabel, /暂不支持/)
+})
+
+test('选中项还没写提示词：主按钮先做「生成图片提示词（N）」（资料 → 提示词 → 图片）', () => {
+  const items = fixture().map((item) =>
+    item.asset_type === 'character' && item.name === '苏晚棠'
+      ? { ...item, prompt: { ...item.prompt, text: '' } }
+      : item,
+  )
+  const command = deriveWorkbenchCommand({
+    items,
+    selectedKeys: ['character:char-1'],
+    analysis: { generated: true },
+  })
+  assert.equal(command.counts.needsPrompt, 1)
+  assert.equal(command.primaryAction, 'generate_prompts')
+  assert.equal(command.primaryLabel, '生成图片提示词（1）')
+  assert.equal(command.primaryDisabled, false, '有可做的事就必须可点（这正是之前缺的那个按钮）')
+  assert.match(command.primaryHint, /1 次文本模型/)
+  assert.match(command.title, /还没有图片提示词/)
+  assert.match(command.detail, /待写提示词 1/)
 })
 
 test('分析入口：没分析过时是主按钮，分析过后降级为「重新分析本章资产」', () => {

@@ -163,15 +163,18 @@ test('只选未生成项：当前分页签内只选中没有图片的资产', ()
 
 /* -------------------------------------------------------- 批量范围与预计张数 */
 
-test('批量范围：按类型分别计数 + 预计张数排除出图服务不支持的服装', () => {
+test('批量范围：按类型分别计数 + 预计张数包含服装（四类平权）', () => {
   const scope = summarizeSelection(MIXED, ALL_KEYS)
   assert.equal(scope.total, 6)
   assert.deepEqual(scope.byType, { character: 2, scene: 2, prop: 1, costume: 1 })
-  assert.equal(scope.submittableCount, 5)
-  assert.equal(scope.unsupportedCount, 1)
-  assert.equal(scope.estimatedImages, 5 * IMAGES_PER_ASSET)
-  assert.equal(scope.withExistingImage, 2)
-  assert.equal(scope.withExistingPrimary, 1)
+  // 服装已补齐（APIMart 通道）→ 计入可提交数量与预计张数
+  assert.equal(scope.submittableCount, 6)
+  assert.equal(scope.unsupportedCount, 0)
+  assert.equal(scope.estimatedImages, 6 * IMAGES_PER_ASSET)
+  // 四类平权后：有图的是 人物 c2 / 场景 s2 / 服装 k1（服装那张图同样算"已有图"）
+  assert.equal(scope.withExistingImage, 3)
+  // 四类平权后：有定版的是 人物 c2 / 服装 k1 两张
+  assert.equal(scope.withExistingPrimary, 2)
   assert.equal(scope.ungenerated, 3)
 })
 
@@ -179,7 +182,8 @@ test('出图服务支持的类型与服装的拦截口径', () => {
   assert.equal(isSubmittableAssetType('character'), true)
   assert.equal(isSubmittableAssetType('scene'), true)
   assert.equal(isSubmittableAssetType('prop'), true)
-  assert.equal(isSubmittableAssetType('costume'), false)
+  // 服装已补齐（走 Jellyfish 自己的 APIMart 通道）→ 四类平权
+  assert.equal(isSubmittableAssetType('costume'), true)
 })
 
 test('选择里只有服装时在提交前被拦住并说明原因（不进任何队列）', () => {
@@ -190,10 +194,10 @@ test('选择里只有服装时在提交前被拦住并说明原因（不进任�
     mode: 'real',
     operation: 'generate',
   })
-  assert.equal(confirmation.blocked, true)
-  assert.equal(confirmation.required, false)
-  assert.match(confirmation.blockedReason, /服装/)
-  assert.match(confirmation.blockedReason, /手工上传或生成/)
+  // 服装现在可以出图：不再"提交前被拦住"，而是正常进入确认流程（走服装设定图口径）
+  assert.equal(confirmation.blocked, false)
+  assert.equal(confirmation.required, true)
+  assert.match(confirmation.lines.join('\n'), /服装/)
 })
 
 /* --------------------------------------------- 硬边界 B：二次确认触发条件 */
@@ -426,7 +430,8 @@ test('人物参考图固定 16:9 要写清「不等于项目最终视频画幅�
 test('混选按类型分组：不把混选当成同一批同类型（人物参考图 / 场景资产图 / 道具资产图）', () => {
   const groups = groupAssetsByType(MIXED.filter((asset) => isSubmittableAssetType(asset.type)))
   const labels = groups.map((group) => `${group.assetType}:${group.count}`)
-  assert.deepEqual(labels, ['character:2', 'scene:2', 'prop:1'])
+  // 四类各自成组（服装走服装设定图口径，也不会被写成「参考图」）
+  assert.deepEqual(labels, ['character:2', 'scene:2', 'prop:1', 'costume:1'])
   // 每个分组带各自的类型名与结果标签（场景/道具不会被写成「参考图」）
   groups.forEach((group) => {
     assert.ok(group.title.includes(IMAGE_ASSET_TYPE_TEXT[group.assetType]))
@@ -438,6 +443,7 @@ test('混选按类型分组：不把混选当成同一批同类型（人物参�
   assert.match(breakdown, /人物参考图 2/)
   assert.match(breakdown, /场景资产图 2/)
   assert.match(breakdown, /道具资产图 1/)
+  assert.match(breakdown, /服装设定图 1/)
 })
 
 test('把结果设为定版而该资产已有定版图 → 必须二次确认并写清替换的是什么', () => {
