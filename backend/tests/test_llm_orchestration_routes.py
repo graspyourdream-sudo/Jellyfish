@@ -136,6 +136,34 @@ def test_unknown_shot_id_returns_404_envelope(client: TestClient) -> None:
     assert body["meta"]["error"]["message"]
 
 
+def test_image_prompt_route_refuses_when_the_requested_asset_has_no_materials(client: TestClient) -> None:
+    """本次要的资产都没有可用于出图的资料 → 结构化 422（原因 + 怎么补），页面据此标在那一行。
+
+    统一信封必须把结构化明细原样放进 `meta.error`：页面"逐项隔离"就是靠读它，
+    读不到就只能当成普通失败（那会把后面的项一起停掉）。
+    """
+    response = client.post(
+        IMAGE_URL,
+        json={
+            "entity_profiles": [{"name": "苏晚棠素服", "entity_type": "costume", "profile": ""}],
+            "categories": ["costume_image_front"],
+        },
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == 422
+    assert body["data"] is None
+    error = body["meta"]["error"]
+    assert error["code"] == "asset_profile_missing"
+    # 原因点名的是**这次要的那一项**（不把没被要求的资产列进来）
+    assert "苏晚棠素服" in error["message"]
+    assert "没有可用于出图的资料" in error["message"]
+    # 怎么补必须给（用户照做就能拿到可用结果）
+    assert error["fix"]
+    assert error["assets"] == ["苏晚棠素服"]
+
+
 def test_status_route_exposes_binding_confirm_endpoints(client: TestClient) -> None:
     data = client.get(STATUS_URL).json()["data"]
 

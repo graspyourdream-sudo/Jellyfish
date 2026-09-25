@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 
 from app.models.types import PromptCategory
 from app.schemas.studio.llm_orchestration import EntityProfileInput, ImagePromptPreviewRequest
@@ -213,28 +214,48 @@ async def test_prop_preview_is_savable_when_profile_has_features() -> None:
 
 
 @pytest.mark.asyncio
-async def test_slot_without_structured_profile_is_marked_not_savable() -> None:
-    """画像卡只剩空话时，槽位必须被标成"不可保存"，并给出结构化原因（前端据此禁用按钮）。"""
-    db, engine = await build_session()
-    async with db:
-        await seed_project_chapter_shot(db)
-        result = await image_prompt_service.preview_image_prompts(
-            db,
-            body=ImagePromptPreviewRequest(
-                project_id="proj-1",
-                entity_profiles=[EntityProfileInput(name="姜岁欢", entity_type="character", profile="")],
-                categories=[PromptCategory.character_image_front],
-            ),
-            llm_caller=_stub_caller([PromptCategory.character_image_front]),
-        )
-    await engine.dispose()
+async def test_slot_without_structured_profile_is_refused_with_reason_and_fix() -> None:
+    """画像卡只剩空话时**如实拒绝这一项**（结构化原因 + 怎么补），且不发起任何调用。
 
-    slot = result.slots[0]
-    assert slot.savable is False
-    assert slot.quality_issues[0]["code"] == "vague_filler"
-    assert slot.structured_source == "none"
-    assert any("质量拦截" in warning for warning in result.warnings)
-    assert any("没有可用于出图的资料" in warning for warning in result.warnings)
+    口径（真实事故修复后）：本次请求要的**每一项**都没资料 → 这才是"整体不可用"，
+    返回结构化 422（`asset_profile_missing`）；原因只写这几项、并给"怎么补"，
+    拒绝发生在生成之前（不花钱）。请求里只要还有一项有资料，就照常逐项生成，
+    缺资料的那一项单独标在它自己的槽位上（见 `test_image_prompt_request_scope.py`）。
+    """
+    recorded: list[str] = []
+
+    async def _recording(_prompt: str) -> str:
+        recorded.append(_prompt)
+        return await _stub_caller([PromptCategory.character_image_front])(_prompt)
+
+    db, engine = await build_session()
+    try:
+        async with db:
+            await seed_project_chapter_shot(db)
+            with pytest.raises(HTTPException) as excinfo:
+                await image_prompt_service.preview_image_prompts(
+                    db,
+                    body=ImagePromptPreviewRequest(
+                        project_id="proj-1",
+                        entity_profiles=[EntityProfileInput(name="姜岁欢", entity_type="character", profile="")],
+                        categories=[PromptCategory.character_image_front],
+                    ),
+                    llm_caller=_recording,
+                )
+    finally:
+        await engine.dispose()
+
+    assert excinfo.value.status_code == 422
+    detail = excinfo.value.detail
+    assert isinstance(detail, dict)
+    assert detail["code"] == "asset_profile_missing"
+    # 原因说清"为什么不可用"，并且点名的是这次要的那一项
+    assert "姜岁欢" in detail["message"]
+    assert "没有可用于出图的资料" in detail["message"]
+    # 怎么补是必给的（用户照做就能拿到可用结果）
+    assert detail["fix"]
+    # 拒绝发生在生成之前：一次模型调用都没发出去（不花钱）
+    assert recorded == []
 
 
 @pytest.mark.asyncio

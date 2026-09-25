@@ -80,6 +80,14 @@ FRAME_SLOT_CATEGORIES: tuple[str, ...] = (
 ASSET_ONLY_SHOT_TEXT = "（本次为资产级生成，没有具体镜头文本；只需生成资产参考图提示词。）"
 MAX_SHOT_TEXT_CHARS = 4000
 
+#: 某项资产"没有可用于出图的资料"时的中文原因（只落在**这一项**上）。
+MISSING_PROFILE_REASON = "在库里没有可用于出图的资料（资产描述、外观资料、本章资料都是空的）"
+#: 对应的"怎么补"（用户语言，可照做；不写接口与内部标识）。
+MISSING_PROFILE_FIX = (
+    "到这一项的编辑页补全外观资料（发型 / 服装 / 体型 / 面部特征 / 材质与颜色），"
+    "或先在资产准备页生成并确认「章节资产清单」，补好之后再重新生成提示词"
+)
+
 
 # ---------------------------------------------------------------------------
 # 槽位 / 实体选择
@@ -125,6 +133,89 @@ def pick_entity_for_slot(
     if mentioned:
         return min(mentioned, key=lambda item: item[0])[1]
     return candidates[0]
+
+
+def requested_asset_names(body: ImagePromptPreviewRequest) -> list[str]:
+    """本次请求**点名**要生成哪些资产（``entity_names`` 优先，其次调用方传入的画像卡名）。
+
+    两个来源都为空时返回空列表，表示"调用方没有点名"——
+    这时本次请求涉及的实体只能按请求的槽位逐个挑（见 :func:`resolve_profile_scope`）。
+    """
+    named = [str(name).strip() for name in (body.entity_names or []) if str(name).strip()]
+    if named:
+        return named
+    return [str(profile.name).strip() for profile in (body.entity_profiles or []) if profile.name]
+
+
+def resolve_profile_scope(
+    *,
+    cards: list[EntityProfileCardRead],
+    categories: list[PromptCategory],
+    shot_text: str,
+    explicit_names: list[str],
+) -> list[EntityProfileCardRead]:
+    """本次请求**真正涉及**的画像卡：资料可用性的预检只认这几张。
+
+    为什么必须收窄（真实事故的根因之一）：资产级自动装载会把**整个项目/本章**的实体
+    都装成画像卡（那是给模型当上下文的），此前"谁没有资料"的预检是拿**整份画像卡**做的，
+    于是一个**没被勾选**的空壳资产（例如本章只留了资料记录的服装）会把本次要生成的
+    每一项一起判成"不可用"，用户勾的 4 项一项都拿不到提示词。
+
+    两种口径：
+    - 调用方**点名**了资产（``entity_names`` / 传入的画像卡）：范围就是这些名字，
+      因为那是"用户要的东西"；
+    - 没点名：范围是**本次请求的槽位实际会用到的那几张卡**
+      （:func:`pick_entity_for_slot` 逐槽位挑一遍，顺序去重），
+      其余装进来的画像卡只是上下文，不参与"有没有资料"的判定。
+    """
+    if explicit_names:
+        wanted = {normalize_name(name) for name in explicit_names if str(name).strip()}
+        scoped = [card for card in cards if normalize_name(card.name) in wanted]
+        if scoped:
+            return scoped
+    picked: list[EntityProfileCardRead] = []
+    seen: set[str] = set()
+    for category in categories:
+        spec = IMAGE_PROMPT_SLOT_BY_CATEGORY[str(category.value)]
+        card = pick_entity_for_slot(spec, cards=cards, shot_text=shot_text)
+        if card is None:
+            continue
+        key = normalize_name(card.name) or str(card.name)
+        if key in seen:
+            continue
+        seen.add(key)
+        picked.append(card)
+    return picked
+
+
+def build_missing_profile_warning(card: EntityProfileCardRead) -> str:
+    """**单项**缺资料的中文说明（为什么不可用 + 怎么补）。
+
+    只写这一项自己的名字：**绝不**把没被本次请求要到的资产列进来 ——
+    那段文字会被页面当成"这一行不可保存的原因"，牵进别的资产等于让用户拿不到本来能用的结果。
+    """
+    return f"「{card.name}」{MISSING_PROFILE_REASON}。怎么补：{MISSING_PROFILE_FIX}。"
+
+
+def build_all_missing_profile_detail(cards: list[EntityProfileCardRead]) -> dict[str, Any]:
+    """本次请求点到的**每一项**都没有资料：结构化拒绝体（原因只说这几项）。
+
+    这是"整体不可用"的唯一拒绝口径：请求里只要还有一项能生成，就照常生成、逐项回报
+    （见 :func:`preview_image_prompts` 的逐项隔离）。
+    """
+    names = "、".join(card.name for card in cards[:8])
+    more = "" if len(cards) <= 8 else f" 等 {len(cards)} 项"
+    return {
+        "code": "asset_profile_missing",
+        "message": (
+            f"你选的这几项（{names}{more}）{MISSING_PROFILE_REASON}："
+            "画像卡只能落到「外观信息不足，需人工补充」这类空话，"
+            "生成结果不会通过质量拦截、也不能保存成「提示词已就绪」。"
+            "本次没有发起生成，也没有产生费用。"
+        ),
+        "fix": MISSING_PROFILE_FIX,
+        "assets": [card.name for card in cards],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -501,19 +592,25 @@ async def preview_image_prompts(
         warnings.append(asset_only_note)
     if not cards:
         warnings.append("本次没有可用的实体画像卡，图片提示词只依据镜头文本生成，实体一致性可能较弱。")
-    # 画像卡里"只有空话"的实体：如实点出来，并指向正确的补齐入口。
-    # 这里只是**如实回报**；真正拦住"保存成已就绪"的是写库前的质量拦截
-    # （见 app.services.studio.asset_prompt_quality）。
-    vague_cards = [card for card in cards if not card.has_structured_profile]
-    if vague_cards:
-        names = "、".join(card.name for card in vague_cards[:8])
-        more = "" if len(vague_cards) <= 8 else f" 等 {len(vague_cards)} 个"
-        warnings.append(
-            f"以下实体在库里没有可用于出图的资料（{names}{more}），"
-            "画像卡只能落到「外观信息不足，需人工补充」这类空话，"
-            "生成结果不会通过质量拦截、不能保存成「提示词已就绪」。"
-            "请先在资产准备页生成「章节资产清单」并确认，或手工补齐资产描述。"
+    # 资料可用性预检：**只对本次请求涉及的资产**做（见 resolve_profile_scope）。
+    # 没被要求的资产（自动装载进来的上下文）既不参与判定，也不会出现在原因里。
+    scope_cards = resolve_profile_scope(
+        cards=cards,
+        categories=categories,
+        shot_text=shot_text,
+        explicit_names=requested_asset_names(body),
+    )
+    missing_cards = [card for card in scope_cards if not card.has_structured_profile]
+    # 整体不可用（本次要的每一项都没资料）→ 如实拒绝：**不发起生成、不产生费用**，
+    # 原因只说这几项，不把没被要求的资产列进来。
+    if scope_cards and len(missing_cards) == len(scope_cards):
+        raise HTTPException(
+            status_code=422,  # 字面量：starlette 新旧版本对该常量命名不一致
+            detail=build_all_missing_profile_detail(missing_cards),
         )
+    # 逐项隔离：只有缺资料的那一项拿到"为什么不可用 + 怎么补"，其它项照常生成。
+    for card in missing_cards:
+        warnings.append(build_missing_profile_warning(card))
 
     target, target_warning = await _try_resolve_target(db, needed=llm_caller is None)
 
@@ -699,10 +796,14 @@ async def _run_with_caller(
 
 __all__ = [
     "assemble_image_prompt",
+    "build_all_missing_profile_detail",
     "build_dry_run_slots",
+    "build_missing_profile_warning",
     "build_slot_layers",
     "pick_entity_for_slot",
     "postprocess_slots",
     "preview_image_prompts",
+    "requested_asset_names",
+    "resolve_profile_scope",
     "resolve_requested_categories",
 ]

@@ -57,6 +57,7 @@ import {
   type WorkbenchLoadSource,
 } from './assetWorkbenchContract.ts'
 import { fetchAssetWorkbench } from './assetWorkbenchApi.ts'
+import { describeSkippedPromptPanelAssets, selectPromptPanelAssets } from './promptPanelAssets.ts'
 import { runChapterAnalysis } from './chapterAnalysis.ts'
 import { WORKBENCH_CONTRACT_PENDING_NOTE } from './assetWorkbenchContract.ts'
 
@@ -348,6 +349,21 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
 
   const chapterLabel = chapter.index === null ? chapter.title : `第 ${chapter.index} 集 · ${chapter.title}`
 
+  /**
+   * 面板的资产行集：**只**来自用户勾选的那些项，键与工作台选择键同口径
+   * （见 `promptPanelAssets.ts`：不回退到全部、不丢服装、空 id 的项如实列出来）。
+   */
+  const promptPanelAssets = useMemo(
+    () => selectPromptPanelAssets(items, selectedKeys),
+    [items, selectedKeys],
+  )
+  /** 弹窗标题：勾了几项、其中几项本次无法生成（数字必须对得上，别让用户猜） */
+  const promptPanelTitle = useMemo(() => {
+    const skipped = promptPanelAssets.skipped.length
+    const tail = skipped > 0 ? `（其中 ${skipped} 项本次无法生成）` : ''
+    return `生成图片提示词 · 已选 ${selectedKeys.length} 项${tail}`
+  }, [promptPanelAssets.skipped.length, selectedKeys.length])
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
       <WorkbenchCommandBar
@@ -445,10 +461,14 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
                     生成的图会先出现在这里：点「采纳」落到资产图片，点「设为定版」定下对外使用的那一张。
                   </span>
                 </div>
-                {/* 「生成图片提示词」：只带选中的资产；里面那次点击才会真的调用模型 */}
+                {/*
+                  「生成图片提示词」：行集**只**来自用户勾选的那些资产（键与工作台选择键同口径），
+                  面板自己不会再按项目/章节拉一份全部资产；勾选的项里暂时生成不了的（本章只有资料记录、
+                  还没建出资产）如实列出来，不让"按钮说 N 项、实际只发出更少请求"。
+                */}
                 <Modal
                   open={promptPanelOpen}
-                  title={`生成图片提示词 · 已选 ${selectedKeys.length} 项`}
+                  title={promptPanelTitle}
                   onCancel={() => setPromptPanelOpen(false)}
                   footer={null}
                   width={1040}
@@ -461,13 +481,23 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
                       message="每项会调用一次文本模型（按次计费，会花钱）"
                       description="生成后请逐项检查再保存；任何一次失败都会立即停止、不自动重试。保存的位置就是生图实际读取的那份资产提示词。"
                     />
+                    {promptPanelAssets.skipped.length > 0 ? (
+                      <Alert
+                        type="warning"
+                        showIcon
+                        message={`有 ${promptPanelAssets.skipped.length} 项勾选的资产本次无法生成提示词`}
+                        description={
+                          <span className="text-xs">
+                            {describeSkippedPromptPanelAssets(promptPanelAssets.skipped)}
+                          </span>
+                        }
+                      />
+                    ) : null}
                     <AssetImagePromptLlmPanel
                       projectId={projectId ?? ''}
                       chapterId={chapterId}
                       preselectAllMissing
-                      assets={toSignalAssets(data).filter((asset) =>
-                        selectedKeys.includes(`${asset.type}:${asset.id}`),
-                      )}
+                      assets={promptPanelAssets.assets}
                       onSaved={() => {
                         setPromptPanelOpen(false)
                         void loadWorkbench()

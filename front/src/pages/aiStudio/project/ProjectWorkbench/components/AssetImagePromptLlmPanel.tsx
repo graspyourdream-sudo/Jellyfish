@@ -46,6 +46,11 @@ import {
 } from './assetGenerationBasis.ts'
 import { PromptQualityAlert, PromptQualityTag } from './PromptQualityAlert'
 import {
+  describeRowAvailability,
+  readAssetPromptAvailabilityError,
+} from './assetPromptRequestScope.ts'
+import { describeUnrequestableAssets } from './workbench/promptPanelAssets.ts'
+import {
   buildPromptDifferenceLines,
   describePromptPanelRowQuality,
   describePromptSaveFailure,
@@ -113,7 +118,7 @@ type AssetRow = {
    * 保存接口是"整列替换"，只发一个槽位会抹掉该资产其它槽位，所以保存时合并写回。
    */
   existingMap: Record<string, string>
-  status: 'pending' | 'running' | 'generated' | 'saved' | 'failed' | 'stopped'
+  status: 'pending' | 'running' | 'generated' | 'saved' | 'failed' | 'stopped' | 'unavailable'
   draft: string
   llmCalled: boolean | null
   latencyMs: number | null
@@ -194,6 +199,13 @@ export function AssetImagePromptLlmPanel({
    * 就去保存或重新生成任何一行。
    */
   const [draftNote, setDraftNote] = useState('')
+  /**
+   * 本次**送进面板**的资产里，有几项连请求都发不出去（`asset_id` 为空）。
+   *
+   * 如实列出来，是为了让"按钮上的数字"和"实际发生的调用次数"永远对得上：
+   * 这类项不参与生成，也不能被静默丢掉。
+   */
+  const [unrequestableAssets, setUnrequestableAssets] = useState<string[]>([])
   /** 后端槽位表：道具槽位补上后这里会自动出现它（前端不再硬编码"道具没有槽位"） */
   const [slotSpecs, setSlotSpecs] = useState<AssetPromptSlotSpecLike[]>([])
   /** 这次批量生成时**对所有选中资产**的补充要求（④ 项依据；后端声明了对应字段才会真的发出去） */
@@ -250,10 +262,25 @@ export function AssetImagePromptLlmPanel({
     }
   }, [projectId])
 
-  /** 把步骤信号里的资产转换成面板行；`existing` 需要拉一次实体详情（步骤信号不带描述与提示词）。 */
+  /**
+   * 把步骤信号里的资产转换成面板行；`existing` 需要拉一次实体详情（步骤信号不带描述与提示词）。
+   *
+   * **行集只来自 `props.assets`**（调用方已经替用户选好的那些资产）：
+   * 面板不会自己按项目/章节再拉一份资产清单，也不会在 `assets` 为空时"回退到全部" ——
+   * 回退到全部等于把没被勾选的资产也一起拿去调用模型（真实事故：勾 4 项却生成到别的资产）。
+   *
+   * `asset_id` 为空的行（本章只有资料记录、还没建出资产）**不进面板**：
+   * 面板是按资产逐项发请求的，空 id 连实体详情都读不到，放进来只会
+   * "按钮说 N 项、实际只发出更少请求"，而且失败会打断后面的项。这类项如实列在页面上。
+   */
   const loadRows = useCallback(async () => {
     const next: AssetRow[] = []
+    const unrequestable: string[] = []
     for (const asset of assets) {
+      if (!String(asset.id ?? '').trim()) {
+        unrequestable.push(asset.name || '（未命名资产）')
+        continue
+      }
       // 槽位**吃后端槽位表**（读不到就退回内置表，四类资产都有槽位）
       const slot = resolveAssetPromptSlot(asset.type, slotSpecs)
       next.push({
@@ -287,6 +314,7 @@ export function AssetImagePromptLlmPanel({
       })
     }
     setRows(next)
+    setUnrequestableAssets(unrequestable)
     // 缺失项默认只勾**前 3 个**（`hasImagePrompt !== true` 视为缺失）：
     // 一次几十个资产就是几十次真实大模型调用，默认全勾等于把按钮做成"一键烧钱"。
     const missing = next.filter((row) => row.supported && assets.find((a) => a.id === row.id)?.hasImagePrompt !== true)
@@ -360,9 +388,26 @@ export function AssetImagePromptLlmPanel({
     /* ---- 草稿恢复（只读）结束 ---------------------------------------------- */
   }, [assets, chapterId, preselectAllMissing, projectId, slotSpecs])
 
+  /**
+   * 资产清单的**内容**指纹。
+   *
+   * 为什么不能直接用 `assets` 当依赖：它是父组件每次渲染都会新建的数组
+   * （调用方写的是 `filter(...)`），拿它当依赖会让"父组件随便重渲染一次"
+   * 也被当成"资产清单变了" → 面板把 `selectedKeys` 重置成默认勾选、
+   * 已生成的行也一起被重建（用户刚点完生成，勾选却自己变了）。
+   * 指纹只认真正影响行集的内容：类型 + 资产 + 有没有已保存提示词。
+   */
+  const assetsSignature = useMemo(
+    () =>
+      assets.map((asset) => `${asset.type}:${asset.id}:${asset.hasImagePrompt ? 1 : 0}`).join('|'),
+    [assets],
+  )
+
   useEffect(() => {
     void loadRows()
-  }, [loadRows])
+    // 只在**资产清单内容**、集、项目或槽位表变化时重载；`loadRows` 的引用变化不触发（见上面说明）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assetsSignature, chapterId, preselectAllMissing, projectId, slotSpecs])
 
   const plannedRows = useMemo(
     () =>
@@ -377,11 +422,17 @@ export function AssetImagePromptLlmPanel({
   )
 
   const generateOne = async (row: AssetRow): Promise<void> => {
+    // 这一行连资产身份都不完整（理论上不会发生：`loadRows` 已经把空 id 的行挡在外面）：
+    // 直接如实报错，绝不发一个"不知道是哪个资产"的请求出去。
+    if (!String(row.id ?? '').trim()) {
+      throw new Error('这一项还没有对应资产，无法生成提示词：请先在资产准备页补齐这一项。')
+    }
     // 画像卡：把该资产的描述交给编排层，保证"提示词是照这个资产写的"
     const detail = await StudioEntitiesApi.get(row.type as 'character' | 'scene' | 'prop' | 'costume', row.id)
     const entity = (detail.data ?? {}) as Record<string, unknown>
     const preview = await previewAssetImagePrompt({
       projectId: projectId ?? null,
+      chapterId: chapterId ?? null,
       assetType: row.type,
       assetId: row.id,
       name: String(entity.name ?? row.name),
@@ -463,6 +514,8 @@ export function AssetImagePromptLlmPanel({
     if (!targets.length) return
     stopRef.current = false
     setRunning(true)
+    /** 本次因为"库里没有可用于出图的资料"被后端拒掉的项数（收尾时如实告知，不当成失败） */
+    let unavailableCount = 0
     /** 剩下的还没开始的项（失败/停止后要如实回显"它们没有开始"） */
     const remaining: AssetRow[] = []
     for (let index = 0; index < targets.length; index += 1) {
@@ -477,6 +530,43 @@ export function AssetImagePromptLlmPanel({
         // eslint-disable-next-line no-await-in-loop
         await generateOne(target)
       } catch (error) {
+        /**
+         * **逐项隔离**：后端明确说"这一项在库里没有可用于出图的资料"时，这是**这一项**的问题
+         * （与批量出图的逐项失败隔离同一口径），不是整批的问题：
+         * 把原因与"怎么补"标在**这一行**上，然后接着做后面的项 ——
+         * 否则勾了 4 项、其中 1 项没资料，另外 3 项会一起拿不到结果。
+         *
+         * 这次请求在后端**生成之前**就被拒了（没有计费调用），所以继续是安全的。
+         */
+        const availability = readAssetPromptAvailabilityError(error)
+        if (availability.missingProfile) {
+          const reason =
+            availability.reason ||
+            `「${target.name}」在库里没有可用于出图的资料（资产描述、外观资料、本章资料都是空的）。`
+          unavailableCount += 1
+          setRows((prev) =>
+            prev.map((item) =>
+              item.key === target.key
+                ? {
+                    ...item,
+                    status: 'unavailable',
+                    error: '这一项没有可用于出图的资料：本次没有发起生成（不花钱）。',
+                    /**
+                     * 把后端的结构化原因装成**质量判定**的形状：这样行内的原因与
+                     * "怎么补"由既有组件渲染（与质量拦截同一份文案），不另写一套。
+                     */
+                    qualityPayload: {
+                      savable: false,
+                      quality_issues: [
+                        { code: 'vague_filler', message: reason, fix: availability.fix },
+                      ],
+                    },
+                  }
+                : item,
+            ),
+          )
+          continue
+        }
         setRows((prev) =>
           prev.map((item) =>
             item.key === target.key
@@ -498,6 +588,16 @@ export function AssetImagePromptLlmPanel({
         prev.map((item) => (item.status === 'pending' ? { ...item, status: 'stopped', error: `${stopped}：这一项没有开始` } : item)),
       )
       message.info(`${stopped}：剩余 ${remaining.length} 项没有开始。确认后可点「生成图片提示词」继续，页面不会自动重试。`)
+    }
+    if (unavailableCount > 0) {
+      /**
+       * 缺资料是**逐项**的事：说清"哪几项、为什么、怎么补"，并明确其它项照常，
+       * 不让用户以为整批都没成（真实事故里正是这一句缺失，用户看到的是"4 项都没拿到"）。
+       */
+      message.warning(
+        `有 ${unavailableCount} 项因为库里没有可用于出图的资料，本次没有生成（也没有计费）：` +
+          '按每一行给出的原因与「怎么补」补好资料后再生成；其它项不受影响。',
+      )
     }
     setRunning(false)
     stopRef.current = false
@@ -809,7 +909,10 @@ export function AssetImagePromptLlmPanel({
 
   const unsupportedAlert = buildUnsupportedSlotAlert(rows)
   const dryRunRows = rows.filter((row) => row.status === 'generated' && row.llmCalled === false)
+  /** 「重试失败项」只认**真正的失败**：缺资料不是重试能解决的（要先去补资料），别混在一起 */
   const failedCount = rows.filter((row) => row.status === 'failed').length
+  /** 本次因为库里没有资料而没能生成的项（逐项列出：为什么 + 怎么补；不阻塞其它项） */
+  const unavailableRows = rows.filter((row) => row.status === 'unavailable')
   /**
    * 勾选了、但**后端槽位表里还没有这一项**所以本次不会生成的资产（未补槽位前的道具）。
    *
@@ -963,6 +1066,49 @@ export function AssetImagePromptLlmPanel({
         />
       ) : null}
 
+      {/*
+        送进来、但连请求都发不出去的项（本章只有资料记录、还没建出资产）：
+        如实说清"哪几项、为什么"，否则按钮上的数字与实际调用次数会对不上。
+      */}
+      {unrequestableAssets.length > 0 ? (
+        <Alert
+          type="warning"
+          showIcon
+          message={describeUnrequestableAssets(unrequestableAssets)}
+          description="这些项在本章只有资料记录：请在资产准备页确认写入这一项（建出资产）后再回来生成提示词。"
+        />
+      ) : null}
+
+      {/*
+        缺资料的项**逐项**列清楚（为什么不可用 + 怎么补），并点明"其它项不受影响"：
+        真实事故里正是这一条缺失 —— 用户看到的是"整批都没拿到"，而实际上只是其中几项没资料。
+      */}
+      {unavailableRows.length > 0 ? (
+        <Alert
+          type="warning"
+          showIcon
+          message={`有 ${unavailableRows.length} 项因为库里没有可用于出图的资料，本次没有生成（也没有计费）：${unavailableRows
+            .map((row) => row.name)
+            .join('、')}`}
+          description={
+            <ul className="list-disc pl-5 text-[11px]">
+              {unavailableRows.map((row) => {
+                const verdict = describePromptPanelRowQuality(row, {
+                  serverQuality: row.qualityPayload,
+                  serverWarnings: row.warnings,
+                })
+                return (
+                  <li key={`unavailable-${row.key}`}>
+                    {describeRowAvailability(row.name, verdict.reason, verdict.fixes[0])}
+                  </li>
+                )
+              })}
+              <li>其它项不受影响：它们照常生成，可以逐项检查、保存。</li>
+            </ul>
+          }
+        />
+      ) : null}
+
       <div className="text-[11px] text-gray-500">
         {`已选 ${plannedRows.length} 个资产待生成`}
         {onlyMissing && !includeExisting ? '（已有提示词的会被跳过）' : ''}
@@ -1078,13 +1224,15 @@ export function AssetImagePromptLlmPanel({
                     ? '草稿（未保存）'
                     : row.status === 'failed'
                       ? '失败'
-                      : row.status === 'stopped'
-                        ? '未开始（已停止）'
-                        : row.status === 'running'
-                          ? '生成中'
-                          : row.status === 'generated'
-                            ? '已生成'
-                            : '待生成'
+                      : row.status === 'unavailable'
+                        ? '缺资料（本次未生成）'
+                        : row.status === 'stopped'
+                          ? '未开始（已停止）'
+                          : row.status === 'running'
+                            ? '生成中'
+                            : row.status === 'generated'
+                              ? '已生成'
+                              : '待生成'
               const color =
                 row.status === 'saved'
                   ? 'green'
@@ -1092,11 +1240,13 @@ export function AssetImagePromptLlmPanel({
                     ? 'blue'
                     : row.status === 'failed'
                       ? 'red'
-                      : row.status === 'stopped'
-                        ? 'default'
-                        : row.status === 'running'
-                          ? 'geekblue'
-                          : 'gold'
+                      : row.status === 'unavailable'
+                        ? 'orange'
+                        : row.status === 'stopped'
+                          ? 'default'
+                          : row.status === 'running'
+                            ? 'geekblue'
+                            : 'gold'
               // 这一行**实际会用**的提示词（本次草稿优先，其次已保存的那条）：质量按它判
               const verdict = describePromptPanelRowQuality(row, {
                 serverQuality: row.qualityPayload,
@@ -1129,8 +1279,11 @@ export function AssetImagePromptLlmPanel({
                       setRows((prev) => prev.map((item) => (item.key === row.key ? { ...item, draft: event.target.value } : item)))
                     }
                   />
-                  {/* 质量不可用时给真实原因与怎么修（与批量出图的拦截用的是同一份文案） */}
-                  {row.draft.trim() ? <PromptQualityAlert verdict={verdict} /> : null}
+                  {/* 质量不可用时给真实原因与怎么修（与批量出图的拦截用的是同一份文案）；
+                      "缺资料"的行没有正文，但同样要把原因与怎么补显示在**这一行**上 */}
+                  {row.draft.trim() || row.status === 'unavailable' ? (
+                    <PromptQualityAlert verdict={verdict} />
+                  ) : null}
                   <Space size={8} wrap>
                     <Button
                       size="small"

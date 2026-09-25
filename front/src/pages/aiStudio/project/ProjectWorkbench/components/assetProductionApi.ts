@@ -36,6 +36,7 @@ import {
   type AssetPromptBatchSaveSupport,
   type PromptRequestFieldSupport,
 } from './assetPromptRequestContract.ts'
+import { buildAssetPromptRequestScope } from './assetPromptRequestScope.ts'
 
 export type AssetImageServiceResult = {
   source_task_id?: string
@@ -459,12 +460,21 @@ export type AssetPromptPreviewOutcome = {
  * → 剧本片段」拼画像；只要调用方**别把画像塞进来**，它就会走这条路。
  * 这是用户那个问题（提示词大量"外观信息不足、需人工补充"）的根因修复。
  *
+ * **生成范围必须只有这一项**：请求里点名这一项（见 `buildAssetPromptRequestScope`），
+ * 并带上当前集。否则后端会把**整个项目/本章**的实体都装成画像卡当上下文 ——
+ * 一个没被勾选、又恰好没有资料的空壳资产，会出现在这次生成里，
+ * 甚至变成"这一次不能保存"的原因（真实事故）。
+ *
  * 安全网：拿回来的槽位必须**确实是这个资产**（名字对得上），否则退回调用方传入画像 ——
  * 宁可少用一点资料，也绝不能把隔壁资产的资料画到它身上。
  */
 async function previewWithServerProfiles(args: {
   projectId?: string | null
+  /** 当前集：全局资产（场景/道具/服装）的本章资料按它隔离读取 */
+  chapterId?: string | null
   assetName: string
+  assetId?: string
+  assetType?: string
   category: string
   extras: Record<string, string>
 }): Promise<{
@@ -476,10 +486,21 @@ async function previewWithServerProfiles(args: {
 } | null> {
   if (!args.projectId) return null
   try {
+    // 一次请求只点名这一项（空名字时不下发该字段：宁可少收窄，也不乱点名）
+    const scope = buildAssetPromptRequestScope({
+      assetName: args.assetName,
+      assetId: args.assetId,
+      assetType: args.assetType,
+    })
+    const chapterId = String(args.chapterId ?? '').trim()
     const body: Record<string, unknown> = {
       project_id: args.projectId,
+      // 当前集：只读**本章**的资产资料，别的章节写的资料不会串进来
+      ...(chapterId ? { chapter_id: chapterId } : {}),
       // 只给名字，不给画像：后端据此在**它自己装载的**画像卡里挑中这个资产
       shot_text: args.assetName,
+      // 同时点名：后端的画像卡集合与"资料够不够"的判定都收窄到这一项
+      ...(scope.entityNames.length > 0 ? { entity_names: scope.entityNames } : {}),
       categories: [args.category],
       ...args.extras,
     }
@@ -504,6 +525,8 @@ async function previewWithServerProfiles(args: {
 
 export async function previewAssetImagePrompt(args: {
   projectId?: string | null
+  /** 当前集（可选）：给了就只读本章的资产资料（全局资产按章节隔离） */
+  chapterId?: string | null
   assetType: string
   /** 资产 id（后端声明了才会发送，见 assetPromptRequestContract 的能力探测） */
   assetId?: string
@@ -527,7 +550,10 @@ export async function previewAssetImagePrompt(args: {
   // ① 先让后端自己装配（含候选结构化资料 + 剧本片段）：这是"生成时真的拿到剧本资料"的关键一步
   const serverProfileSlot = await previewWithServerProfiles({
     projectId: args.projectId,
+    chapterId: args.chapterId,
     assetName: args.name,
+    assetId: args.assetId,
+    assetType: args.assetType,
     category: args.category,
     extras,
   })
