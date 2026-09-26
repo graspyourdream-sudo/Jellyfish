@@ -14,7 +14,7 @@ import {
   ReadOutlined,
 } from '@ant-design/icons'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { useAppStore } from '../store/useAppStore'
+import { useAppStore, userRoleLabel } from '../store/useAppStore'
 import { useTranslation } from 'react-i18next'
 import { TaskCenter } from '../pages/aiStudio/components/TaskCenter'
 import { TaskRuntimeProvider } from '../pages/aiStudio/components/TaskRuntimeProvider'
@@ -23,7 +23,11 @@ import { RealRunModeBadge } from '../pages/aiStudio/components/RealRunModeBadge'
 const { Header, Sider, Content } = Layout
 
 const MainLayout: React.FC = () => {
-  const { t, i18n } = useTranslation('layout')
+  /* `layout` 是默认命名空间（导航 / 用户菜单都取自它）；
+     角色的中文显示名在 `settings` 命名空间里（`roleOptions`），
+     所以这里显式把两个命名空间都挂上，用 `settings:` 前缀取键 —— 避免把
+     「系统管理员」这份中文口径在代码里再手写一份（审计 §4.7 模式 3）。 */
+  const { t, i18n } = useTranslation(['layout', 'settings'])
   const location = useLocation()
   const navigate = useNavigate()
   const { token } = theme.useToken()
@@ -58,7 +62,11 @@ const MainLayout: React.FC = () => {
       prompts: '提示词模板',
       'prompt-flow': '提示词导入/交付',
       files: '文件管理',
-      agents: 'Agent管理',
+      /* 审计 §4.7 模式 3：`agents: 'Agent管理'` 里混英文不必要 —— 改中文。
+         ⚠️ 导航名 `'LLM 调试台（开发）'`（下一项 `llm-pipeline`）**不改名**：
+         用户已裁定该页「仅开发可见、阶段 B 不投工、导航入口淡化本轮不改路由」
+         （审计 §9.1 第 9 项），改名属产品命名决策，不在本次治理范围。 */
+      agents: '智能体管理',
       models: '模型管理',
       'llm-pipeline': 'LLM 调试台（开发）',
       'drama-plan': '剧情策划',
@@ -292,7 +300,9 @@ const MainLayout: React.FC = () => {
                 <Avatar size={32} icon={<UserOutlined />} />
                 <div className="hidden md:flex flex-col leading-tight">
                   <span className="text-sm font-medium text-gray-800">{user.name}</span>
-                  <span className="text-xs text-gray-500">{user.role}</span>
+                  {/* 角色存的是稳定码（`admin` / `operator` / `guest`），显示走 i18n；
+                      未登记的码给「未知角色」兜底，**绝不把码本身渲到右上角**（审计 §4.7-R24 第 3 条）。 */}
+                  <span className="text-xs text-gray-500">{userRoleLabel(user.role, t)}</span>
                 </div>
               </div>
             </Dropdown>
