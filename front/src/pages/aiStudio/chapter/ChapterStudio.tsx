@@ -141,6 +141,7 @@ import {
 import { TASK_COPY } from '../components/taskCopy'
 // 阶段 B ①：后端原文 → 主区的中文结论（掩码 → 洗句 → 业务化改写三级管道）
 import { toUserFacingText } from '../components/userFacingMessage'
+import { TARGET_RATIO_SOURCE, labelFor } from '../components/enumLabels'
 import { classifyGenerationFailure, failureText } from '../components/generationGate'
 import { ChapterStudioBatchToolbar } from './components/ChapterStudioBatchToolbar'
 import { ChapterStudioMaintenancePanel } from './components/ChapterStudioMaintenancePanel'
@@ -226,6 +227,22 @@ function videoPromptSourceLabel(source: string): string {
   if (normalized === 'jurilu') return '剧立方导入'
   if (normalized === 'skill') return '技能生成'
   return normalized || '未知来源'
+}
+
+/**
+ * 是否允许真实付费（后端 `guard_status` → 中文结论）。
+ *
+ * 审计 §4.3 模式 3：这个值和 `pending` 一样属英文枚举原值直渲。
+ * 后端的 `short_status()` 是自由文本（可能带 `DRY_RUN=开（JELLYFISH_DRY_RUN，…）`），
+ * 所以这里按语义归类成中文结论，**原文仍留在「技术详情」的技术块里**。
+ */
+function describeGuardStatus(raw: string): string {
+  const text = String(raw ?? '')
+  if (!text.trim()) return '待确认'
+  if (/DRY_RUN\s*=\s*开|dry_run/i.test(text)) return '不允许（当前是演练模式）'
+  if (/未确认|not_confirmed|unconfirmed/i.test(text)) return '不允许（真实调用还没有确认）'
+  if (/真实|real/i.test(text)) return '允许'
+  return '待确认（原始状态见「技术详情」）'
 }
 
 /** 关键帧出图的提示词来源（后端 frame-submit 计划里的 prompt_source）。 */
@@ -6797,8 +6814,9 @@ function Inspector(props: {
                         </Tag>
                         <Tag>{keyframePlanPreview.prompt.length} 字</Tag>
                         <Tag>{`参考图 ${keyframePlanPreview.reference_count} 张`}</Tag>
-                        <Tag>{`画幅 ${keyframePlanPreview.target_ratio}（${keyframePlanPreview.target_ratio_source}）`}</Tag>
-                        <Tag>{`${keyframePlanPreview.provider || '未识别供应商'} / ${keyframePlanPreview.model_name || '未识别模型'}`}</Tag>
+                        <Tag>{`画幅 ${keyframePlanPreview.target_ratio}（${labelFor(TARGET_RATIO_SOURCE, keyframePlanPreview.target_ratio_source)}）`}</Tag>
+                        {/* 审计 §6.2：主区只用业务化说法，原始 provider / 模型名只进「技术详情」 */}
+                        <Tag>{videoModelBusinessName(keyframePlanPreview.model_name)}</Tag>
                       </div>
                       <div className="rounded bg-slate-50 px-3 py-2 text-[11px] leading-5 text-slate-600">
                         <div className="line-clamp-3 break-all">{keyframePlanPreview.prompt || '（空）'}</div>
@@ -7493,17 +7511,17 @@ function Inspector(props: {
                   Celery 队列，本机没有 Redis / worker 时任务只会停在 pending（表现为"点了生成没反应"）。
                 </div>
                 <div className="mt-1">
-                  固定策略 <span className="font-mono">seedance-2.0-mini · 480p · 最短 5s</span> 在直提端点强制生效；
-                  参考音频（若该镜头绑定）与参考图也会一并带上。DRY_RUN 下返回占位结果、不花钱。
+                  本集统一用「短视频标准方案」（固定 480p、最短 5 秒）；
+                  参考音频（若该镜头绑定）与参考图也会一并带上。演练模式下只返回占位结果，不发生真实费用。
                 </div>
                 {videoPinnedPlan ? (
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <Tag color={videoPinnedPlan.modelPinned ? 'green' : 'red'}>
-                      {`固定模型：${videoPinnedPlan.modelName || '未知'}`}
+                      {`模型方案：${videoModelBusinessName(videoPinnedPlan.modelName)}`}
                     </Tag>
                     <Tag>{`分辨率：${videoPinnedPlan.resolution || '未知'}`}</Tag>
                     <Tag>{`最短时长：${videoPinnedPlan.seconds || 0}s`}</Tag>
-                    {videoPinnedPlan.provider ? <Tag>{`供应商：${videoPinnedPlan.provider}`}</Tag> : null}
+                    {/* 审计 §4.3 模式 5：「供应商：prov-xxx」从主区移除，原始值只进技术详情 */}
                     {videoPinnedPlan.providerSupported ? null : <Tag color="red">当前视频方案不支持这个参考方式</Tag>}
                   </div>
                 ) : (
@@ -7511,8 +7529,8 @@ function Inspector(props: {
                 )}
                 <div className="mt-1">
                   {videoPinnedPlan?.guardStatus
-                    ? `直提端点守卫状态：${videoPinnedPlan.guardStatus}`
-                    : '直提端点守卫状态未知（未取到计划预览）。'}
+                    ? `是否允许真实付费：${describeGuardStatus(videoPinnedPlan.guardStatus)}`
+                    : '暂时读不到是否允许真实付费（未取到计划预览）。'}
                 </div>
                 {videoPinnedPlan && videoPinnedPlan.warnings.length > 0 ? (
                   <ul className="mt-1 list-disc pl-4">

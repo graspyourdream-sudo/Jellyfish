@@ -181,6 +181,11 @@ function blankCommentsAndStrings(source: string, surfaces: ScanSurface[], includ
       }
       /* `console.warn('[tag] …')` 这类**开发者日志**不是用户可见文案，不参与扫描。 */
       const isConsoleLogArg = /console\.\w+\(\s*$/.test(source.slice(lineStart, start))
+      /* 模板串里的 `${…}` 是**代码表达式**，不是文案字面量：
+         `` `镜头：${shot.title}` `` 命中并不代表泄漏（真正的泄漏是「把值渲出来」，
+         静态扫字面量本来就看不见）。所以先把表达式挖掉、只留字面量部分 ——
+         这样枚举原值的**整词**匹配才不会误伤 `shot.title` 这类标识符。 */
+      const literalOnly = value.replace(/\$\{[^}]*\}/g, ' ')
       const isVisibleAttr =
         !isConsoleLogArg && attr !== null && VISIBLE_JSX_ATTRS.includes(attr.toLowerCase())
       const kind: ScanSurfaceKind = isVisibleAttr
@@ -190,7 +195,11 @@ function blankCommentsAndStrings(source: string, surfaces: ScanSurface[], includ
           : 'string-literal'
       // 非白名单字面量：**只有含中文才当成用户文案**（§7.1-7 的判定口径）
       if (!isConsoleLogArg && (isVisibleAttr || CJK_RE.test(value))) {
-        surfaces.push(kind === 'jsx-attr' ? { kind, text: value, line: startLine, attr: attr ?? '' } : { kind, text: value, line: startLine })
+        surfaces.push(
+          kind === 'jsx-attr'
+            ? { kind, text: value, line: startLine, attr: attr ?? '' }
+            : { kind, text: literalOnly, line: startLine },
+        )
       }
       pushBlank(start, i)
       continue

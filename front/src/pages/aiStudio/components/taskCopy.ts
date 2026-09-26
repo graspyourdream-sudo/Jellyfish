@@ -30,9 +30,9 @@ export const TASK_COPY = {
   },
   scriptExtract: {
     title: '资产提取',
-    runningDescription: '任务完成后会自动刷新资产与对白候选，无需手动刷新页面。',
+    runningDescription: '任务完成后会自动刷新资产与待确认对白，无需手动刷新页面。',
     cancellingDescription: '已发送取消请求，系统会在当前步骤结束后停止，并在结束后自动刷新页面。',
-    successDescription: '资产提取已完成，候选内容已自动刷新。',
+    successDescription: '资产提取已完成，待确认内容已自动刷新。',
     cancelledDescription: '资产提取已取消。',
     failedDescription: '资产提取失败，请稍后重试。',
     startedMessage: '已开始资产提取',
@@ -156,6 +156,9 @@ export const TASK_COPY = {
   },
 } satisfies Record<string, TaskCopyPreset>
 
+// 任务类型的中文口径统一由 components/enumLabels.ts 提供（禁止各页各写一份）
+import { TASK_KIND, labelFor } from './enumLabels.ts'
+
 export const TASK_KIND_TITLE_MAP: Record<string, string> = {
   script_divide: TASK_COPY.chapterDivision.title,
   script_extract: TASK_COPY.scriptExtract.title,
@@ -193,11 +196,24 @@ export const RELATION_TYPE_LABEL_MAP: Record<string, string> = {
   shot_frame_image: '分镜图片',
 }
 
+/**
+ * 任务类型 → 中文标题。
+ *
+ * 审计 §4.4 模式 3：旧兜底 `taskKind.split('_').join(' ')` 会把**未登记的 kind 拼成英文**
+ * 上屏（运行时实测 `video` → 「video」）。现在改走全仓唯一的 `TASK_KIND` 映射表，
+ * 未登记一律给中文兜底「后台任务」，绝不回显原值。
+ */
 export function resolveTaskTitle(taskKind?: string | null): string {
-  if (!taskKind) return '后台任务'
-  return TASK_KIND_TITLE_MAP[taskKind] ?? taskKind.split('_').join(' ')
+  return labelFor(TASK_KIND, taskKind)
 }
 
+/**
+ * 任务来源标签（业务名）。
+ *
+ * 审计 §6.1「任务号一律进技术详情，主区不得出现」：这里原来在拿不到业务名时
+ * **回落渲染 `relationEntityId`**（内部 ID），等于把 UUID 当名称端给用户。
+ * 现在取不到业务名时只说「名称读取中」，任何情况下不落实体 ID。
+ */
 export function resolveTaskSourceLabel(
   relationType?: string | null,
   relationEntityId?: string | null,
@@ -205,5 +221,5 @@ export function resolveTaskSourceLabel(
   if (!relationType) return null
   const label = RELATION_TYPE_LABEL_MAP[relationType] ?? '关联对象'
   if (!relationEntityId) return label
-  return `${label}：${relationEntityId}`
+  return `${label}：名称读取中`
 }

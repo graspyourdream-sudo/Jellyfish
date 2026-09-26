@@ -44,12 +44,20 @@ function snapshot(overrides: Partial<GenerationGateSnapshot> = {}): GenerationGa
 
 /* ------------------------------------------------- 门禁与模型配置分开判断 */
 
-test('模型已配置 + DRY_RUN 开 → 明确说「已配置，被演练门禁阻止」', () => {
+test('模型已配置 + 演练模式 → 主区只说「已配置，当前是演练模式」，原始模型名只进技术详情', () => {
   const info = describeGenerationGate(snapshot(), 'image')
   assert.equal(info.state, 'dry_run')
   assert.match(info.label, /已配置/)
-  assert.match(info.label, /演练门禁/)
-  assert.match(info.description, /gpt-image-2/)
+  // §4.4 模式 3：「门禁」是禁词，改说「演练模式」
+  assert.match(info.label, /演练模式/)
+  assert.doesNotMatch(info.label, /门禁/)
+  // ⚠️ §6.2 反向锁死已改：**原始模型名不许出现在主区**（以前这里断言它必须在）
+  assert.doesNotMatch(info.description, /gpt-image-2/)
+  assert.doesNotMatch(info.description, /deepseek|seedance/)
+  // 原文（模型名 / 演练开关 / 环境变量）改由技术详情层承载
+  assert.match(String(info.technicalDetail), /gpt-image-2/)
+  // 费用说明仍必须在主区：用户要知道这次会不会花钱
+  assert.match(info.description, /不会产生费用|演练/)
 })
 
 test('模型未配置时，即使 DRY_RUN 开着也不能说「能力已配置」', () => {
@@ -64,7 +72,8 @@ test('模型未配置时，即使 DRY_RUN 开着也不能说「能力已配置�
     'image',
   )
   assert.equal(info.state, 'not_configured')
-  assert.equal(info.label, '图片模型未配置')
+  // 口径微调：主区用「还没配置」（更口语），语义不变
+  assert.equal(info.label, '图片模型还没配置')
   assert.doesNotMatch(info.label, /已配置/)
 })
 
@@ -102,10 +111,13 @@ test('未开演练门禁且模型已配置 → ready；缺一次配置读取 →
   assert.equal(describeGenerationGate(snapshot({ loading: true }), 'llm').state, 'loading')
 })
 
-test('读取状态失败不能伪装成「一切正常」', () => {
+test('读取状态失败不能伪装成「一切正常」；原始错误只进技术详情', () => {
   const info = describeGenerationGate(snapshot({ error: 'GET /status 失败（HTTP 500）' }), 'llm')
   assert.equal(info.state, 'unknown')
-  assert.match(info.description, /HTTP 500/)
+  // §4.4 模式 6：主区只给中文结论，路径 / HTTP 状态码收进技术详情
+  assert.doesNotMatch(info.description, /HTTP 500/)
+  assert.doesNotMatch(info.description, /GET \/status/)
+  assert.match(String(info.technicalDetail), /HTTP 500/)
 })
 
 /* ------------------------------------------------- 409 分类 */

@@ -235,7 +235,8 @@ export function useProjectStepSignals(args: {
       const nextAssets: ProjectSignalAsset[] = collectPrimaryLookupTargets(
         (readinessRes?.items ?? []).map((item) => ({
           id: item.asset_id,
-          name: item.name || item.asset_id,
+          // 审计 §4.2 模式 1：这个 name 直接进资产表与步骤摘要，回退成内部编号等于把 UUID 当资产名
+          name: item.name || '未命名资产',
           type: item.asset_type,
           hasImage: item.has_image === true,
           thumbnail: item.thumbnail ?? '',

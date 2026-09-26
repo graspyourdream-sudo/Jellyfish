@@ -16,6 +16,7 @@
  */
 
 import type { ShotReadiness } from './shotReadiness'
+import { FRAME_TYPE, labelFor } from '../../components/enumLabels.ts'
 
 export type ShotStatusKey =
   | 'generating'
@@ -42,17 +43,10 @@ export type ShotStatusText = {
   canExport: boolean
 }
 
-const FRAME_LABELS: Record<string, string> = {
-  first: '首帧',
-  last: '尾帧',
-  key: '关键帧',
-}
-
-/** 帧类型的中文业务名（`first` → 首帧）。 */
+/** 帧类型的中文业务名（`first` → 首帧）。口径来自全仓唯一映射表 `components/enumLabels.ts`。 */
 export function frameTypeLabel(frameType: string): string {
-  const key = String(frameType ?? '').trim().toLowerCase()
-  if (!key) return '参考帧'
-  return FRAME_LABELS[key] ?? `${key} 帧`
+  // 审计 §4.3 模式 3 / R10：旧兜底 `${key} 帧` 会显示「mid 帧」这类原值；改为中文兜底「参考帧」
+  return labelFor(FRAME_TYPE, frameType)
 }
 
 /** 缺失帧 → 「缺少首帧」这类可执行文案（按首→关键→尾排序，读起来像一句话）。 */
@@ -96,7 +90,7 @@ export function resolveShotStatus(input: ShotStatusInput): ShotStatusText {
     return { key: 'generating', label: '生成中', nextAction: '等本次生成结束，或去任务中心查看进度', tone: 'blue', ...base }
   }
   if (input.extractionPending) {
-    return { key: 'pending_candidate', label: '待确认资产候选', nextAction: '去确认提取候选（关联已有资产或新建）', tone: 'gold', ...base }
+    return { key: 'pending_candidate', label: '待确认提取到的资产', nextAction: '去确认待提取到的资产（关联已有资产或新建）', tone: 'gold', ...base }
   }
   if (!readiness.hasPrompt) {
     return { key: 'prompt_todo', label: '待保存视频提示词', nextAction: '写/重新生成提示词并保存到本镜', tone: 'gold', ...base }
@@ -118,8 +112,8 @@ export function resolveShotStatus(input: ShotStatusInput): ShotStatusText {
   if (blockedFrames.length) {
     return {
       key: 'frame_unreachable',
-      label: `${blockedFrames.map(frameTypeLabel).join('、')}供应商取不到`,
-      nextAction: '把帧图片换成公网地址后重新设为该帧，或改用纯文本（text_only）',
+      label: `${blockedFrames.map(frameTypeLabel).join('、')}取不到`,
+      nextAction: '把帧图片换成公网地址后重新设为该帧，或改用纯文本模式',
       tone: 'gold',
       ...base,
     }

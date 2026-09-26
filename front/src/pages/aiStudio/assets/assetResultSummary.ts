@@ -28,6 +28,11 @@
  *      就是这条约束没立住（它落到了「未识别」，一条都没被计入）。
  */
 
+import {
+  ASSET_OUTCOME_PARTIAL_FAILED_DETAIL_TEXT,
+  partialFailureHeadline,
+} from '../components/enumLabels.ts'
+
 /** 与 antd `AlertProps['type']` 完全一致，但本文件不依赖 antd。 */
 export type AssetAlertType = 'success' | 'info' | 'warning' | 'error'
 
@@ -69,7 +74,7 @@ export type AssetCountSource =
 export type NormalizedAssetResult = {
   /** 归一化口径 */
   outcome: AssetResultOutcome
-  /** 原始 status / outcome 文本（原样展示，让用户看到 partial_failed 这种真话） */
+  /** 原始 status / outcome 文本（**只进技术详情**；主区一律用 ASSET_OUTCOME_LABEL 的中文口径） */
   rawStatus: string
   /** 算进哪一档 */
   bucket: AssetResultBucket
@@ -181,12 +186,12 @@ export type DryRunBadge = {
 export function describeDryRunBadge(value: unknown): DryRunBadge {
   const dryRun = coerceLooseBoolean(value)
   if (dryRun === true) {
-    return { state: 'dry_run', color: 'orange', text: 'DRY_RUN 占位（未真实调用）' }
+    return { state: 'dry_run', color: 'orange', text: '演练占位（没有真实调用）' }
   }
   if (dryRun === false) {
     return { state: 'real', color: 'red', text: '真实调用已开启' }
   }
-  return { state: 'unknown', color: 'default', text: '守卫状态未知（未读到 DRY_RUN 标记）' }
+  return { state: 'unknown', color: 'default', text: '状态待确认（没有读到演练开关）' }
 }
 
 /* ------------------------------------------------------------------ 值读取工具 */
@@ -508,16 +513,18 @@ function looksLikeOssFailure(text: string): boolean {
   return PARTIAL_FAILURE_TEXT_MARKERS.some((marker) => lower.includes(marker))
 }
 
-/** 没有上游原文时，给出解释性兜底文案（明确标注「未提供原因」，不伪造细节）。 */
-function fallbackFailureText(outcome: AssetResultOutcome, rawStatus: string): string {
-  const statusText = rawStatus || '未提供'
-  if (outcome === 'partial_failed') {
-    return `上游返回「${statusText}」但没有给出失败原因：图片可能已生成，但 OSS 上传 / 落库没完成（这条结果暂时不能采纳）。`
-  }
-  if (outcome === 'failed') {
-    return `上游返回「${statusText}」但没有给出失败原因，请查看出图服务日志。`
-  }
-  return `上游返回「${statusText}」，没有更多信息。`
+/**
+ * 没有上游原文时，给出解释性兜底文案（明确说「没有给出原因」，不伪造细节）。
+ *
+ * 审计 §6.3 / §5.5-B1：旧实现把**枚举原值拼进中文句子**
+ * （`上游返回「partial_failed」但没有给出失败原因：…`），既违反「枚举原值绝不出现」，
+ * 句尾还带内部口径（OSS 上传 / 落库 / 出图服务日志）。
+ * 现在只按 outcome 给固定的中文结论，原始 status 文本只由技术详情层展示。
+ */
+function fallbackFailureText(outcome: AssetResultOutcome): string {
+  if (outcome === 'partial_failed') return ASSET_OUTCOME_PARTIAL_FAILED_DETAIL_TEXT
+  if (outcome === 'failed') return '生成失败（服务没有给出原因）'
+  return '这一项还没有结果'
 }
 
 /* ------------------------------------------------------------- 逐行归一化 */
@@ -592,7 +599,7 @@ export function normalizeAssetResultRow(row: unknown): NormalizedAssetResult {
           : 'pending'
 
   const hasUpstreamError = upstreamText !== ''
-  const finalText = hasUpstreamError ? upstreamText : isFailure ? fallbackFailureText(outcome, rawStatus) : ''
+  const finalText = hasUpstreamError ? upstreamText : isFailure ? fallbackFailureText(outcome) : ''
 
   return {
     outcome,
@@ -870,8 +877,8 @@ export function summarizeAssetResults(
   if (texts.length === 0 && hasFailure) {
     texts.push(
       hasOssPartialFailure
-        ? '后端只返回了「部分失败」标记，没有给出失败原因：图片可能已生成，但 OSS 上传 / 落库没完成（可查后端日志确认）。'
-        : '后端只返回了失败标记，没有给出失败原因（可查后端日志确认）。',
+        ? ASSET_OUTCOME_PARTIAL_FAILED_DETAIL_TEXT
+        : '生成失败，服务没有给出原因；可以稍后重试，若持续失败请联系管理员。',
     )
   }
   const errorText = texts.join('；')
@@ -889,12 +896,20 @@ export function summarizeAssetResults(
     if (pendingCount > 0) countNotes.push(`${pendingCount} 条处理中`)
     if (dryRunCount > 0) countNotes.push(`${dryRunCount} 条演练占位`)
   }
-  const countsText =
+  /* 审计 §6.3 的批量头部固定模板：一律用「（成功 X/共 Y）」口径，
+     不再输出「成功 X / 失败 Y」这个旧形状（它与「既不算成功也不算失败」的条目语义打架）。 */
+  const countsHeadline =
     countsKnown && total > 0
-      ? countNotes.length > 0
-        ? `成功 ${okCount} / 失败 ${failedCount}，${countNotes.join('、')}（既不算成功也不算失败）`
-        : `成功 ${okCount} / 失败 ${failedCount}`
+      ? okCount === total
+        ? `全部成功（成功 ${okCount}/共 ${total}）`
+        : okCount === 0
+          ? `全部失败（成功 0/共 ${total}）`
+          : partialFailureHeadline(okCount, total)
       : ''
+  const countsText =
+    countsHeadline && countNotes.length > 0
+      ? `${countsHeadline}，${countNotes.join('、')}（既不算成功也不算失败）`
+      : countsHeadline
 
   // —— 标题 / 样式：部分失败必须是 warning，全失败是 error，绝不给绿色成功
   let alertType: AssetAlertType = 'info'
@@ -902,39 +917,38 @@ export function summarizeAssetResults(
   if (countsKnown && total > 0) {
     if (allSucceeded) {
       alertType = 'success'
-      title = `出图完成：成功 ${okCount} / 失败 ${failedCount}`
+      title = `出图完成（成功 ${okCount}/共 ${total}）`
     } else if (okCount > 0 && failedCount > 0) {
       alertType = 'warning'
-      title = `部分失败：成功 ${okCount} / 失败 ${failedCount}`
+      title = `出图部分失败（成功 ${okCount}/共 ${total}）`
     } else if (okCount > 0 && pendingCount > 0) {
       alertType = 'info'
-      title = `部分完成：成功 ${okCount} / 失败 ${failedCount}（另有 ${pendingCount} 条处理中）`
+      title = `部分完成（成功 ${okCount}/共 ${total}，另有 ${pendingCount} 条处理中）`
     } else if (failedCount > 0) {
       alertType = 'error'
       title = hasOssPartialFailure
-        ? `出图未完成：成功 ${okCount} / 失败 ${failedCount}（含图片已生成但 OSS 未就绪的条目）`
-        : `出图失败：成功 ${okCount} / 失败 ${failedCount}`
+        ? `出图未完成（成功 ${okCount}/共 ${total}，含已生成但没成功保存的条目）`
+        : `出图失败（成功 ${okCount}/共 ${total}）`
     } else if (dryRunCount > 0) {
       alertType = 'warning'
-      title = `演练模式：没有真实出图（成功 ${okCount} / 失败 ${failedCount}）`
+      title = `演练模式：没有真实出图（成功 ${okCount}/共 ${total}）`
     } else if (pendingCount > 0) {
       alertType = 'info'
-      title = `出图处理中：成功 ${okCount} / 失败 ${failedCount}（${pendingCount} 条待完成）`
+      title = `出图处理中（成功 ${okCount}/共 ${total}，${pendingCount} 条待完成）`
     } else {
       // 只剩 unknown：既不是成功也不是失败，如实说「状态未知」，绝不冒充成功
       alertType = 'info'
-      title = `状态未知：成功 ${okCount} / 失败 ${failedCount}（${unknownCount} 条无法判断）`
+      title = `状态未知（成功 ${okCount}/共 ${total}，${unknownCount} 条无法判断）`
     }
   } else if (total > 0) {
     alertType = 'info'
-    title = `出图结果：共 ${total} 条（后端未提供成功 / 失败明细）`
+    title = `出图结果：共 ${total} 条（没有拿到成功 / 失败明细）`
   }
 
   // —— 可操作的下一步
   let nextStepText = ''
   if (hasOssPartialFailure || looksLikeOssFailure(errorText)) {
-    nextStepText =
-      '可重试上传；若仍失败请检查 OSS 配置（bucket / AccessKey / 地域 / 写权限）以及后端 OSS 守卫状态。'
+    nextStepText = '可稍后刷新这一项重试；若持续失败，请联系管理员检查长期存储配置。'
   } else if (hasFailure) {
     const authLike =
       httpStatus === 401 ||
@@ -943,33 +957,33 @@ export function summarizeAssetResults(
         errorText,
       )
     nextStepText = authLike
-      ? '这是鉴权 / 权限错误：请检查 OSS AccessKey 与出图服务凭据配置后重试。'
+      ? '这是权限问题：请联系管理员检查长期存储与出图服务的凭据配置后重试。'
       : '可重试出图；若持续失败请查看出图服务状态与项目作用域是否正确。'
   } else if (pendingCount > 0) {
     nextStepText = '仍有任务在跑：稍后刷新查看，或重新查询该任务。'
   } else if (allSucceeded) {
-    nextStepText = '结果可采纳到资产槽位；需要定版时用「采纳并设为定版」。'
+    nextStepText = '结果可以采纳到资产；需要定版时用「采纳并设为定版」。'
   } else if (dryRunCount > 0) {
-    nextStepText = '当前是演练模式：关闭 DRY_RUN 守卫后重试才会真实出图。'
+    nextStepText = '当前是演练模式：改为真实模式后重试才会真实出图。'
   }
 
   // —— Alert description 分行文案
   const detailLines: string[] = []
   if (countsText) {
-    const ossPart = `OSS 长期地址就绪 ${ossReadyCount} 条`
+    const ossPart = `其中 ${ossReadyCount} 条已保存为长期图片`
     detailLines.push(`${countsText}（共 ${total} 条，${ossPart}）`)
   } else if (total > 0) {
-    detailLines.push(`共 ${total} 条（后端未提供成功 / 失败明细）`)
+    detailLines.push(`共 ${total} 条（没有拿到成功 / 失败明细）`)
   }
   if (texts.length > 0) {
     for (const text of texts) detailLines.push(`失败原因：${text}`)
   }
   if (okCount > 0 && !isDryRun && countsKnown && ossReadyCount < okCount) {
     detailLines.push(
-      `注意：成功 ${okCount} 条里有 ${okCount - ossReadyCount} 条没拿到 OSS 长期地址，采纳可能失败（本地 / 临时地址不算长期资产）。`,
+      `注意：成功的 ${okCount} 条里有 ${okCount - ossReadyCount} 条还没保存为长期图片，采纳可能失败（临时地址不算长期资产）。`,
     )
   }
-  if (dryRunCount > 0) detailLines.push(`演练（DRY_RUN）占位结果 ${dryRunCount} 条，不是真实出图。`)
+  if (dryRunCount > 0) detailLines.push(`演练占位结果 ${dryRunCount} 条，不是真实出图。`)
   if (pendingCount > 0 && okCount > 0) detailLines.push(`另有 ${pendingCount} 条仍在处理中。`)
   if (unknownCount > 0) {
     detailLines.push(`另有 ${unknownCount} 条状态未知（后端未给出可判断的信息，既不算成功也不算失败）。`)

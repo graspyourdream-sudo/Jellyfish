@@ -1407,7 +1407,8 @@ export function EpisodeVideoPromptBoard({
         applied += result.applied_count ?? 0
         cleared += result.cleared_draft_count ?? 0
         for (const item of result.results ?? []) {
-          if (!item.applied) failures.push(`${item.code || item.shot_id}：${item.reason}`)
+          // 审计 §4.5 模式 1：回退成镜头编号原值属模式 1；取不到业务名就只说这一镜没写入
+          if (!item.applied) failures.push(`有一镜未写入：${item.reason}`)
         }
         if (result.error) failures.push(result.error)
       }

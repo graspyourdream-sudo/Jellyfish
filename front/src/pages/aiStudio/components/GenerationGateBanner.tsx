@@ -10,6 +10,10 @@ import { Alert, Space, Tag } from 'antd'
 import type { GenerationFailure, GenerationGateInfo, GenerationGateSnapshot } from './generationGate'
 import { classifyGenerationFailure, describeGenerationGate } from './generationGate'
 import type { GenerationOutlet } from './generationGate'
+import { GENERATION_GATE_STATE, labelFor } from './enumLabels.ts'
+import { buildUserFacingMessage } from './userFacingMessage.ts'
+// 阶段 B ①：技术详情折叠壳全仓唯一实现（不再各页自建折叠区）
+import { TechnicalDetailSection } from '../project/ProjectWorkbench/components/workbench/TechnicalDetailCollapse'
 
 type GenerationGateBannerProps = {
   gate: GenerationGateSnapshot
@@ -34,13 +38,20 @@ export function GenerationGateBanner({
   compact = false,
 }: GenerationGateBannerProps) {
   const resolvedFailure = failure ?? (error ? classifyGenerationFailure(error, outlet) : null)
+  /**
+   * 失败分支（审计 §4.4 模式 6）：原来把 `resolvedFailure.reason`（后端原文）
+   * 直接拼进 Alert 的 description。现在主区只留中文结论，
+   * 原文经三级管道后进默认收起的「技术详情」。
+   */
+  const failureView = resolvedFailure !== null ? buildUserFacingMessage(resolvedFailure.reason, '生成失败，请稍后重试') : null
   const info: GenerationGateInfo =
-    resolvedFailure !== null
+    resolvedFailure !== null && failureView
       ? {
           state: resolvedFailure.state,
           tone: resolvedFailure.tone,
           label: resolvedFailure.title,
-          description: `真实原因：${resolvedFailure.reason}`,
+          description: failureView.title,
+          technicalDetail: failureView.detail,
         }
       : describeGenerationGate(gate, outlet, { running, runningText })
 
@@ -58,12 +69,25 @@ export function GenerationGateBanner({
       message={
         <Space size={6} wrap>
           <span className="text-xs font-medium">{info.label}</span>
+          {/* 审计 §4.4 模式 3：这里原来直渲 `状态：{info.state}`，把 ready / dry_run /
+              not_configured 这类英文枚举原值摆到 Alert 主行。改走唯一映射表，未登记值给中文兜底。 */}
           <Tag bordered={false} className="mr-0 text-[10px]">
-            状态：{info.state}
+            状态：{labelFor(GENERATION_GATE_STATE, info.state)}
           </Tag>
         </Space>
       }
-      description={compact ? undefined : <span className="text-xs">{info.description}</span>}
+      description={
+        compact ? undefined : (
+          <div className="space-y-1">
+            <span className="text-xs">{info.description}</span>
+            {info.technicalDetail ? (
+              <TechnicalDetailSection testId={`generation-gate-detail-${outlet}`}>
+                <div className="text-[11px] leading-5 text-gray-600">{info.technicalDetail}</div>
+              </TechnicalDetailSection>
+            ) : null}
+          </div>
+        )
+      }
       style={{ marginBottom: compact ? 0 : 8 }}
     />
   )

@@ -14,6 +14,9 @@
  *      其余 409 是业务冲突，必须显示后端真实原因。
  */
 
+// 阶段 B ④：主区文案统一过三级管道（去 ID → 去内部术语 → 业务化改写）
+import { toUserFacingText } from './userFacingMessage.ts'
+
 export type GenerationOutlet = 'llm' | 'image' | 'video'
 
 export type GenerationGateState =
@@ -52,6 +55,14 @@ export type GenerationGateInfo = {
   label: string
   /** 为什么、怎么放开 */
   description: string
+  /**
+   * **技术详情层**内容（审计 §2.1 第三层）：模型名 / 守卫原文 / 环境变量名 / HTTP 状态码。
+   *
+   * 主区只放业务结论；这些原文由 `GenerationGateBanner` 渲染在**默认收起**的
+   * 「技术详情」里。这样 §4.4「已就绪：图片模型已配置」与 §6.2「原始模型名进技术详情」
+   * 两条口径能同时满足。
+   */
+  technicalDetail?: string
 }
 
 export type GenerationGateSnapshot = {
@@ -106,7 +117,7 @@ export function describeGenerationGate(
       state: 'running',
       tone: 'info',
       label: options.runningText ?? '正在处理…',
-      description: '请求已发出，等待本进程内联执行完成（本环境没有队列 worker，慢是正常的）。',
+      description: '请求已发出，等待本次生成完成；请勿关闭页面。',
     }
   }
 
@@ -114,8 +125,8 @@ export function describeGenerationGate(
     return {
       state: 'loading',
       tone: 'info',
-      label: '正在读取门禁与模型配置…',
-      description: '读取完成后会显示「模型未配置 / 已配置 / 被门禁阻止 / 配置状态无法确认」。',
+      label: '正在读取生成条件…',
+      description: '读取完成后会显示「还没配置 / 已配置 / 演练模式已开启 / 状态无法确认」。',
     }
   }
 
@@ -123,8 +134,9 @@ export function describeGenerationGate(
     return {
       state: 'unknown',
       tone: 'error',
-      label: '门禁与模型配置状态无法确认',
-      description: `读取状态失败：${snapshot.error}`,
+      label: '生成条件状态暂时无法确认',
+      description: '没能读到当前的生成条件，请稍后重试。',
+      technicalDetail: `读取状态失败：${snapshot.error}`,
     }
   }
 
@@ -136,10 +148,11 @@ export function describeGenerationGate(
     return {
       state: 'not_configured',
       tone: 'error',
-      label: `${outletLabel}未配置`,
-      description: `${model.reason} 请先到「模型管理」配置默认${outletLabel}。${
-        snapshot.dryRun ? `（另外：后台当前也处于演练门禁下，${openHint}）` : ''
+      label: `${outletLabel}还没配置`,
+      description: `请先到「模型管理」指定默认${outletLabel}。${
+        snapshot.dryRun ? '另外，后台当前是演练模式。' : ''
       }`,
+      technicalDetail: `${model.reason}${snapshot.dryRun ? `；${openHint}` : ''}`,
     }
   }
 
@@ -148,9 +161,10 @@ export function describeGenerationGate(
       state: 'unknown',
       tone: 'warning',
       label: `${outletLabel}配置状态无法确认`,
-      description: `${model.reason} 在确认之前不把该出口当成「已配置」。${
-        snapshot.dryRun ? `（另外：后台当前也处于演练门禁下，${openHint}）` : ''
+      description: `确认之前不把这个出口当成「已配置」。${
+        snapshot.dryRun ? '另外，后台当前是演练模式。' : ''
       }`,
+      technicalDetail: `${model.reason}${snapshot.dryRun ? `；${openHint}` : ''}`,
     }
   }
 
@@ -158,16 +172,18 @@ export function describeGenerationGate(
     return {
       state: 'dry_run',
       tone: 'warning',
-      label: `${outletLabel}已配置，当前被演练门禁（DRY_RUN）阻止`,
-      description: `${snapshot.guardText || 'DRY_RUN=开'}；已配置${outletLabel}：${model.modelName}。${openHint} 演练模式下不会发起任何真实请求，也不会产生费用。`,
+      label: `${outletLabel}已配置，当前是演练模式`,
+      description: '演练模式下不会发起真实请求，也不会产生费用。',
+      technicalDetail: `${snapshot.guardText || '演练开关=开'}；已配置${outletLabel}：${model.modelName}。${openHint}`,
     }
   }
 
   return {
     state: 'ready',
     tone: 'success',
-    label: `已就绪：${outletLabel} ${model.modelName}，未开启演练门禁`,
-    description: '本操作会发起真实调用。',
+    label: `已就绪：${outletLabel}已经配置好`,
+    description: '本操作会发起真实调用，并产生费用。',
+    technicalDetail: `已配置${outletLabel}：${model.modelName}`,
   }
 }
 
@@ -294,7 +310,7 @@ export function classifyGenerationFailure(error: unknown, outlet: GenerationOutl
     return {
       state: 'dry_run',
       tone: 'warning',
-      title: '被演练门禁（DRY_RUN）阻止，未发起真实请求',
+      title: '当前是演练模式：没有发起真实请求',
       reason: message,
     }
   }
@@ -302,7 +318,7 @@ export function classifyGenerationFailure(error: unknown, outlet: GenerationOutl
     return {
       state: 'conflict',
       tone: 'error',
-      title: '业务冲突（HTTP 409，不是演练门禁）',
+      title: '业务冲突，请检查是否重复提交（原始状态码见「技术详情」）',
       reason: message,
     }
   }
@@ -321,10 +337,19 @@ export function classifyGenerationFailure(error: unknown, outlet: GenerationOutl
   if (status === null) {
     return { state: 'service_error', tone: 'error', title: '请求未送达服务（网络或接口未接通）', reason: message }
   }
-  return { state: 'service_error', tone: 'error', title: `请求失败（HTTP ${status}）`, reason: message }
+  return { state: 'service_error', tone: 'error', title: '请求失败，请稍后重试（原始状态码见「技术详情」）', reason: message }
 }
 
-/** 失败结果的单行文案：标题 + 真实原因。 */
+/**
+ * 失败结果的**单行主区文案**：中文标题 + 业务化后的原因。
+ *
+ * 审计 §7.1-5 把这里列为要「先改管道」的四处之一：`failureText` 的调用点有 6+ 个
+ * （`ChapterStudio.tsx:4545`、`AssetEditPageBase.tsx:814`、`ChaptersTab.tsx:209`、
+ * `AssetProductionArea.tsx:1569/1633` 等），改这一处全部受益。
+ *
+ * 注意：`failure.reason` 本身**保持原样**（它是技术详情层的载体）；
+ * 只有面向用户的这一行过三级管道，避免把后端原文 + `HTTP xxx` 一起弹给用户。
+ */
 export function failureText(failure: GenerationFailure): string {
-  return `${failure.title}：${failure.reason}`
+  return `${failure.title}：${toUserFacingText(failure.reason, '请稍后重试，或展开「技术详情」查看原始信息')}`
 }

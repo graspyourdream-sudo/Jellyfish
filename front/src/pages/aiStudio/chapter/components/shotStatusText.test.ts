@@ -19,11 +19,11 @@ test('有在飞任务 → 生成中（先看任务，不催用户改东西）', 
   assert.equal(status.tone, 'blue')
 })
 
-test('提取候选没确认 → 待确认资产候选（而不是笼统的「待确认」）', () => {
+test('提取候选没确认 → 「待确认提取到的资产」（而不是笼统的「待确认」）', () => {
   const status = resolveShotStatus({ readiness: { ...ready, hasPrompt: false, canGenerate: false, canExport: false }, extractionPending: true })
   assert.equal(status.key, 'pending_candidate')
-  assert.equal(status.label, '待确认资产候选')
-  assert.match(status.nextAction, /确认提取候选/)
+  assert.equal(status.label, '待确认提取到的资产')
+  assert.match(status.nextAction, /确认待提取到的资产/)
 })
 
 test('没有提示词 → 待保存视频提示词', () => {
@@ -56,13 +56,13 @@ test('缺多帧按「首帧 → 关键帧 → 尾帧」读起来像一句话', (
   assert.equal(frameTypeLabel('key'), '关键帧')
 })
 
-test('帧已上传但供应商取不到 → 单独文案，不与「没上传」混为一谈', () => {
+test('帧已上传但当前服务取不到 → 单独文案，不与「没上传」混为一谈', () => {
   const status = resolveShotStatus({
     readiness: { canGenerate: false, canExport: true, hasPrompt: true, hasBoundFiles: true },
     blockedFrames: ['first'],
   })
   assert.equal(status.key, 'frame_unreachable')
-  assert.equal(status.label, '首帧供应商取不到')
+  assert.equal(status.label, '首帧取不到')
   assert.match(status.nextAction, /公网/)
 })
 
@@ -101,7 +101,7 @@ test('任何状态都不再是裸的「待确认」', () => {
   for (const input of inputs) {
     const status = resolveShotStatus(input as Parameters<typeof resolveShotStatus>[0])
     assert.ok(status.label.trim().length > 0)
-    // 「待确认资产候选」是允许的（要求里点名要它）；不允许的是没有任何限定的「待确认」
+    // 「待确认提取到的资产」是允许的（带业务限定的中文）；不允许的是没有任何限定的「待确认」
     assert.notEqual(status.label.trim(), '待确认')
     assert.ok(status.nextAction.trim().length > 0, `状态「${status.label}」必须带下一步指引`)
   }

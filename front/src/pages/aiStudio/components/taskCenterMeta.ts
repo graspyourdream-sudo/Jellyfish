@@ -60,7 +60,7 @@ async function resolveTaskMeta(task: TaskUiItem): Promise<ResolvedTaskMeta | nul
     const chapter = res.data
     if (!chapter) return null
     return {
-      sourceLabel: chapter.title ? `章节：${chapter.title}` : `章节：${relationEntityId}`,
+      sourceLabel: chapter.title ? `章节：${chapter.title}` : '章节：名称读取中',
       navigateTo: getChapterShotsPath(chapter.project_id, chapter.id),
     }
   }
@@ -77,14 +77,12 @@ async function resolveTaskMeta(task: TaskUiItem): Promise<ResolvedTaskMeta | nul
     const chapter = chapterRes.data
     if (!chapter) {
       return {
-        sourceLabel: shot.title ? `镜头：${shot.title}` : `镜头：${relationEntityId}`,
+        sourceLabel: shot.title ? `镜头：${shot.title}` : '镜头：名称读取中',
         navigateTo: null,
       }
     }
     return {
-      sourceLabel: shot.title
-        ? `镜头：${shot.title}（第 ${shot.index} 镜）`
-        : `镜头：${relationEntityId}`,
+      sourceLabel: shot.title ? `镜头：${shot.title}（第 ${shot.index} 镜）` : '镜头：名称读取中',
       navigateTo: getChapterStudioPath(chapter.project_id, chapter.id),
     }
   }
@@ -119,7 +117,7 @@ async function resolveTaskMeta(task: TaskUiItem): Promise<ResolvedTaskMeta | nul
                 ? `/assets/props/${relationEntityId}/edit`
                 : `/assets/costumes/${relationEntityId}/edit`
       return {
-        sourceLabel: name ? `${labelPrefix}：${name}` : `${labelPrefix}：${relationEntityId}`,
+        sourceLabel: name ? `${labelPrefix}：${name}` : `${labelPrefix}：名称读取中`,
         navigateTo,
       }
     } catch {
@@ -134,7 +132,7 @@ async function resolveTaskMeta(task: TaskUiItem): Promise<ResolvedTaskMeta | nul
                 ? `/assets/props/${relationEntityId}/edit`
                 : `/assets/costumes/${relationEntityId}/edit`
       return {
-        sourceLabel: `${relationType}：${relationEntityId}`,
+        sourceLabel: `${relationType}：名称读取中`,
         navigateTo,
       }
     }
@@ -159,12 +157,12 @@ async function resolveTaskMeta(task: TaskUiItem): Promise<ResolvedTaskMeta | nul
               ? '道具'
               : '服装'
       return {
-        sourceLabel: name ? `${labelPrefix}：${name}` : `${labelPrefix}：${assetId}`,
+        sourceLabel: name ? `${labelPrefix}：${name}` : `${labelPrefix}：名称读取中`,
         navigateTo: buildPath(assetId),
       }
     } catch {
       return {
-        sourceLabel: `${assetRelationType}：${assetId}`,
+        sourceLabel: '关联对象：名称读取中',
         navigateTo: buildPath(assetId),
       }
     }

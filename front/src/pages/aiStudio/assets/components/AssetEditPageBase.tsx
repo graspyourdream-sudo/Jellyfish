@@ -68,7 +68,12 @@ import {
   isGlobalAssetType,
 } from '../../project/ProjectWorkbench/components/assetWriteScope.ts'
 import { buildRequestStructureText } from '../../project/ProjectWorkbench/components/assetGenerationBasis.ts'
-import { ASSET_OUTCOME_TAG_COLOR, normalizeAssetResultRow, summarizeAssetResults } from '../assetResultSummary'
+import {
+  ASSET_OUTCOME_LABEL,
+  ASSET_OUTCOME_TAG_COLOR,
+  normalizeAssetResultRow,
+  summarizeAssetResults,
+} from '../assetResultSummary'
 import { DisplayImageCard } from './DisplayImageCard'
 import { ProjectVisualStyleAndStyleFields } from '../../project/ProjectVisualStyleAndStyleFields'
 import { useProjectStyleOptions } from '../../project/useProjectStyleOptions'
@@ -2152,9 +2157,10 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             type={singleGenSummary.alertType}
             showIcon
             message={
-              singleGenResult?.status
-                ? `${singleGenSummary.title}｜后端状态：${singleGenResult.status}`
-                : singleGenSummary.title
+              /* 审计 §6.3 / §5.5-B5：这里原来拼「后端状态：succeeded/partial_failed」，
+                 枚举原值直渲。主区只留 summarizeAssetResults 给出的中文结论，
+                 原始值改由下方的「技术详情」块展示。 */
+              singleGenSummary.title
             }
             description={
               <div className="space-y-1">
@@ -2191,7 +2197,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
               type="info"
               showIcon
               message="没有可采纳的图片地址"
-              description="OSS 地址为空时无法采纳入库；若上游图片其实已生成（partial_failed），需要先让出图服务把图成功上传到 OSS，或按上面的提示重试上传。"
+              description="没有拿到可以采纳的图片地址。如果图其实已经生成、只是没保存成功，按上面的提示稍后重试即可；持续失败请联系管理员。"
             />
           )}
           <div className="text-[11px] text-gray-500 break-all">{singleGenResult?.url}</div>
@@ -2309,9 +2315,16 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                     </div>
                     <div>
                       status：
-                      <Tag color={ASSET_OUTCOME_TAG_COLOR[normalized.outcome]}>{normalized.rawStatus || '未知'}</Tag>
+                      {/* 审计 §6.3 / §5.5-B5：原来直渲 `normalized.rawStatus`（succeeded / partial_failed
+                          / dry_run 原值）。主区一律用 ASSET_OUTCOME_LABEL 的中文口径；
+                          原始 status 与任务号一起挪到下面默认收起的「技术详情」里。 */}
+                      <Tag color={ASSET_OUTCOME_TAG_COLOR[normalized.outcome]}>
+                        {ASSET_OUTCOME_LABEL[normalized.outcome]}
+                      </Tag>
                       {normalized.outcome === 'partial_failed' ? (
-                        <span className="text-xs text-orange-600">部分失败：图片已生成，但 OSS 上传未完成</span>
+                        <span className="text-xs text-orange-600">
+                          部分失败：图片已生成，但没能保存成长期图片，暂时不能采纳
+                        </span>
                       ) : null}
                       <span className="text-xs text-gray-400">{row.source_asset_id}</span>
                     </div>

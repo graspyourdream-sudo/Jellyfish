@@ -29,7 +29,7 @@ import {
 
 /* ------------------------------------------------------------------ ① 全成功 */
 
-test('全成功：绿色成功 + 成功 1 / 失败 0', () => {
+test('全成功：绿色成功 + 「全部成功（成功 1/共 1）」（§6.3 新口径）', () => {
   const summary = summarizeAssetResults(
     [{ status: 'succeeded', ok: true, oss_url: 'https://oss.example.com/a.png' }],
     { summary: { total: 1, by_status: { succeeded: 1 }, oss_ready: 1 } },
@@ -38,7 +38,7 @@ test('全成功：绿色成功 + 成功 1 / 失败 0', () => {
   assert.equal(summary.alertType, 'success')
   assert.equal(summary.okCount, 1)
   assert.equal(summary.failedCount, 0)
-  assert.equal(summary.countsText, '成功 1 / 失败 0')
+  assert.equal(summary.countsText, '全部成功（成功 1/共 1）')
   assert.equal(summary.allSucceeded, true)
   assert.equal(summary.allFailed, false)
   assert.equal(summary.hasFailure, false)
@@ -48,14 +48,14 @@ test('全成功：绿色成功 + 成功 1 / 失败 0', () => {
 
 /* ------------------------------------------------------------------ ② 全失败 */
 
-test('全失败：error 样式 + 成功 0 / 失败 1，并保留上游原因', () => {
+test('全失败：error 样式 + 「全部失败（成功 0/共 1）」，并保留上游原因', () => {
   const summary = summarizeAssetResults(
     [{ status: 'failed', ok: false, message: '出图服务返回 500' }],
     { summary: { total: 1, by_status: { failed: 1 }, oss_ready: 0 } },
   )
 
   assert.equal(summary.alertType, 'error')
-  assert.equal(summary.countsText, '成功 0 / 失败 1')
+  assert.equal(summary.countsText, '全部失败（成功 0/共 1）')
   assert.equal(summary.allFailed, true)
   assert.equal(summary.errorText, '出图服务返回 500')
   assert.equal(summary.hasUpstreamError, true)
@@ -79,17 +79,17 @@ test('partial_failed 单条：绝不是绿色成功，必须说清「图片已�
   assert.equal(summary.alertType, 'error')
   assert.equal(summary.okCount, 0)
   assert.equal(summary.failedCount, 1)
-  assert.equal(summary.countsText, '成功 0 / 失败 1')
+  assert.equal(summary.countsText, '全部失败（成功 0/共 1）')
   assert.equal(summary.hasPartialFailure, true)
   assert.equal(summary.hasOssPartialFailure, true)
   // 真实原因原文可见，且带上了 HTTP 403
   assert.equal(summary.errorText, 'OSS upload failed: HTTP 403')
   assert.equal(summary.httpStatus, 403)
-  assert.match(summary.nextStepText, /重试上传/)
-  assert.match(summary.nextStepText, /OSS 配置/)
+  assert.match(summary.nextStepText, /稍后刷新这一项重试/)
+  assert.match(summary.nextStepText, /长期存储配置/)
 })
 
-test('成功与失败混合：warning（不是 success），且同时显示成功数与失败数', () => {
+test('成功与失败混合：warning（不是 success），且「部分失败（成功 X/共 Y）」两数齐全', () => {
   const summary = summarizeAssetResults(
     [
       { status: 'succeeded', ok: true, oss_url: 'https://oss.example.com/1.png' },
@@ -102,8 +102,8 @@ test('成功与失败混合：warning（不是 success），且同时显示成�
   assert.equal(summary.okCount, 1)
   assert.equal(summary.failedCount, 1)
   // 有成功条目时必须同时报出成功数和失败数，不能只报失败或只报总数
-  assert.equal(summary.countsText, '成功 1 / 失败 1')
-  assert.match(summary.title, /成功 1 \/ 失败 1/)
+  assert.equal(summary.countsText, '部分失败（成功 1/共 2）')
+  assert.match(summary.title, /部分失败（成功 1\/共 2）/)
   assert.equal(summary.allSucceeded, false)
   assert.equal(summary.hasPartialFailure, true)
 })
@@ -135,13 +135,14 @@ test('只有老形状 by_status（无 results）：按 by_status 计数，且认
   assert.equal(summary.countSource, 'by_status')
   assert.equal(summary.okCount, 0)
   assert.equal(summary.failedCount, 1)
-  assert.equal(summary.countsText, '成功 0 / 失败 1')
+  assert.equal(summary.countsText, '全部失败（成功 0/共 1）')
   assert.notEqual(summary.alertType, 'success')
   assert.equal(summary.alertType, 'error')
   // 老形状没有 message：必须明确标出这是「部分失败」，并给出 OSS 排查提示
   assert.equal(summary.hasOssPartialFailure, true)
-  assert.match(summary.errorText, /部分失败/)
-  assert.match(summary.nextStepText, /OSS 配置/)
+  // 新口径（§6.3）：不再拼枚举原值，改用固定中文句
+  assert.match(summary.errorText, /没完成长期存储/)
+  assert.match(summary.nextStepText, /长期存储配置/)
 })
 
 test('老形状 by_status 混合：成功数与失败数都来自 by_status', () => {
@@ -152,7 +153,7 @@ test('老形状 by_status 混合：成功数与失败数都来自 by_status', ()
   assert.equal(summary.countSource, 'by_status')
   assert.equal(summary.okCount, 3)
   assert.equal(summary.failedCount, 1)
-  assert.equal(summary.countsText, '成功 3 / 失败 1')
+  assert.equal(summary.countsText, '部分失败（成功 3/共 4）')
   assert.equal(summary.alertType, 'warning')
   assert.equal(summary.ossReadyCount, 3) // 老字段 oss_ready 是整数计数
 })
@@ -168,7 +169,7 @@ test('只有新形状（整数计数 + 归一化 outcome）：优先使用新字
   assert.equal(summary.okCount, 2)
   assert.equal(summary.failedCount, 1)
   assert.equal(summary.ossReadyCount, 2)
-  assert.equal(summary.countsText, '成功 2 / 失败 1')
+  assert.equal(summary.countsText, '部分失败（成功 2/共 3）')
   assert.equal(summary.alertType, 'warning')
   assert.equal(summary.hasOssPartialFailure, true)
 })
@@ -193,10 +194,10 @@ test('新字段缺失时逐级回退到 results，再回退到 total，不白屏
   // 从 results 回退
   const fromRows = summarizeAssetResults([{ status: 'succeeded' }, { status: 'failed' }], { summary: {} })
   assert.equal(fromRows.countSource, 'results')
-  assert.equal(fromRows.countsText, '成功 1 / 失败 1')
+  assert.equal(fromRows.countsText, '部分失败（成功 1/共 2）')
   assert.equal(fromRows.alertType, 'warning')
 
-  // 只有 total：明确说「未提供成功/失败明细」，不编造数字
+  // 只有 total：明确说「没有拿到成功/失败明细」，不编造数字
   const totalOnly = summarizeAssetResults([], { summary: { total: 2 } })
   assert.equal(totalOnly.countSource, 'total_only')
   assert.equal(totalOnly.total, 2)
@@ -204,7 +205,7 @@ test('新字段缺失时逐级回退到 results，再回退到 total，不白屏
   assert.equal(totalOnly.countsText, '')
   assert.equal(totalOnly.alertType, 'info')
   assert.match(totalOnly.title, /共 2 条/)
-  assert.match(totalOnly.detailLines.join('\n'), /未提供成功 \/ 失败明细/)
+  assert.match(totalOnly.detailLines.join('\n'), /没有拿到成功 \/ 失败明细/)
 
   // 什么都没有：也不能崩
   const empty = summarizeAssetResults(undefined)
@@ -229,7 +230,7 @@ test('汇总字段与明细对账：汇总说失败 0、明细有失败时，按
 
 /* ------------------------------------------------------- ⑥ 错误消息缺失 */
 
-test('错误消息缺失：明确说「未提供失败原因」，不静默成空 Alert', () => {
+test('错误消息缺失：给出 §6.3 的固定中文口径，不静默成空 Alert', () => {
   const summary = summarizeAssetResults(
     [{ status: 'partial_failed', ok: true }],
     { summary: { total: 1, by_status: { partial_failed: 1 }, oss_ready: 0 } },
@@ -237,10 +238,10 @@ test('错误消息缺失：明确说「未提供失败原因」，不静默成�
 
   assert.equal(summary.alertType, 'error')
   assert.equal(summary.hasUpstreamError, false)
-  assert.match(summary.errorText, /没有给出失败原因/)
-  // 兜底文案仍要说清「图片可能已生成」，不能只剩一句空话
-  assert.match(summary.errorText, /图片可能已生成/)
-  assert.match(summary.nextStepText, /重试上传/)
+  assert.match(summary.errorText, /没完成长期存储/)
+  // 兜底文案仍要说清「图已生成、只是没保存成功」，不能只剩一句空话
+  assert.match(summary.errorText, /图已生成/)
+  assert.match(summary.nextStepText, /稍后刷新这一项重试/)
 })
 
 test('summary.total 与 results 长度不一致时取较大值，且计数仍自洽', () => {
@@ -249,7 +250,7 @@ test('summary.total 与 results 长度不一致时取较大值，且计数仍自
   assert.equal(summary.total, 3)
   assert.equal(summary.okCount, 3)
   assert.equal(summary.failedCount, 0)
-  assert.equal(summary.countsText, '成功 3 / 失败 0')
+  assert.equal(summary.countsText, '全部成功（成功 3/共 3）')
 })
 
 /* ------------------------------------------- ⑦ detail.error_message 优先级 */
@@ -327,21 +328,21 @@ test('硬约束：有成功条目时 detailLines 一定同时含成功数与失�
     { summary: { total: 2, by_status: { succeeded: 1, failed: 1 } } },
   )
   const lines = summary.detailLines.join('\n')
-  assert.match(lines, /成功 1/)
-  assert.match(lines, /失败 1/)
+  // 新口径（§6.3）：成功数与总数必须在同一句里出现，用户才能算出失败了几条
+  assert.match(lines, /部分失败（成功 1\/共 2）/)
 })
 
-test('成功但 OSS 未就绪时给出提醒（本地/临时地址不算长期资产）', () => {
+test('成功但长期图片未就绪时给出提醒（临时地址不算长期资产）', () => {
   const summary = summarizeAssetResults([{ status: 'succeeded', image_url: 'http://image-service/x.png' }], {
     summary: { total: 1, by_status: { succeeded: 1 }, oss_ready: 0 },
   })
 
   assert.equal(summary.alertType, 'success') // 状态本身确实成功
   assert.equal(summary.ossReadyCount, 0)
-  assert.match(summary.detailLines.join('\n'), /没拿到 OSS 长期地址/)
+  assert.match(summary.detailLines.join('\n'), /还没保存为长期图片/)
 })
 
-test('DRY_RUN 占位不算成功也不算失败，且给出 warning 而不是绿色成功', () => {
+test('演练占位不算成功也不算失败，且给出 warning 而不是绿色成功', () => {
   const summary = summarizeAssetResults([{ status: 'dry_run', dry_run: true }], {
     summary: { total: 1, by_status: { dry_run: 1 }, oss_ready: 0, dry_run: true },
   })
@@ -351,7 +352,8 @@ test('DRY_RUN 占位不算成功也不算失败，且给出 warning 而不是绿
   assert.equal(summary.failedCount, 0)
   assert.equal(summary.isDryRun, true)
   assert.match(summary.title, /演练模式/)
-  assert.match(summary.nextStepText, /DRY_RUN/)
+  // §4.4/§4.6：主区不再出现 DRY_RUN，改说「演练模式 / 真实模式」
+  assert.match(summary.nextStepText, /演练模式/)
 })
 
 /* ==================================================================
@@ -413,7 +415,7 @@ test('describeDryRunBadge：dry_run 为布尔时 Tag 正确（true=演练 / fals
   const dry = describeDryRunBadge(true)
   assert.equal(dry.state, 'dry_run')
   assert.equal(dry.color, 'orange')
-  assert.match(dry.text, /DRY_RUN/)
+  assert.match(dry.text, /演练/)
 
   const real = describeDryRunBadge(false)
   assert.equal(real.state, 'real')
@@ -429,14 +431,15 @@ test('describeDryRunBadge：整数 / 字符串开关也按真值判断（不能�
   assert.equal(describeDryRunBadge('false').state, 'real')
 })
 
-test('describeDryRunBadge：读不到时是「未知」，绝不谎报「真实调用已开启」（GuardTag 无参调用的回归锁）', () => {
+test('describeDryRunBadge：读不到时是「状态待确认」，绝不谎报「真实调用已开启」（GuardTag 无参调用的回归锁）', () => {
   for (const missing of [undefined, null, '', 'maybe']) {
     const badge = describeDryRunBadge(missing)
     assert.equal(badge.state, 'unknown', `输入 ${JSON.stringify(missing)} 不该判成演练或真实`)
     assert.equal(badge.color, 'default')
-    assert.match(badge.text, /未知/)
+    // 口径已去开发术语（§4.6）：不再写 DRY_RUN / 守卫，改「状态待确认」
+    assert.match(badge.text, /状态待确认/)
     assert.doesNotMatch(badge.text, /真实调用已开启/)
-    assert.doesNotMatch(badge.text, /DRY_RUN 占位/)
+    assert.doesNotMatch(badge.text, /演练占位/)
   }
 })
 
@@ -497,7 +500,7 @@ test('出图提交：状态列不绿 + 计数两个数都在 + 失败原因取�
   assert.equal(summary.countsKnown, true)
   assert.equal(summary.okCount, 0)
   assert.equal(summary.failedCount, 1)
-  assert.equal(summary.countsText, '成功 0 / 失败 1')
+  assert.equal(summary.countsText, '全部失败（成功 0/共 1）')
 
   // 失败原因取自 detail.error_message（而不是被丢掉的 message）
   assert.equal(summary.errorText, '图片已生成，但 OSS 上传返回 HTTP 403')
@@ -509,7 +512,7 @@ test('出图提交：状态列不绿 + 计数两个数都在 + 失败原因取�
   assert.equal(summary.isDryRun, true)
 })
 
-test('出图提交：有成功有失败时「成功 X / 失败 Y」两个数必须同时出现', () => {
+test('出图提交：有成功有失败时「部分失败（成功 X/共 Y）」两个数必须同时出现', () => {
   const results = [
     { source_asset_id: 'a1', service_task_id: 't1', status: 'succeeded', oss_url: 'https://oss.example.com/1.png' },
     { source_asset_id: 'a2', service_task_id: 't2', status: 'succeeded', oss_url: 'https://oss.example.com/2.png' },
@@ -524,11 +527,11 @@ test('出图提交：有成功有失败时「成功 X / 失败 Y」两个数必�
 
   assert.equal(summary.okCount, 2)
   assert.equal(summary.failedCount, 1)
-  assert.equal(summary.countsText, '成功 2 / 失败 1')
+  assert.equal(summary.countsText, '部分失败（成功 2/共 3）')
   assert.equal(summary.alertType, 'warning')
   const lines = summary.detailLines.join('\n')
-  assert.match(lines, /成功 2/)
-  assert.match(lines, /失败 1/)
+  // 新口径（§6.3）：同上
+  assert.match(lines, /部分失败（成功 2\/共 3）/)
   assert.match(lines, /HTTP 403/)
 })
 
@@ -547,9 +550,9 @@ test('出视频提交（单条）：partial_failed 不是绿色，且带真实�
   const summary = summarizeSingleAssetResult(data, { payload: data })
 
   assert.notEqual(summary.alertType, 'success')
-  assert.equal(summary.countsText, '成功 0 / 失败 1')
+  assert.equal(summary.countsText, '全部失败（成功 0/共 1）')
   assert.equal(summary.errorText, 'OSS upload failed: HTTP 403')
-  assert.match(summary.nextStepText, /重试上传/)
+  assert.match(summary.nextStepText, /稍后刷新这一项重试/)
   assert.equal(ASSET_OUTCOME_TAG_COLOR[normalizeAssetResultRow(data).outcome], ASSET_OUTCOME_TAG_COLOR.partial_failed)
 })
 
@@ -558,7 +561,7 @@ test('出图提交：results 全成功时才是绿色成功', () => {
   const summary = summarizeAssetResults(results, { summary: { total: 1, by_status: { succeeded: 1 }, oss_ready: 1, dry_run: false } })
 
   assert.equal(summary.alertType, 'success')
-  assert.equal(summary.countsText, '成功 1 / 失败 0')
+  assert.equal(summary.countsText, '全部成功（成功 1/共 1）')
   assert.equal(describeDryRunBadge(readLooseBoolean({ dry_run: false }, ['dry_run'])).state, 'real')
 })
 
@@ -605,7 +608,7 @@ test('新形状 by_outcome 作为回退（没有整数计数时）', () => {
   assert.equal(summary.countSource, 'by_outcome')
   assert.equal(summary.okCount, 2)
   assert.equal(summary.failedCount, 1)
-  assert.equal(summary.countsText, '成功 2 / 失败 1')
+  assert.equal(summary.countsText, '部分失败（成功 2/共 3）')
   assert.equal(summary.alertType, 'warning')
   assert.equal(summary.hasOssPartialFailure, true)
 })
@@ -654,14 +657,14 @@ test('复刻后端真实 summary（partial_failed 场景）：计数、原因、
   assert.equal(summary.failedCount, 1)
   assert.equal(summary.unknownCount, 0)
   assert.equal(summary.ossReadyCount, 0)
-  assert.equal(summary.countsText, '成功 0 / 失败 1')
+  assert.equal(summary.countsText, '全部失败（成功 0/共 1）')
   assert.equal(summary.alertType, 'error')
   assert.notEqual(summary.alertType, 'success')
   assert.equal(summary.hasOssPartialFailure, true)
   assert.equal(summary.httpStatus, 403)
   assert.match(summary.errorText, /HTTP 403/)
-  assert.match(summary.nextStepText, /重试上传/)
-  assert.match(summary.nextStepText, /OSS 配置/)
+  assert.match(summary.nextStepText, /稍后刷新这一项重试/)
+  assert.match(summary.nextStepText, /长期存储配置/)
 })
 
 test('仅靠 by_outcome + partial_failed_count 也能识别部分失败（聚合 outcome 是 failed 时）', () => {
@@ -669,7 +672,7 @@ test('仅靠 by_outcome + partial_failed_count 也能识别部分失败（聚合
     summary: { total: 1, outcome: 'failed', by_outcome: { partial_failed: 1 }, partial_failed_count: 1 },
   })
   assert.equal(summary.hasOssPartialFailure, true)
-  assert.match(summary.nextStepText, /重试上传/)
+  assert.match(summary.nextStepText, /稍后刷新这一项重试/)
   assert.equal(summary.failedCount, 1)
 })
 
@@ -741,7 +744,7 @@ function explainsNonOkNonFailed(summary: {
   countsText: string
   detailLines: string[]
 }): boolean {
-  if (!summary.countsKnown) return true // 已明确告知「后端未提供成功 / 失败明细」
+  if (!summary.countsKnown) return true // 已明确告知「没有拿到成功 / 失败明细」
   const text = `${summary.title}｜${summary.countsText}｜${summary.detailLines.join('｜')}`
   return /未识别|未知|无法判断|处理中|待完成|演练|未提供|没有给出/.test(text)
 }
@@ -758,7 +761,7 @@ test('裸 `partial` 必须按「部分失败」算：不再显示成成功 0 / �
   assert.equal(summary.okCount, 0)
   assert.equal(summary.failedCount, 1)
   assert.notEqual(summary.countsText, '成功 0 / 失败 0')
-  assert.equal(summary.countsText, '成功 0 / 失败 1')
+  assert.equal(summary.countsText, '全部失败（成功 0/共 1）')
   assert.equal(summary.hasFailure, true)
   assert.equal(summary.alertType, 'error')
   assert.notEqual(summary.alertType, 'success')

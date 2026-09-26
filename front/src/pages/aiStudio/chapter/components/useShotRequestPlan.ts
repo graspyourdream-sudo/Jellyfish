@@ -9,6 +9,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { message } from 'antd'
+import { REFERENCE_MODE, labelFor, videoModelBusinessName as videoModelBusinessNameShared } from '../../components/enumLabels.ts'
+import { toUserFacingText } from '../../components/userFacingMessage.ts'
+import { frameTypeLabel } from './shotStatusText.ts'
 import {
   persistGeneratedVideo,
   previewPromptDelivery,
@@ -34,35 +37,22 @@ export const REFERENCE_MODE_OPTIONS = [
   { value: 'first_last_key', label: '首帧 + 尾帧 + 关键帧' },
 ] as const
 
-const REFERENCE_MODE_LABELS: Record<string, string> = {
-  text_only: '纯文本（不用参考帧）',
-  first: '首帧',
-  last: '尾帧',
-  key: '关键帧',
-  first_last: '首帧 + 尾帧',
-  first_last_key: '首帧 + 尾帧 + 关键帧',
-}
-
 export function referenceModeLabel(mode: string | null | undefined): string {
   const key = String(mode ?? '').trim()
+  // 审计 §4.3 模式 3：旧兜底 `?? key` 会把未登记参考方式原样上屏；改为中文兜底
   if (!key) return '未设置'
-  return REFERENCE_MODE_LABELS[key] ?? key
+  return labelFor(REFERENCE_MODE, key)
 }
 
 /**
- * 模型方案的**业务名称**。
+ * 模型方案的**业务名称**（审计 §6.2）。
  *
- * 固定策略是 `seedance-2.0-mini`（见后端 `video_submit.PINNED_VIDEO_MODEL`），
- * 页面上不该让用户读模型 ID；供应商名、原始模型名、分辨率档位属于技术详情。
+ * 口径已收敛到全仓唯一映射表 `components/enumLabels.ts`：
+ * 原始 provider / 模型 ID / 模型名一律只进技术详情，主区只说「当前视频方案」。
+ * 与旧实现的关键区别：旧兜底 `?? key` 会把**未登记的模型名原样上屏**（模式 5 泄漏）。
  */
-const VIDEO_MODEL_BUSINESS_NAMES: Record<string, string> = {
-  'seedance-2.0-mini': '短视频标准方案（Seedance 2.0 Mini）',
-}
-
 export function videoModelBusinessName(modelName: string | null | undefined): string {
-  const key = String(modelName ?? '').trim()
-  if (!key) return '未解析'
-  return VIDEO_MODEL_BUSINESS_NAMES[key] ?? key
+  return videoModelBusinessNameShared(modelName)
 }
 
 /**
@@ -188,7 +178,7 @@ export function useShotRequestPlan(args: {
     if (plan?.generation_blocked) {
       list.push({
         key: 'frames',
-        text: `视频请求缺少参考方式「${referenceModeLabel(plan.reference_mode)}」要求的帧：${(plan.missing_frame_types ?? []).join('、')}（到「资产与参考帧」补齐或换参考方式）`,
+        text: `视频请求缺少参考方式「${referenceModeLabel(plan.reference_mode)}」要求的帧：${(plan.missing_frame_types ?? []).map((item: string) => frameTypeLabel(item)).join('、')}（到「资产与参考帧」补齐或换参考方式）`,
       })
     }
     if (!audioFile) {
@@ -199,10 +189,13 @@ export function useShotRequestPlan(args: {
 
   const generateBlockedReason = useMemo(() => {
     if (!plan) return '生成计划尚未就绪：等计划加载完成后再生成（页面已自动预检）。'
-    if (plan.generation_blocked) return plan.blocked_reason || '当前参考方式缺少必需帧，已阻止生成。'
+    // 审计 §4.3 模式 6：`blocked_reason` 是后端原文，先过三级管道再上主区
+    if (plan.generation_blocked) {
+      return toUserFacingText(plan.blocked_reason, '当前参考方式缺少必需帧，已阻止生成。')
+    }
     if (hasVendorUnusableFrame(plan)) {
-      return '参考帧供应商无法访问：帧文件是本机/相对地址，只能解析成本机 data URL，'
-        + '而当前供应商只接受公网地址。请把帧图片放到公网后重新设为该帧，或改用纯文本。'
+      // 审计 §4.3 模式 5：这句会渲染在生成区 Alert + 经 :215 进 toast，主区不许出现「供应商」
+      return '参考图目前取不到：这张图只存在本机，上传到公网地址后再设为该帧，或改用纯文本模式。'
     }
     if (!savedPrompt.trim()) return '本镜还没有已保存的提示词：先保存提示词再生成（生成读的就是这一份）。'
     return ''
@@ -229,19 +222,25 @@ export function useShotRequestPlan(args: {
         timeout_seconds: 900,
       })
       if (result.status === 'dry_run') {
-        message.info('演练模式（DRY_RUN）：只展示计划，不会产生正式视频，也未写入任何库', 6)
+        message.info('演练模式：没有真实生成、没有产生费用，也不会写入任何数据。', 6)
         return
       }
       if (result.status !== 'completed' || !result.url) {
-        message.error(result.error || `视频生成未完成（status=${result.status}）`)
+        message.error(toUserFacingText(result.error, '视频没有生成出来，请重试'))
         return
       }
       const fileId = await persistGeneratedVideo(shotId, result.url, '镜头视频（直提）')
-      message.success(`已生成并挂到本镜（file_id=${fileId}）`)
+      // 审计 §4.3 模式 1：这里原来直接 `file_id=${fileId}`，正是 maskInternalIds 设计来处理、
+      // 同文件却没用上的场景。内部编号只进「技术详情」。
+      message.success(
+        fileId
+          ? '视频已生成并挂到本镜（内部编号见「技术详情」）'
+          : '视频已生成并挂到本镜',
+      )
       await reloadRow()
       await onGenerated?.()
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '生成失败')
+      message.error(toUserFacingText(error, '生成失败，请稍后重试'))
     } finally {
       setGenerating(false)
     }
