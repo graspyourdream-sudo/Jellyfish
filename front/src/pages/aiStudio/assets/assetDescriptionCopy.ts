@@ -51,11 +51,43 @@ const DESCRIPTION_FIELD_LABELS: Readonly<Record<string, string>> = {
  *   2. **`snake_case` 连写**：`visual_focus`、`continuity_note`。
  *
  * 只裸一个英文单词（没反引号、没下划线）**不算** —— 中文描述里正常出现英文词不该被改写。
+ * ⚠️ **例外见下面 `BARE_FIELD_WORD_RE`**：如果那个裸词是**已登记的字段名**（`segments` / `shots` …），
+ * 它就是要换掉的那种泄漏（阶段 B 收尾的运行时实测抓到了这一形态）。
  */
 const FIELD_TOKEN_RE = /`[a-z][a-z0-9_]*`|(?<![A-Za-z0-9_`])[a-z][a-z0-9]{2,}(?:_[a-z0-9]{2,})+(?![A-Za-z0-9_`])/g
 /** 同一个口径的**不带 `g`** 版本（`test` 不共享 `lastIndex`，避免状态串味）。 */
 const HAS_FIELD_TOKEN_RE =
   /`[a-z][a-z0-9_]*`|(?<![A-Za-z0-9_`])[a-z][a-z0-9]{2,}(?:_[a-z0-9]{2,})+(?![A-Za-z0-9_`])/
+
+/**
+ * **裸词形态**的已登记字段名（没有反引号、也没有下划线）——但**只在中文语境里**换。
+ *
+ * 为什么必须补这一条（阶段 B 收尾**运行时实测**发现的漏网）：后端同一份自动描述里还有这种写法 ——
+ * `上下文判断来自segments和shots中林希进入、系统激活…等关键情节。`
+ * 上面的 `FIELD_TOKEN_RE` 只认「反引号包起来」或「`snake_case` 连写」两种形态，
+ * 于是 `segments` / `shots` **原样留在了主区**（场景列表页实测命中）。
+ *
+ * ## 为什么必须加「中文语境」这个条件（写这条时被自己的测试抓过一次）
+ *
+ * 同一个字段里**还装着英文提示词**（运行时原文：
+ * `基础提示词： cinematic live-action environment, wide establishing shot, 16:9 …`）。
+ * 如果无脑把裸词 `shot` 也换掉，就会把 **`wide shot` 改成 `wide 镜头`** ——
+ * 那是**真的破坏内容**（用户要复制的英文提示词被改坏），比漏掉一个字段名严重得多。
+ *
+ * 所以判定条件是：这个词**至少一侧紧邻中文字符**（`[\u4e00-\u9fff]`）。
+ * `来自segments和` 命中（左侧「自」是中文）；`wide shot,` 不命中（两侧都是英文/标点）。
+ * 并且**只认已经登记在 `DESCRIPTION_FIELD_LABELS` 里的名字**，不是「见到英文单词就换」。
+ */
+const BARE_REGISTERED_WORDS = Object.keys(DESCRIPTION_FIELD_LABELS)
+  .sort((a, b) => b.length - a.length)
+  .join('|')
+const CJK_CHAR = '\\u4e00-\\u9fff'
+const BARE_FIELD_WORD_PATTERN =
+  `(?:(?<=[${CJK_CHAR}])(?:${BARE_REGISTERED_WORDS})(?![A-Za-z0-9_])` +
+  `|(?<![A-Za-z0-9_])(?:${BARE_REGISTERED_WORDS})(?=[${CJK_CHAR}]))`
+const BARE_FIELD_WORD_RE = new RegExp(BARE_FIELD_WORD_PATTERN, 'gi')
+/** **不带 `g`** 的版本（同上，避免 `lastIndex` 串味）。 */
+const HAS_BARE_FIELD_WORD_RE = new RegExp(BARE_FIELD_WORD_PATTERN, 'i')
 
 /**
  * 「已根据该资产出现的 … 生成」这一整句（含句中的字段名）。
@@ -76,7 +108,7 @@ function labelForFieldToken(token: string): string {
 export function hasInternalFieldToken(text?: string | null): boolean {
   const raw = String(text ?? '')
   if (!raw.trim()) return false
-  return HAS_FIELD_TOKEN_RE.test(raw)
+  return HAS_FIELD_TOKEN_RE.test(raw) || HAS_BARE_FIELD_WORD_RE.test(raw)
 }
 
 /**
@@ -97,6 +129,8 @@ export function describeAssetDescription(text?: string | null): string {
   )
   // ② 残留的字段名（不在上面那个句式里的）逐个换成中文说法，反引号去掉
   result = result.replace(FIELD_TOKEN_RE, (token) => labelForFieldToken(token))
+  // ③ 裸词形态的**已登记**字段名（`上下文判断来自segments和shots中…`，运行时实测的那种写法）
+  result = result.replace(BARE_FIELD_WORD_RE, (token) => labelForFieldToken(token))
   return result
 }
 
