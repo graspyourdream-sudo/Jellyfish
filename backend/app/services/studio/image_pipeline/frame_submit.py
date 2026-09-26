@@ -42,6 +42,7 @@ from app.schemas.studio.image_pipeline import (
 )
 from app.services import paid_outlet_guard
 from app.services.llm.provider_resolver import resolve_provider_config_by_model
+from app.services.studio.asset_profiles import TYPE_LABELS
 from app.services.studio.bound_asset_files import (
     resolve_shot_bound_files,
     to_shot_linked_asset_items,
@@ -55,6 +56,19 @@ from app.utils.files import vendor_accepts_data_url
 
 DEFAULT_TARGET_RATIO = "16:9"
 DEFAULT_TIMEOUT_SECONDS = 900.0
+
+
+def asset_type_label(asset_type: str) -> str:
+    """资产类型的中文标签（**读取侧优先**）。
+
+    为什么不能只用 ``ASSET_TYPE_ZH``：那张表由出图侧策略表派生
+    （``image_pipeline.ASSET_TYPE_ZH`` ← ``asset_strategies.STRATEGIES``），只有四类。
+    而商品（第五类资产）在 MVP 里**不进**出图侧策略表，却必须能进帧参考，
+    否则它的定版图标签会显示成英文 ``product「…」``。
+    所以以读取侧 ``asset_profiles.TYPE_LABELS``（五类齐全）为准，出图侧表只作兜底。
+    """
+    key = str(asset_type or "").strip().lower()
+    return TYPE_LABELS.get(key) or ASSET_TYPE_ZH.get(key) or key or "资产"
 
 # 帧类型 → shot_details 上保存该帧提示词的字段（第 4 步「视频提示词」同源）
 FRAME_PROMPT_FIELDS: dict[str, str] = {
@@ -196,7 +210,7 @@ async def resolve_frame_reference_targets(
             continue
         name = str(getattr(item, "name", "") or "").strip()
         asset_type = str(getattr(item, "type", "") or "").strip()
-        label = f"{ASSET_TYPE_ZH.get(asset_type, asset_type or '资产')}「{name}」的定版图" if name else "绑定资产的定版图"
+        label = f"{asset_type_label(asset_type)}「{name}」的定版图" if name else "绑定资产的定版图"
         file_ids.append(fid)
         labels.append(label)
     for bound in bound_files:
@@ -204,7 +218,7 @@ async def resolve_frame_reference_targets(
             warnings.append(f"绑定资产「{getattr(bound, 'asset_name', '')}」：{warning}")
     if not file_ids:
         warnings.append(
-            "该镜头没有可用的绑定资产图（角色/场景/道具/服装的定版图都缺失），"
+            "该镜头没有可用的绑定资产图（角色/场景/道具/服装/商品的定版图都缺失），"
             "本次为纯文本提示词出图，人物一致性无法保证。"
         )
     return file_ids, labels
