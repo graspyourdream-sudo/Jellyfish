@@ -1,6 +1,6 @@
 /**
  * 「生成依据」渲染映射的测试（用户点名要逐项核对五项证据）：
- *   ① 原始剧本与相关分镜 ② 规范化资产资料（含别名合并） ③ 本章依据 vs 全局通用资料
+ *   ① 原始剧本与相关分镜 ② 规范化资产资料（含别名合并） ③ 本章资料 vs 全局通用资料
  *   ④ 脱敏请求结构 ⑤ 最终提示词与差异
  * 有/无两种情况都要覆盖：**没有就如实显示「本次未提供」，一个字都不编**。
  */
@@ -144,7 +144,7 @@ test('② 规范化资产资料：字段翻译成人话 + 别名合并结果单�
   assert.match(item?.summary ?? '', /别名合并 2 个/)
 })
 
-test('③ 数据隔离：全局通用资料与「本章依据」分成两行，并点明不会写回全局', () => {
+test('③ 数据隔离：全局通用资料与「本章资料」分成两行，并点明不会写回全局', () => {
   const basis = readGenerationBasis(
     {
       generation_basis: {
@@ -157,7 +157,7 @@ test('③ 数据隔离：全局通用资料与「本章依据」分成两行，�
   const byKey = itemsByKey(basis)
   assert.equal(byKey.get('globalProfile')?.provided, true)
   assert.match(byKey.get('globalProfile')?.lines.join('\n') ?? '', /旧录音笔（通用）/)
-  assert.match(byKey.get('globalProfile')?.lines.join('\n') ?? '', /不属于本章依据/)
+  assert.match(byKey.get('globalProfile')?.lines.join('\n') ?? '', /不属于本章资料/)
   assert.equal(byKey.get('scopedBasis')?.provided, true)
   assert.match(byKey.get('scopedBasis')?.lines.join('\n') ?? '', /韩虹在法庭上按下录音笔/)
   assert.match(byKey.get('scopedBasis')?.lines.join('\n') ?? '', /项目 \+ 章节 隔离保存/)
@@ -167,7 +167,7 @@ test('③ 数据隔离：全局通用资料与「本章依据」分成两行，�
     { globalAsset: false },
   )
   const characterLines = itemsByKey(characterBasis).get('globalProfile')?.lines.join('\n') ?? ''
-  assert.ok(!characterLines.includes('不属于本章依据'))
+  assert.ok(!characterLines.includes('不属于本章资料'))
 })
 
 test('④ 脱敏请求结构：原样展示本次发出的结构，内部 ID 被替换', () => {

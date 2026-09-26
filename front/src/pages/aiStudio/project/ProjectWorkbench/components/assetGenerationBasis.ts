@@ -56,8 +56,8 @@ export const BASIS_ITEM_ORDER: BasisItemKey[] = [
 export const BASIS_ITEM_LABEL: Record<BasisItemKey, string> = {
   scriptAndShots: '① 原始剧本与相关分镜',
   assetProfile: '② 规范化资产资料（含别名合并结果）',
-  globalProfile: '③-a 所有项目共用的通用资料（不属于本章依据）',
-  scopedBasis: '③-b 本章/本项目保存的剧本依据',
+  globalProfile: '③-a 所有项目共用的通用资料（不属于本章资料）',
+  scopedBasis: '③-b 本章/本项目保存的剧本资料',
   requestStructure: '④ 图片提示词服务的脱敏请求结构',
   finalPrompts: '⑤ 本次真正会用的提示词与差异',
   projectStyle: '项目整体风格',
@@ -84,7 +84,7 @@ export const BASIS_ABSENT_TEXT =
 /** 所有项目共用的资产（场景 / 道具 / 服装）的数据隔离说明（角色只属于当前项目，不适用）。 */
 export const GLOBAL_ASSET_SCOPE_NOTE =
   '该资产所有项目共用（场景 / 道具 / 服装）：通用资料保存在共用资产库里；' +
-  '「本章依据 / 本章补充」按 项目 + 章节 单独保存，不会影响别的项目。'
+  '「本章资料 / 本章补充」按 项目 + 章节 单独保存，不会影响别的项目。'
 
 export type BasisProfileField = { label: string; value: string }
 export type BasisShotRef = { shotId: string; shotIndex: string; title: string }
@@ -876,21 +876,21 @@ export function buildBasisItems(basis: GenerationBasis): BasisItem[] {
         const text = basis.globalProfile.trim()
         const lines = [text]
         if (basis.globalAsset) {
-          lines.push('（该资产所有项目共用：以上是共用资产库里的通用资料，不属于本章依据）')
+          lines.push('（该资产所有项目共用：以上是共用资产库里的通用资料，不属于本章资料）')
         }
         return { key, label: BASIS_ITEM_LABEL[key], provided: true, lines, summary: text.slice(0, 40) }
       }
       case 'scopedBasis': {
         const lines = [...basis.scopedBasis]
         if (basis.globalAsset) {
-          lines.push('（本章依据/补充按 项目 + 章节 隔离保存；不会影响别的项目）')
+          lines.push('（本章资料/补充按 项目 + 章节 隔离保存；不会影响别的项目）')
         }
         return {
           key,
           label: BASIS_ITEM_LABEL[key],
           provided: true,
           lines,
-          summary: `共 ${basis.scopedBasis.length} 条本章依据`,
+          summary: `共 ${basis.scopedBasis.length} 条本章资料`,
         }
       }
       case 'requestStructure': {
