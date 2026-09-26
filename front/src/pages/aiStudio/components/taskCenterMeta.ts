@@ -4,6 +4,7 @@ import { StudioChaptersService, StudioShotsService } from '../../../services/gen
 import { StudioEntitiesApi } from '../../../services/studioEntities'
 import { getChapterShotsPath, getChapterStudioPath } from '../project/ProjectWorkbench/routes'
 import type { TaskUiItem } from './taskUiStore'
+import { resolveRelationTypeLabel } from './taskCopy'
 
 type ResolvedTaskMeta = {
   sourceLabel?: string | null
@@ -132,7 +133,7 @@ async function resolveTaskMeta(task: TaskUiItem): Promise<ResolvedTaskMeta | nul
                 ? `/assets/props/${relationEntityId}/edit`
                 : `/assets/costumes/${relationEntityId}/edit`
       return {
-        sourceLabel: `${relationType}：名称读取中`,
+        sourceLabel: `${resolveRelationTypeLabel(relationType)}：名称读取中`,
         navigateTo,
       }
     }

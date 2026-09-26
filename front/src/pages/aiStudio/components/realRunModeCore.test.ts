@@ -201,10 +201,24 @@ test('结构化 409：能取出原因与开启步骤，并与「未确认」区�
   assert.equal(details.isBlocked, true)
   assert.equal(details.code, 'paid_outlet_blocked')
   assert.equal(details.reason, BLOCKED_REASON_DRY_RUN)
-  assert.ok(details.title.includes('未发起真实请求'))
+  /* ⚠️ 期望更新（阶段 B 第 4 批）：旧期望 `details.title.includes('未发起真实请求')`
+     绑定了旧措辞「被演练守卫拦住，未发起真实请求」。本批把标题口径统一到
+     `generationStatusCore.classifyGenerationFailure` 的 dry_run 分支
+     （「当前是演练模式：没有发起真实请求」），消除同一出口两种说法；
+     新断言**更强**：既要求说清「演练模式」与「没有发起真实请求」，
+     又禁止再出现「守卫」这个词。 */
+  assert.match(details.title, /演练模式/)
+  assert.match(details.title, /没有发起真实请求/)
+  assert.doesNotMatch(details.title, /守卫/)
   assert.ok(details.reasonText.includes('不会产生费用'))
   assert.ok(details.howToEnable.includes('JELLYFISH_DRY_RUN=0'))
   assert.equal(details.enableSteps.length, 2)
+  /* ⚠️ 本批新增（阶段 B 第 4 批 · 审计 §4.4 模式 3/4）：主区文案不许含环境变量名 /
+     HTTP 状态码，原文进技术详情层。比原断言更强 —— 原来只断言「原因里有那句中文」。 */
+  assert.doesNotMatch(details.reasonText, /JELLYFISH_/)
+  assert.doesNotMatch(details.title, /HTTP|JELLYFISH_/)
+  assert.match(details.technicalDetail, /JELLYFISH_DRY_RUN/)
+  assert.match(details.technicalDetail, /409/)
 
   const unconfirmed = describeBlockedError({
     response: {
@@ -225,7 +239,14 @@ test('非门禁的 409 不能被当成演练拦截', () => {
 
   assert.equal(details.isBlocked, false)
   assert.equal(details.reason, '')
-  assert.ok(details.title.includes('409'))
+  /* ⚠️ 期望更新（阶段 B 第 4 批 · 审计 §4.4 模式 3 第 3 条）：旧期望是
+     `details.title.includes('409')` —— 它把「HTTP 状态码必须出现在主区标题里」钉成了
+     期望值，与新口径直接冲突。现在主区只给中文结论，状态码进技术详情：
+     这条**比原断言更强**（既禁止主区出现 409，又要求它必须出现在技术详情）。 */
+  assert.doesNotMatch(details.title, /409|HTTP/)
+  assert.match(details.title, /请稍后重试/)
+  assert.match(details.technicalDetail, /409/)
+  assert.match(details.reasonText, /没有成功/)
   assert.equal(details.howToEnable, '')
 })
 

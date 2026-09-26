@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getOrchestrationStatus } from '../../../services/llmPipelineApi'
 import { OpenAPI } from '../../../services/generated'
+import { MODEL_CATEGORY, labelFor } from './enumLabels.ts'
 import {
   FALLBACK_CONFIRM_ENV,
   FALLBACK_GUARD_ENV,
@@ -27,6 +28,35 @@ import {
 } from './generationStatusCore'
 
 export * from './generationStatusCore'
+
+/**
+ * 读取生成条件失败时的异常。
+ *
+ * 审计 §4.4 模式 4 第 6 条点名旧实现：
+ * `` throw new Error(`GET ${path} 失败（HTTP ${response.status}）：${text.slice(0, 200)}`) ``
+ * 这句经 `generationStatusCore.ts:127` 直达主区，会把
+ * `GET /api/v1/llm/model-settings 失败（HTTP 500）：<后端响应体 200 字>` 全量上屏。
+ *
+ * 现在的分工：
+ *   - `Error.message` = **给用户看的中文结论**（任何地方误把它渲到主区都安全）；
+ *   - `technicalDetail` = 接口路径 / 状态码 / 响应体片段，只允许进默认收起的「技术详情」。
+ */
+export class GenerationGateReadError extends Error {
+  readonly technicalDetail: string
+
+  constructor(technicalDetail: string) {
+    super('读取生成条件失败，请稍后重试。')
+    this.name = 'GenerationGateReadError'
+    this.technicalDetail = technicalDetail
+  }
+}
+
+/** 把任意异常转成 `GenerationGateSnapshot.error` 要的字符串（原文，供技术详情用）。 */
+export function readGateErrorDetail(error: unknown): string {
+  if (error instanceof GenerationGateReadError) return error.technicalDetail
+  if (error instanceof Error) return error.message
+  return String(error)
+}
 
 type ModelRow = { id?: string; name?: string; category?: string; provider_id?: string }
 type ProviderRow = { id?: string; name?: string; status?: string }
@@ -53,7 +83,10 @@ async function getJson(path: string): Promise<Record<string, unknown>> {
   const response = await fetch(`${OpenAPI.BASE}${path}`)
   const text = await response.text()
   if (!response.ok) {
-    throw new Error(`GET ${path} 失败（HTTP ${response.status}）：${text.slice(0, 200)}`)
+    /* 原文（接口路径 / 状态码 / 响应体片段）只进技术详情；主区只看 Error.message 的中文结论。 */
+    throw new GenerationGateReadError(
+      `GET ${path} 失败（HTTP ${response.status}）：${text.slice(0, 200)}`,
+    )
   }
   const payload = text ? (JSON.parse(text) as Record<string, unknown>) : {}
   return (payload?.data ?? {}) as Record<string, unknown>
@@ -84,6 +117,11 @@ function readString(source: Record<string, unknown>, key: string): string {
  * 判定单个出口的模型配置状态。
  *
  * 返回 `unknown` 的几种情况都必须向用户说明原因，不允许默认当成「已配置」。
+ *
+ * ⚠️ 审计 §4.4 模式 5 点名：这里的 `reason` 原来把 `id=${modelId}`、供应商 UUID、
+ * 供应商名、`category` 原值（`text/image/video`）拼进句子，命中模式 1/3/5。
+ * 现在 `reason` 一律是**业务说法**（不含任何内部标识），
+ * 原始值只由 `modelName`（供技术详情使用）与后端接口本身承载。
  */
 function resolveModelConfig(
   outlet: GenerationOutlet,
@@ -97,25 +135,25 @@ function resolveModelConfig(
   const modelId = readString(settings, DEFAULT_MODEL_KEYS[outlet])
 
   if (!modelId) {
-    return { state: 'missing', modelName: '', reason: `没有配置默认${label} id。` }
+    return { state: 'missing', modelName: '', reason: `还没有指定默认${label}。` }
   }
   if (!modelsLoaded) {
     return {
       state: 'unknown',
       modelName: '',
-      reason: `读不到模型表，无法确认默认${label}（id=${modelId}）是否真的存在。`,
+      reason: `读不到模型列表，无法确认默认${label}是否真的存在。`,
     }
   }
   const model = models.find((item) => readString(item, 'id') === modelId)
   if (!model) {
-    return { state: 'unknown', modelName: '', reason: `默认${label} id=${modelId} 在模型表里查不到。` }
+    return { state: 'unknown', modelName: '', reason: `默认${label}在模型列表里查不到，配置可能已失效。` }
   }
   const category = readString(model, 'category')
   if (category && EXPECTED_CATEGORY[outlet] && category !== EXPECTED_CATEGORY[outlet]) {
     return {
       state: 'unknown',
       modelName: '',
-      reason: `默认${label} id=${modelId} 的类别是「${category}」，与该出口不匹配。`,
+      reason: `默认${label}的类型与这个出口不匹配（当前类型：${labelFor(MODEL_CATEGORY, category)}）。`,
     }
   }
   const providerId = readString(model, 'provider_id')
@@ -125,16 +163,14 @@ function resolveModelConfig(
       return {
         state: 'unknown',
         modelName: '',
-        reason: `默认${label}（${readString(model, 'name') || modelId}）挂的供应商 ${providerId} 不在供应商表里。`,
+        reason: `默认${label}对应的生成服务已失效，请到「模型管理」重新指定。`,
       }
     }
     if (readString(provider, 'status').toLowerCase() === 'disabled') {
       return {
         state: 'missing',
         modelName: '',
-        reason: `默认${label}（${readString(model, 'name') || modelId}）的供应商「${
-          readString(provider, 'name') || providerId
-        }」已停用。`,
+        reason: `默认${label}对应的生成服务已停用，请到「模型管理」换一个。`,
       }
     }
   }
@@ -204,7 +240,7 @@ export function useGenerationGate(): GenerationGateSnapshot {
           },
         }
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+        if (!cancelled) setError(readGateErrorDetail(e))
       } finally {
         if (!cancelled) setLoading(false)
       }

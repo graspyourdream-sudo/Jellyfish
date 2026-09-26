@@ -11,10 +11,26 @@
  *   - 后端字段缺失（旧版本接口）时退回本地默认文案，但**不能**默认显示「真实模式」；
  *   - 「演练模式所以不发真实请求」与「真实模式已开但没确认」必须分开说，否则用户
  *     会以为改一个环境变量就够了。
+ *
+ * ## 三层口径（阶段 B 第 4 批 · 审计 §4.4 模式 2/3/4/6）
+ *
+ * 本文件同时承担「演练模式」区域的**文案生产者**，因此按审计 §2.1 分成两层：
+ *   - **主区**（`label` / `description` / `reasonText` / `actionLabel` …）：只允许中文业务说法，
+ *     环境变量名 / 命令 / 地址 / 本机 URL / 仓库路径 / 原始枚举值一律不许出现。
+ *     判定函数见 `scrubMainScreenText`。
+ *   - **技术详情层**（`guardText` / `env` / `confirmEnv` / `enableSteps` / `howToEnable` /
+ *     `restoreSteps` / `doc` / `technicalDetail`）：原样保留后端原文与命令，
+ *     由 `RealRunModeBadge.tsx` 渲染在**默认收起**的「技术详情」里。
  */
 
-export type RealRunMode = 'dry_run' | 'real_unconfirmed' | 'real' | 'unknown'
+import {
+  REAL_RUN_AUDIT_ACTION,
+  REAL_RUN_MODE,
+  REAL_RUN_OUTLET,
+  labelFor,
+} from './enumLabels.ts'
 
+export type RealRunMode = 'dry_run' | 'real_unconfirmed' | 'real' | 'unknown'
 export type RealRunOutlet = 'llm' | 'image' | 'video' | 'oss'
 
 export type OutletAllowState = {
@@ -25,23 +41,27 @@ export type OutletAllowState = {
   allowed: boolean
   /** 机器可读原因：dry_run | real_call_not_confirmed | ''（放行时为空） */
   reason: string
-  /** 中文原因说明 */
+  /** 主区中文原因说明（写死的中文常量，不随后端措辞漂移） */
   reasonText: string
+  /** **技术详情层**：后端原样给的 `reason_text`（可能含环境变量名等机器串） */
+  reasonDetail: string
 }
 
 export type RealRunModeView = {
   mode: RealRunMode
   /** 中文模式名：演练模式 / 真实模式（未确认） / 真实模式 / 模式未知 */
   label: string
-  /** 一句话说明：会不会发真实请求、会不会花钱 */
+  /** 一句话说明：会不会发真实请求、会不会花钱（**主区**，已洗掉环境变量名与地址） */
   description: string
   isRealMode: boolean
   /** 后端 guard.dry_run（null = 还没取到 / 字段缺失） */
   dryRun: boolean | null
   realCallConfirmed: boolean | null
-  /** 后端原文，例如「DRY_RUN=开（JELLYFISH_DRY_RUN，未发起真实调用）」 */
+  /** **技术详情层**：后端原文，例如「DRY_RUN=开（JELLYFISH_DRY_RUN，未发起真实调用）」 */
   guardText: string
+  /** **技术详情层**：演练开关的环境变量名 */
   env: string
+  /** **技术详情层**：付费确认的环境变量名 */
   confirmEnv: string
   /**
    * 开关来源：`env`（进程环境变量）/ `dotenv`（backend/.env）/ `default`（两处都没配）。
@@ -50,32 +70,50 @@ export type RealRunModeView = {
    * 切模式必须改配置 + 重启进程（见 enableSteps），这是有意的权限边界。
    */
   switchSource: string
-  /** 中文来源标签，例如「进程环境变量」「backend/.env」「默认（未显式配置）」 */
+  /** **技术详情层**原始来源标签，例如「进程环境变量」「backend/.env」「默认（未显式配置）」 */
   switchSourceLabel: string
+  /** **主区**来源说法（`backend/.env` 是仓库路径，属模式 4，不能上主区） */
+  switchSourceMainLabel: string
   /** 真实模式是不是由 backend/.env 打开的（后端会就此打启动告警） */
   dotenvRealMode: boolean
-  /** 后端给的真实付费启动告警原文（只有 dotenv 打开真实模式时才有） */
+  /** **技术详情层**：后端给的真实付费启动告警原文（只有 dotenv 打开真实模式时才有） */
   startupWarning: string
   /** 改完环境变量是否需要重启后端进程 */
   restartRequired: boolean
   outlets: OutletAllowState[]
-  /** 中文开启步骤（优先用后端给的，缺失时本地生成） */
+  /** **技术详情层**：中文开启步骤（优先用后端给的，缺失时本地生成；含命令与环境变量） */
   enableSteps: string[]
+  /** **技术详情层**：开启说明原文 */
   howToEnable: string
+  /** **技术详情层**：恢复步骤原文 */
   restoreSteps: string[]
+  /** **技术详情层**：恢复说明原文 */
   howToRestore: string
+  /** **技术详情层**：说明文档路径 */
   doc: string
+  /**
+   * **主区**「怎么切到真实模式」的一句话。
+   *
+   * 审计 §4.4 模式 2 的建议口径：分步命令（`export …` / `curl …` / `data.mode` 字段名）
+   * 整段下沉技术详情，主区只说「改完配置并重启后端，角标回到真实模式即为成功」。
+   */
+  enableSummary: string
+  /** **主区**「怎么关回演练模式」的一句话（口径同上）。 */
+  restoreSummary: string
   /** 最近被拦截的记录（后端 dry_run_audit 里的 blocked* 事件） */
   blockedEvents: BlockedAuditEvent[]
 }
 
 export type BlockedAuditEvent = {
   action: string
-  /** 中文动作名 */
+  /** 中文动作名（未登记一律「拦截记录」，不回显原值） */
   actionLabel: string
+  /** **技术详情层**：后端给的明细原文（可能是接口路径 / host） */
   detail: string
+  /** **技术详情层**：后端给的拦截目标原文（可能是 `llm` 这类原值） */
   target: string
   reason: string
+  /** **主区**中文原因（写死的中文常量） */
   reasonText: string
 }
 
@@ -89,11 +127,63 @@ export const DEFAULT_GUARD_ENV = 'JELLYFISH_DRY_RUN'
 export const DEFAULT_CONFIRM_ENV = 'JELLYFISH_REAL_LLM_CONFIRMED'
 export const DEFAULT_MODE_DOC = 'docs/real-run-mode.md'
 
+/** 中文字符判定（用于「后端给的是不是已经是一句中文」）。 */
+const CJK_RE = /[\u4e00-\u9fff]/
+
+/**
+ * 主区文案里的**机器串**一律去掉（审计 §4.4 模式 4）。
+ *
+ * 为什么要有这一层：本区域有两类文案来源 —— ① 前端自己的中文常量；② **后端返回的
+ * `mode_description` / `mode_label` / `reason_text` / `startup_warning`**（自由文本）。
+ * 后端那句在 `realRunModeCore.test.ts` 的夹具里就是
+ * `当前不发任何真实请求，也不会产生费用（JELLYFISH_DRY_RUN 未显式设为 0）。` —— 环境变量名
+ * 会随句子上屏（包括角标的悬停 `title`，悬停即见）。
+ *
+ * 注意：这里**不能**用 `sanitizeUserText`（它按句整句丢弃，会把整句业务说明也丢掉），
+ * 所以按 token 清理。被清掉的环境变量名 / 地址 / 命令仍然在
+ * 「技术详情」折叠区里（`guardText` / `env` / `confirmEnv` / `enableSteps` / `doc`）。
+ */
+const MAIN_SCREEN_MACHINE_RE =
+  /JELLYFISH_[A-Z_]+|https?:\/\/[^\s）)，,。；;]+|\/api\/v1[^\s）)，,。；;]*|localhost(?::\d+)?|127\.0\.0\.1(?::\d+)?|backend\/\.env|docs\/[\w./-]+\.md|uvicorn\b[^\s）)，,。；;]*|curl\s+-s\b[^\s）)，,。；;]*/g
+
+export function scrubMainScreenText(text: string): string {
+  const raw = String(text ?? '')
+  if (!raw.trim()) return ''
+  return raw
+    /* 先整段去掉「（…开关名…）」这类括号补充，避免留下半个空括号 */
+    .replace(/[（(]\s*(?:JELLYFISH_[A-Z_]+|演练开关|相关开关)[^）)]*[）)]/g, '')
+    .replace(MAIN_SCREEN_MACHINE_RE, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[（(]\s*[）)]/g, '')
+    .replace(/\s+([。；;，,])/g, '$1')
+    .trim()
+}
+
+/**
+ * 主区只出业务说法的「最终文案」：洗过机器串之后为空时，用调用方给的中文结论兜底。
+ */
+function mainScreenText(text: string, fallback: string): string {
+  return scrubMainScreenText(text) || fallback
+}
+
 /** 开关来源的中文标签（后端没给标签时的兜底；只展示，不含任何密钥）。 */
 export const DEFAULT_SOURCE_LABEL: Record<string, string> = {
   env: '进程环境变量',
-  dotenv: 'backend/.env',
+  dotenv: '服务器上的配置文件',
   default: '默认（未显式配置 = 演练）',
+}
+
+/**
+ * **主区**的来源说法。
+ *
+ * `backend/.env` 是仓库内文件路径，属审计 §2.3 模式 4（「仓库文件路径」），
+ * 主区改说「服务器上的配置文件」；原始路径仍由 `switchSourceLabel` 承载并进技术详情。
+ */
+export function sourceMainLabelOf(rawSource: string): string {
+  const code = String(rawSource ?? '').trim()
+  if (code === 'env') return '服务器启动环境'
+  if (code === 'dotenv') return '服务器上的配置文件'
+  return '默认设置'
 }
 
 /** 把后端给的来源码 + 标签归一成人能读的中文（只展示，不含任何密钥）。 */
@@ -105,18 +195,28 @@ export function sourceLabelOf(rawSource: string, rawLabel: string): string {
   return code || DEFAULT_SOURCE_LABEL.default
 }
 
+/**
+ * 模式 / 出口 / 审计动作的中文口径。
+ *
+ * ⚠️ 迁移说明（审计 §7.1-4）：这三张表的**唯一事实来源**已经是
+ * `components/enumLabels.ts`（`REAL_RUN_MODE` / `REAL_RUN_OUTLET` / `REAL_RUN_AUDIT_ACTION`）。
+ * 这里不再各写一份字面量，而是委托 `labelFor` —— 否则「同一个 `dry_run` 在两处两种说法」
+ * 会立刻回归（同一枚举新增值时也必然漏掉一处）。
+ * 保留 `MODE_LABEL` 这个导出名是为了不动调用点与既有测试。
+ */
 export const MODE_LABEL: Record<RealRunMode, string> = {
-  dry_run: '演练模式',
-  real_unconfirmed: '真实模式（未确认）',
-  real: '真实模式',
-  unknown: '模式未知',
+  dry_run: labelFor(REAL_RUN_MODE, 'dry_run'),
+  real_unconfirmed: labelFor(REAL_RUN_MODE, 'real_unconfirmed'),
+  real: labelFor(REAL_RUN_MODE, 'real'),
+  unknown: labelFor(REAL_RUN_MODE, 'unknown'),
 }
 
-export const OUTLET_LABELS: Record<string, string> = {
-  llm: '大模型',
-  image: '出图',
-  video: '出视频',
-  oss: '对象存储上传',
+/**
+ * 出口 → 中文名；**未登记 outlet 给「其它出口」，绝不回显 `llm` / `oss` 这类原值**
+ * （审计 §4.4 模式 3 第 5 条）。
+ */
+export function outletLabelOf(outlet: string): string {
+  return labelFor(REAL_RUN_OUTLET, outlet)
 }
 
 export const OUTLET_ORDER: string[] = ['llm', 'image', 'video', 'oss']
@@ -128,28 +228,49 @@ const OUTLET_TARGETS: Record<string, string> = {
   oss: '真实上传对象存储（产生存储与流量费用）',
 }
 
-const AUDIT_LABELS: Record<string, string> = {
-  blocked: '被演练模式拦截',
-  blocked_unconfirmed: '真实模式未确认，被拦截',
-  blocked_network: '出站兜底拦截（非本机地址）',
-  allowed_real: '已放行（真实调用）',
-  guard_installed: '出站兜底已安装',
+/**
+ * 审计动作原值 → 中文。
+ *
+ * 旧实现是 `AUDIT_LABELS[action] ?? action` —— **未登记的 action 会把原值当标签渲染**
+ * （出口 `RealRunModeBadge.tsx:267`）；而 `parseBlockedEvents` 只放 `blocked*` 通过，
+ * 所以将来后端加一个 `blocked_xxx` 就会直接在主区打出英文。
+ * 现在走全仓唯一映射表，未登记一律「拦截记录」。
+ */
+function auditActionLabel(action: string): string {
+  return labelFor(REAL_RUN_AUDIT_ACTION, action)
 }
 
 const START_COMMAND = 'cd backend && uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000'
 const VERIFY_COMMAND = 'curl -s http://localhost:8000/api/v1/studio/llm/orchestration/status'
 
-/** 演练模式下为什么拒绝、以及这不是配额问题。 */
-export function dryRunReasonText(env: string): string {
-  return `当前是演练模式（${env} 未显式设为 0）：不会发起真实请求，也不会产生费用。`
+/**
+ * 演练模式下为什么拒绝、以及这不是配额问题。
+ *
+ * ⚠️ **主区文案**：旧实现把环境变量名拼进句子（`（JELLYFISH_DRY_RUN 未显式设为 0）`），
+ * 命中审计 §2.3 模式 4；环境变量名现在只出现在技术详情层
+ * （`env` / `confirmEnv` / `enableSteps`）。参数保留是为了不动调用点。
+ */
+export function dryRunReasonText(): string {
+  return '当前是演练模式：不会发起真实请求，也不会产生费用。'
 }
 
-/** 真实模式开关已开但缺少付费确认。 */
-export function notConfirmedReasonText(confirmEnv: string): string {
-  return `真实模式开关已开，但缺少付费确认（${confirmEnv} 不是 1）：仍然不会发起真实请求。`
+/** 真实模式开关已开但缺少付费确认（**主区文案**，不拼环境变量名）。 */
+export function notConfirmedReasonText(): string {
+  return '真实模式开关已开，但缺少付费确认：仍然不会发起真实请求。'
 }
 
-/** 本地生成的「怎么开真实模式」步骤（后端没给时用，口径与后端一致）。 */
+/** 允许真实调用时的中文说明（主区）。 */
+export function allowedReasonText(): string {
+  return '允许真实调用（会产生真实费用）。'
+}
+
+/**
+ * 本地生成的「怎么开真实模式」步骤 —— **技术详情层专用**。
+ *
+ * 审计 §4.4 模式 2/4 的口径：分步命令（`export …` / `curl -s http://localhost:8000/api/v1/…` /
+ * `data.mode` 这类字段名）整段收进默认收起的「技术详情」；
+ * 主区只用 `enableSummary`（见 `buildEnableSummary`）。
+ */
 export function buildEnableSteps(env = DEFAULT_GUARD_ENV, confirmEnv = DEFAULT_CONFIRM_ENV): string[] {
   return [
     `第 1 步｜设置两个开关（二选一，都生效，但进程环境变量优先于 backend/.env）：` +
@@ -162,6 +283,20 @@ export function buildEnableSteps(env = DEFAULT_GUARD_ENV, confirmEnv = DEFAULT_C
     `第 4 步｜恢复演练：unset ${env} ${confirmEnv}（.env 里若也写了要一并清掉）后重启进程，` +
       `角标回到「演练模式」。完整说明见 ${DEFAULT_MODE_DOC}。`,
   ]
+}
+
+/**
+ * **主区**「怎么切到真实模式」的一句话（审计 §4.4 模式 2 第 1 条的建议口径）。
+ *
+ * 写死的中文常量，不随后端措辞漂移；命令与字段名在 `enableSteps` 里。
+ */
+export function buildEnableSummary(): string {
+  return '改完配置并重启后端进程，角标回到「真实模式」即为成功。'
+}
+
+/** **主区**「怎么关回演练模式」的一句话（审计 §4.4 模式 2 第 2 条）。 */
+export function buildRestoreSummary(): string {
+  return '改完配置并重启后端进程，角标回到「演练模式」即为恢复成功。'
 }
 
 /** 本地生成的「怎么关回演练」步骤。 */
@@ -220,22 +355,16 @@ export function deriveMode(dryRun: boolean | null, realCallConfirmed: boolean | 
   return realCallConfirmed ? 'real' : 'real_unconfirmed'
 }
 
-export function describeMode(
-  mode: RealRunMode,
-  env = DEFAULT_GUARD_ENV,
-  confirmEnv = DEFAULT_CONFIRM_ENV,
-): string {
-  if (mode === 'dry_run') return dryRunReasonText(env)
-  if (mode === 'real_unconfirmed') return notConfirmedReasonText(confirmEnv)
+export function describeMode(mode: RealRunMode): string {
+  if (mode === 'dry_run') return dryRunReasonText()
+  if (mode === 'real_unconfirmed') return notConfirmedReasonText()
   if (mode === 'real') return '真实模式已开：会发起真实付费调用，仍受成本确认、批量上限与去重幂等约束。'
-  return '读不到后端守卫状态，无法确认当前是演练还是真实模式；在确认之前按「不会真花钱」对待。'
+  return '读不到后端状态，无法确认当前是演练还是真实模式；在确认之前按「不会真花钱」对待。'
 }
 
 function parseOutletStates(
   source: Record<string, unknown>,
   mode: RealRunMode,
-  env: string,
-  confirmEnv: string,
 ): OutletAllowState[] {
   const raw = Array.isArray(source.outlet_states) ? source.outlet_states : []
   const parsed = new Map<string, OutletAllowState>()
@@ -244,14 +373,21 @@ function parseOutletStates(
     const outlet = readString(record, 'outlet')
     if (!outlet) continue
     const allowed = readBool(record, 'allowed') === true
+    const backendLabel = readString(record, 'label')
     parsed.set(outlet, {
       outlet,
-      label: readString(record, 'label') || OUTLET_LABELS[outlet] || outlet,
+      /* 后端标签只在**是中文**时采用：`llm` / `oss` 这种原值属模式 3，必须走映射表 */
+      label: backendLabel && CJK_RE.test(backendLabel) ? backendLabel : outletLabelOf(outlet),
       allowed,
       reason: readString(record, 'reason'),
-      reasonText:
-        readString(record, 'reason_text') ||
-        (allowed ? '允许真实调用（会产生真实费用）。' : mode === 'dry_run' ? dryRunReasonText(env) : notConfirmedReasonText(confirmEnv)),
+      /* 主区原因用**本文件的中文常量**（§7.1-8：不许把后端句子改写后当主区文案）；
+         后端那句可能带环境变量名，只进技术详情。 */
+      reasonText: allowed
+        ? allowedReasonText()
+        : mode === 'dry_run'
+          ? dryRunReasonText()
+          : notConfirmedReasonText(),
+      reasonDetail: readString(record, 'reason_text'),
     })
   }
   // 后端没给的出口按当前模式补齐，保证四个出口始终可见（绝不显示成「放行」）。
@@ -261,19 +397,20 @@ function parseOutletStates(
     const allowed = mode === 'real'
     return {
       outlet,
-      label: OUTLET_LABELS[outlet] ?? outlet,
+      label: outletLabelOf(outlet),
       allowed,
       reason: allowed ? '' : mode === 'dry_run' ? BLOCKED_REASON_DRY_RUN : BLOCKED_REASON_NOT_CONFIRMED,
       reasonText: allowed
-        ? '允许真实调用（会产生真实费用）。'
+        ? allowedReasonText()
         : mode === 'dry_run'
-          ? dryRunReasonText(env)
-          : notConfirmedReasonText(confirmEnv),
+          ? dryRunReasonText()
+          : notConfirmedReasonText(),
+      reasonDetail: '',
     }
   })
 }
 
-function parseBlockedEvents(source: Record<string, unknown>, env: string, confirmEnv: string): BlockedAuditEvent[] {
+function parseBlockedEvents(source: Record<string, unknown>): BlockedAuditEvent[] {
   const raw = Array.isArray(source.dry_run_audit) ? source.dry_run_audit : []
   const events: BlockedAuditEvent[] = []
   for (const item of raw) {
@@ -283,11 +420,11 @@ function parseBlockedEvents(source: Record<string, unknown>, env: string, confir
     const reason = action === 'blocked_unconfirmed' ? BLOCKED_REASON_NOT_CONFIRMED : BLOCKED_REASON_DRY_RUN
     events.push({
       action,
-      actionLabel: AUDIT_LABELS[action] ?? action,
+      actionLabel: auditActionLabel(action),
       detail: readString(record, 'detail'),
       target: readString(record, 'target'),
       reason,
-      reasonText: reason === BLOCKED_REASON_DRY_RUN ? dryRunReasonText(env) : notConfirmedReasonText(confirmEnv),
+      reasonText: reason === BLOCKED_REASON_DRY_RUN ? dryRunReasonText() : notConfirmedReasonText(),
     })
   }
   return events.slice(-5).reverse()
@@ -305,24 +442,34 @@ export function parseRealRunMode(payload: unknown): RealRunModeView {
   const mode = isRealRunMode(modeText) ? modeText : deriveMode(dryRun, realCallConfirmed)
   const enableSteps = readStringList(source, 'enable_steps')
   const restoreSteps = readStringList(source, 'restore_steps')
+  const backendModeLabel = readString(source, 'mode_label')
+  const backendDescription = readString(source, 'mode_description')
+  const rawSwitchSource = readString(source, 'switch_source') || readString(guard, 'source')
   // 出口状态：后端给了就用后端的；旧接口没有 outlet_states 时按模式补齐，
   // 补齐结果保守——只有确认为「真实模式」才显示放行。
-  const outlets = parseOutletStates(source, mode, env, confirmEnv)
+  const outlets = parseOutletStates(source, mode)
   return {
     mode,
-    label: mode === 'unknown' ? MODE_LABEL.unknown : readString(source, 'mode_label') || MODE_LABEL[mode],
-    description: readString(source, 'mode_description') || describeMode(mode, env, confirmEnv),
+    /* 后端 mode_label 只在**是中文**时采用（英文原值属模式 3，一律走本地映射表） */
+    label:
+      mode === 'unknown'
+        ? MODE_LABEL.unknown
+        : backendModeLabel && CJK_RE.test(backendModeLabel)
+          ? backendModeLabel
+          : MODE_LABEL[mode],
+    description: mainScreenText(backendDescription, describeMode(mode)),
     isRealMode: readBool(source, 'is_real_mode') ?? mode === 'real',
     dryRun,
     realCallConfirmed,
     guardText: readString(source, 'guard_status_text'),
     env,
     confirmEnv,
-    switchSource: readString(source, 'switch_source') || readString(guard, 'source') || 'default',
+    switchSource: rawSwitchSource || 'default',
     switchSourceLabel: sourceLabelOf(
-      readString(source, 'switch_source') || readString(guard, 'source'),
+      rawSwitchSource,
       readString(source, 'switch_source_label') || readString(guard, 'source_label') || readString(source, 'source_label'),
     ),
+    switchSourceMainLabel: sourceMainLabelOf(rawSwitchSource),
     dotenvRealMode: readBool(source, 'dotenv_real_mode') ?? readBool(guard, 'dotenv_real_mode') ?? false,
     startupWarning: readString(source, 'startup_warning') || readString(guard, 'startup_warning'),
     restartRequired: readBool(source, 'restart_required_on_change') !== false,
@@ -332,7 +479,9 @@ export function parseRealRunMode(payload: unknown): RealRunModeView {
     restoreSteps: restoreSteps.length ? restoreSteps : buildRestoreSteps(env, confirmEnv),
     howToRestore: readString(source, 'how_to_restore') || buildHowToRestore(env, confirmEnv),
     doc: readString(source, 'mode_doc') || DEFAULT_MODE_DOC,
-    blockedEvents: parseBlockedEvents(source, env, confirmEnv),
+    enableSummary: buildEnableSummary(),
+    restoreSummary: buildRestoreSummary(),
+    blockedEvents: parseBlockedEvents(source),
   }
 }
 
@@ -350,15 +499,31 @@ export type BlockedErrorDetails = {
   code: string
   /** dry_run | real_call_not_confirmed | '' */
   reason: string
-  /** 中文原因 */
+  /** **主区**中文原因（写死的中文常量；后端那句可能带环境变量名，见 `technicalDetail`） */
   reasonText: string
-  /** 面向用户的标题 */
+  /** 面向用户的标题（**主区**，不含 HTTP 状态码 / 地址） */
   title: string
-  /** 后端/原始错误消息（清理过 body JSON 噪音） */
+  /** **技术详情层**：后端/原始错误消息（清理过 body JSON 噪音） */
   message: string
+  /** **技术详情层**：怎么开启真实模式的原文说明（含命令与环境变量名） */
   howToEnable: string
+  /** **技术详情层**：分步命令 */
   enableSteps: string[]
   httpStatus: number | null
+  /**
+   * **技术详情层**的整段原文：后端消息 + HTTP 状态码 + 开启说明。
+   *
+   * 主区只出 `title` + `reasonText`（审计 §4.4 模式 3/6：后端原文属第三层）。
+   */
+  technicalDetail: string
+}
+
+/** 把技术详情层的几段原文拼成一段（空段自动跳过）。 */
+function joinDetailLines(lines: Array<string | null | undefined>): string {
+  return lines
+    .map((line) => String(line ?? '').trim())
+    .filter(Boolean)
+    .join('\n')
 }
 
 function readRawMessage(error: unknown): string {
@@ -455,12 +620,18 @@ export function describeBlockedError(error: unknown, fallbackEnv = DEFAULT_GUARD
       isBlocked: false,
       code,
       reason: '',
-      reasonText: '',
-      title: httpStatus === null ? '请求未送达服务' : `请求失败（HTTP ${httpStatus}）`,
+      reasonText:
+        '这次请求没有成功。可以稍后重试；如果一直失败，请展开「技术详情」把原始信息发给管理员。',
+      /* 审计 §4.4 模式 3 第 3 条：主区不许出现 `HTTP 409` 这类状态码，改中文结论。 */
+      title: '请求失败，请稍后重试',
       message: message || '未知错误',
       howToEnable: '',
       enableSteps: [],
       httpStatus,
+      technicalDetail: joinDetailLines([
+        httpStatus === null ? '未取到 HTTP 状态码' : `HTTP 状态码：${httpStatus}`,
+        message,
+      ]),
     }
   }
 
@@ -474,20 +645,34 @@ export function describeBlockedError(error: unknown, fallbackEnv = DEFAULT_GUARD
   const env = readString(guardInfo, 'env') || readString(payloadRecord, 'env') || fallbackEnv
   const confirmEnv =
     readString(guardInfo, 'confirm_env') || readString(payloadRecord, 'confirm_env') || fallbackConfirmEnv
-  const reasonText =
-    (payload ? readString(payload, 'reason_text') : '') ||
-    (isUnconfirmed ? notConfirmedReasonText(confirmEnv) : dryRunReasonText(env))
+  /* 主区原因一律用本文件的中文常量（后端 reason_text 里带 `JELLYFISH_DRY_RUN` 这类机器串，
+     属模式 4；它作为原文进 technicalDetail）。 */
+  const reasonText = isUnconfirmed ? notConfirmedReasonText() : dryRunReasonText()
+  const backendReasonText = payload ? readString(payload, 'reason_text') : ''
   const steps = payload ? readStringList(payload, 'enable_steps') : []
+  const howToEnable = (payload ? readString(payload, 'how_to_enable') : '') || buildHowToEnable(env, confirmEnv)
+  const enableSteps = steps.length ? steps : buildEnableSteps(env, confirmEnv)
   return {
     isBlocked: true,
     code: code || PAID_OUTLET_BLOCKED_CODE,
     reason,
     reasonText,
-    title: isUnconfirmed ? '真实模式已开但没确认，仍未发起真实请求' : '被演练守卫拦住，未发起真实请求',
+    /* 口径与 `generationStatusCore.classifyGenerationFailure` 的 dry_run 分支对齐
+       （审计 §3.5「同一出口两套口径」）：都只说「当前是演练模式：没有发起真实请求」。 */
+    title: isUnconfirmed ? '真实模式已开但没确认，仍未发起真实请求' : '当前是演练模式：没有发起真实请求',
     message: message || reasonText,
-    howToEnable: (payload ? readString(payload, 'how_to_enable') : '') || buildHowToEnable(env, confirmEnv),
-    enableSteps: steps.length ? steps : buildEnableSteps(env, confirmEnv),
+    howToEnable,
+    enableSteps,
     httpStatus,
+    technicalDetail: joinDetailLines([
+      httpStatus === null ? null : `HTTP 状态码：${httpStatus}`,
+      `拦截原因码：${reason}`,
+      backendReasonText ? `服务端说明原文：${backendReasonText}` : null,
+      message ? `错误原文：${message}` : null,
+      `演练开关变量名：${env}；付费确认变量名：${confirmEnv}`,
+      `开启说明原文：${howToEnable}`,
+      enableSteps.length ? `分步操作：\n${enableSteps.join('\n')}` : null,
+    ]),
   }
 }
 
