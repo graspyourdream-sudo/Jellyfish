@@ -353,6 +353,94 @@ def classify_audio_input(  # pylint: disable=too-many-return-statements
     )
 
 
+#: 镜头绑定的资产槽位 → 资产类型（``bound_asset_ids_for_shot`` 的键）。
+#: 刻意**不含** ``products``：资产声音支持的是角色/场景/道具/服装四类，
+#: 商品（剧情策划用）不在其中（与 ``asset_voices.ASSET_VOICE_TYPES`` 同口径）。
+_SLOT_TO_ASSET_TYPE: dict[str, str] = {
+    "characters": "character",
+    "scene": "scene",
+    "props": "prop",
+    "costumes": "costume",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class AssetVoiceCarry:
+    """镜头没自己表态时，从**该镜绑定的资产**带出声音的结论。
+
+    三种状态，**第三种是刻意留出来的**（评审附带条件②：不许猜）：
+
+    - ``none``：这一镜绑定的资产里没有一个带声音 → 什么都不带，也不产生噪音
+      （与"没绑声音"的既有行为一致）；
+    - ``single``：**恰好一个**带声音的资产 → 带出它的声音；
+    - ``ambiguous``：**多个**带声音的资产 → **不替用户选**，留空并说清是哪几个。
+      多人物镜头随便挑一个声音，比没有声音更糟糕。
+    """
+
+    state: str = "none"
+    file_id: str = ""
+    url: str = ""
+    #: 声音来自哪个资产（中文标签，如「角色「苏晚棠」」）
+    asset_label: str = ""
+    #: 候选资产的中文名（``ambiguous`` 时非空，进说明）
+    candidates: tuple[str, ...] = ()
+    #: 给用户看的说明（``ambiguous`` 时必填；``none`` 时为空串，不制造噪音）
+    note: str = ""
+
+
+async def resolve_asset_voice_for_shot(db: AsyncSession, *, shot_id: str) -> AssetVoiceCarry:
+    """镜头**自己没表态**时（既没绑声音、也没标记无需声音），从绑定资产带出声音。
+
+    优先级（用户口径）：**镜头绑定 → 资产声音**。本函数只负责第二步，
+    调用方必须先确认镜头自己没有表态，否则会覆盖用户在本镜上的显式选择。
+    """
+    from app.services.studio.asset_voices import read_asset_voices
+    from app.services.studio.bound_asset_files import bound_asset_ids_for_shot
+
+    bound = await bound_asset_ids_for_shot(db, shot_id=shot_id)
+    by_type: dict[str, list[str]] = {}
+    names: dict[tuple[str, str], str] = {}
+    for slot, asset_type in _SLOT_TO_ASSET_TYPE.items():
+        for asset_id, asset_name in (bound.get(slot) or {}).items():
+            by_type.setdefault(asset_type, []).append(str(asset_id))
+            names[(asset_type, str(asset_id))] = str(asset_name or "")
+
+    voices = await read_asset_voices(db, asset_ids_by_type=by_type)
+    if not voices:
+        return AssetVoiceCarry(state="none")
+
+    # 顺序稳定：按资产类型固定顺序 + 资产名，保证同一份数据每次结论一致
+    type_order = list(_SLOT_TO_ASSET_TYPE.values())
+    ordered = sorted(
+        voices.values(),
+        key=lambda item: (type_order.index(item.asset_type), names.get((item.asset_type, item.asset_id), "")),
+    )
+
+    if len(ordered) > 1:
+        labels = tuple(
+            f"{item.asset_label}「{names.get((item.asset_type, item.asset_id)) or item.asset_id}」"
+            for item in ordered
+        )
+        return AssetVoiceCarry(
+            state="ambiguous",
+            candidates=labels,
+            note=(
+                f"本镜绑定了 {len(ordered)} 个带声音的资产（{'、'.join(labels)}），"
+                "系统不替你挑：请在本镜单独指定要用的声音，或只保留一个带声音的资产。"
+            ),
+        )
+
+    only = ordered[0]
+    label = f"{only.asset_label}「{names.get((only.asset_type, only.asset_id)) or only.asset_id}」"
+    return AssetVoiceCarry(
+        state="single",
+        file_id=only.file_id,
+        url=only.url,
+        asset_label=label,
+        note=f"本镜没有单独绑定声音，已自动带出这一镜绑定的{label}所绑定的声音。",
+    )
+
+
 async def resolve_audio_admission(
     db: AsyncSession,
     *,
@@ -383,12 +471,33 @@ async def resolve_audio_admission(
 
     bound = await resolve_shot_audio_file(db, shot_id=shot_id)
     if bound is None:
+        # 走到这里 = 镜头**自己没有表态**（既没绑 audio_file_id，也没标记无需声音）。
+        # 需求清单第 6 条：这时从**这一镜绑定的资产**带出声音（资产级声音在第 2 步绑好，
+        # 工作室不再逐镜配）。镜头自己的选择永远优先 —— 它一旦有值就在上面的分支里处理完了。
+        carry = await resolve_asset_voice_for_shot(db, shot_id=shot_id)
+        if not carry.file_id:
+            # `none`（没有带声音的资产）不制造噪音；`ambiguous`（多个候选）必须明示，
+            # 因为那是"我们刻意没带"、用户需要知道为什么。
+            return classify_audio_input(
+                file_id="",
+                url="",
+                provider=provider,
+                model=model,
+                opt_out=opt_out,
+                extra_warnings=(carry.note,) if carry.note else (),
+            )
+        carry_obj = await db.get(FileItem, carry.file_id)
+        carry_key = str(getattr(carry_obj, "storage_key", "") or "").strip()
+        carry_url = carry_key if is_public_storage_key(carry_key) else str(carry.url or "")
         return classify_audio_input(
-            file_id="",
-            url="",
+            file_id=carry.file_id,
+            url=carry_url,
             provider=provider,
             model=model,
+            label=carry.asset_label or carry.file_id,
             opt_out=opt_out,
+            file_found=carry_obj is not None,
+            extra_warnings=(carry.note,) if carry.note else (),
         )
 
     file_id = str(bound.file_id or "") or detail_file_id

@@ -152,6 +152,17 @@ async def _bound_asset_ids(db: AsyncSession, *, shot_id: str) -> dict[str, dict[
     return result
 
 
+async def bound_asset_ids_for_shot(db: AsyncSession, *, shot_id: str) -> dict[str, dict[str, str]]:
+    """**公开入口**：该镜头绑定的资产 ``{slot: {asset_id: asset_name}}``。
+
+    为什么单独开一个公开函数、而不是让调用方直接用 ``_bound_asset_ids``：
+    "这一镜绑了哪些资产"这个问题的答案必须**只有一份**（声音带出、绑定面板、
+    交付导出都读它）。否则两边各写一条 join，迟早会在
+    "产品算不算资产""服装算不算"这类细节上悄悄分叉。
+    """
+    return await _bound_asset_ids(db, shot_id=shot_id)
+
+
 async def resolve_shot_audio_file(db: AsyncSession, *, shot_id: str) -> BoundAssetFile | None:
     """解析镜头级音频文件（``shot_details.audio_file_id`` → ``files``）。
 
