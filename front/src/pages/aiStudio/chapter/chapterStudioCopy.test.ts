@@ -813,6 +813,42 @@ test('任务A：音频准入的地址只进技术详情层，主区一个地址�
   assert.ok(!blocked.detail.includes('抓不到'), '主区结论不能是后端句子的改写结果')
 })
 
+test('任务A：音频地址在绑定区有渲染点，且只落在默认收起的「技术详情」折叠壳里（§4.3 模式 4）', () => {
+  const section = stripComments(readScan('shots/components/ShotAudioBindingSection.tsx'))
+  // 主区两处只用 `describeAudioAdmission` 的产品结论（detail / fix / tag / title）
+  assert.ok(/\{admission\.detail\}/.test(section), '主区必须显示中文结论（admission.detail）')
+  assert.ok(/admission\.fix/.test(section), '主区必须显示「怎么修」（admission.fix）')
+  /* 具体地址必须有落点，且**所有**引用都落在统一折叠壳里。
+     判定方式：从「折叠壳的条件表达式」到「盒尾」这一段之外，不许再出现任何
+     `admission.technicalDetail` —— 那才是"地址被铺在主区"。 */
+  const boxStart = section.indexOf('<TechnicalDetailSection')
+  const boxEnd = section.indexOf('</TechnicalDetailSection>')
+  assert.ok(boxStart !== -1 && boxEnd > boxStart, '绑定区没有用统一的技术详情折叠壳')
+  const condStart = section.lastIndexOf('{admission.technicalDetail', boxStart)
+  assert.ok(condStart !== -1, '地址折叠块必须由 admission.technicalDetail 控制显隐')
+  const outsideBox = section.slice(0, condStart) + section.slice(boxEnd + '</TechnicalDetailSection>'.length)
+  assert.deepEqual(
+    outsideBox.match(/admission\.technicalDetail/g) ?? [],
+    [],
+    '主区还有地方在渲染 admission.technicalDetail（地址会直接铺在主区）',
+  )
+  assert.ok(
+    /import \{ TechnicalDetailSection \} from '\.\.\/\.\.\/project\/ProjectWorkbench\/components\/workbench\/TechnicalDetailCollapse'/.test(section),
+    '必须从全仓唯一的 TechnicalDetailCollapse 导入折叠壳（不许自建第二套）',
+  )
+  assert.ok(
+    /testId="audio-admission-technical-detail"/.test(section),
+    '地址折叠块要有可定位的 testId（便于验收与排障）',
+  )
+  // 折叠块的 hint（收起态可见）必须干净：不给地址、不给存储形态、不给禁词
+  const hint = /hint="([^"]+)"/.exec(section)
+  assert.ok(hint, '地址折叠块必须有收起态可见的说明')
+  MAIN_SCREEN_ADDRESS_PATTERNS.forEach((pattern) => {
+    assert.ok(!pattern.test(hint[1]), `折叠块 hint 里出现了地址 / 存储形态：${hint[1]}`)
+  })
+  assert.ok(CJK_RE.test(hint[1]), `折叠块 hint 必须是中文：${hint[1]}`)
+})
+
 test('任务B：三处成对文案 —— 主区是产品自己写的中文结论，后端原文进技术详情层', () => {
   const source = stripComments(readScan('chapter/ChapterStudio.tsx'))
   // ① `provider_notes` 出口：不再走「后端句子过管道」的 showUserWarning

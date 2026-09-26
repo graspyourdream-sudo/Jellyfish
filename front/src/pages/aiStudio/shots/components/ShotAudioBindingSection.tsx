@@ -39,6 +39,11 @@ import {
 } from './audioAdmissionCore'
 // 阶段 B ③（审计 §4.3 模式 6）：本区块此前 `maskInternalIds` 引用数为 0，全部出口统一接管道
 import { showUserError, toUserFacingText } from '../../components/userFacingMessage'
+/* 阶段 B 第 3 批收尾（审计 §4.3 模式 4 / §3.4）：`admission.technicalDetail` 里是
+   **本次请求实际携带的地址**（可能是 `asset://` / `data:` / `/files/...` / 本机内网地址）——
+   它是第三层内容，只能渲染进默认收起的「技术详情」。
+   折叠壳复用全仓唯一实现（`TechnicalDetailCollapse.tsx`），不另建一套。 */
+import { TechnicalDetailSection } from '../../project/ProjectWorkbench/components/workbench/TechnicalDetailCollapse'
 
 const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.oga', '.opus', '.wma', '.aiff', '.aif']
 
@@ -345,6 +350,13 @@ export function ShotAudioBindingSection({
               <div className="text-xs text-slate-500">
                 <span className="text-gray-500">已绑定（内部 ID 见工作区「技术详情」）</span>
               </div>
+              {admission.technicalDetail ? (
+                /* 第 3 批收尾（审计 §4.3 模式 4 / §3.4）：主区的 `detail` 只说"地址是什么形态"，
+                   **具体地址 / 协议形态只在这里**（默认收起，展开才看得到）。 */
+                <TechnicalDetailSection testId="audio-admission-technical-detail" hint="生成服务这次会收到哪个地址">
+                  <div className="break-all text-[11px]">{admission.technicalDetail}</div>
+                </TechnicalDetailSection>
+              ) : null}
               <Space size={8}>
                 <Button size="small" danger icon={<DeleteOutlined />} loading={saving} onClick={() => void bindFile(null)}>
                   解绑
