@@ -461,6 +461,96 @@ def test_confirm_rejects_insufficient_product_coverage(
     assert error["product_shots"] == 1 and error["required"] == 2
 
 
+def test_manual_edit_is_saved_and_used_by_confirm(
+    routed_client: tuple[TestClient, async_sessionmaker[AsyncSession]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """人工编辑必须能存下来（刷新不丢），并且确认落库用的是**编辑后**的草稿。"""
+    client, factory = routed_client
+    monkeypatch.setattr(service.orchestration, "preview_drama_plan", _fake_preview())
+    assert client.put(f"{BASE}/brief", json=BRIEF_BODY).status_code == 200
+    assert client.post(f"{BASE}/generate").status_code == 200
+
+    edited = _plan_payload()
+    edited["title"] = "手改后的标题"
+    edited["shots"][0]["duration"] = 12          # 人工把第一镜改成 12 秒
+    edited["shots"][0]["title"] = "手改：拍瓶"
+    edited["shots"][1]["product_present"] = False  # 仍是 1/3？不：第一镜仍为 True → 1/3 不满足
+    # 保持「至少一半」：把第 3 镜也标成出现商品，于是 2/3 满足
+    edited["shots"][2]["product_present"] = True
+
+    resp = client.put(f"{BASE}/draft", json=edited)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["plan"]["title"] == "手改后的标题"
+
+    # 刷新后（重新 GET）读到的是编辑后的草稿
+    assert client.get(BASE).json()["data"]["plan"]["title"] == "手改后的标题"
+
+    confirmed = client.post(f"{BASE}/confirm")
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["data"]["shot_product_links"] == 2
+
+    shots = asyncio.run(_fetch_all(factory, Shot, chapter_id=CHAPTER_ID))
+    first = asyncio.run(_fetch_one(factory, ShotDetail, id=shots[0].id))
+    assert first is not None and first.duration == 12  # 落库用的是手改后的时长
+
+
+def test_manual_edit_normalizes_enums_and_rejects_broken_structure(
+    routed_client: tuple[TestClient, async_sessionmaker[AsyncSession]]
+) -> None:
+    """手改草稿也过同一套归一化（非法枚举不会原样落库）；结构坏了才 422。"""
+    client, _factory = routed_client
+    assert client.put(f"{BASE}/brief", json=BRIEF_BODY).status_code == 200
+
+    # (1) 非法景别：DTO 里 camera_shot 是普通字符串，不归一就会把脏值写进 shot_details。
+    #     这里必须被归一到默认值，并带回一条 warning（不静默改掉用户输入）。
+    edited = _plan_payload()
+    edited["shots"][0]["camera_shot"] = "不存在的景别"
+    resp = client.put(f"{BASE}/draft", json=edited)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert data["plan"]["shots"][0]["camera_shot"] == "MS"
+    assert any("景别" in item for item in data["plan"]["warnings"])
+
+    # (2) 结构坏掉（shots 不是数组）→ 422，且**不覆盖**已经保存的草稿
+    broken = dict(_plan_payload())
+    broken["shots"] = "这不是数组"
+    bad = client.put(f"{BASE}/draft", json=broken)
+    assert bad.status_code == 422
+    assert bad.json()["meta"]["error"]["code"] == "drama_plan_invalid_draft"
+    assert client.get(BASE).json()["data"]["plan"]["shots"][0]["camera_shot"] == "MS"
+
+
+def test_generate_returns_blocked_envelope_when_guard_trips(
+    routed_client: tuple[TestClient, async_sessionmaker[AsyncSession]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """守卫兜底：服务层抛出拦截异常时，路由必须回 409 结构化信封且 `paid_call_made=false`。
+
+    这条锁的是验收里那句「漏挂守卫 409 且 paid_call_made=false」：
+    演练/未确认真实付费时服务层自己会返回占位，**但万一某条新路径漏了服务层判定**，
+    路由这一层必须把它变成用户看得懂的结构化 409，而不是 500 或"静默成功"。
+    """
+    from app.services.studio.llm_orchestration import dry_run
+
+    client, _factory = routed_client
+    assert client.put(f"{BASE}/brief", json=BRIEF_BODY).status_code == 200
+
+    async def blocked(*_args: Any, **_kwargs: Any) -> Any:
+        raise dry_run.DryRunBlocked("剧情策划生成", outlet=dry_run.OUTLET_LLM)
+
+    monkeypatch.setattr(service.orchestration, "preview_drama_plan", blocked)
+
+    resp = client.post(f"{BASE}/generate")
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["code"] == 409
+    assert body["data"] is None
+    error = body["meta"]["error"]
+    assert error["code"] == "paid_outlet_blocked"
+    # 「被拦 = 没有发生任何真实调用」这件事必须由后端自证
+    assert error["paid_call_made"] is False
+    assert error["outlet"] == "llm"
+
+
 # ---------------------------------------------------------------------------
 # 6) 项目级入口：找 / 建可用空章节
 # ---------------------------------------------------------------------------

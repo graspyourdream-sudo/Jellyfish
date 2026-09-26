@@ -192,6 +192,72 @@ async def generate(db: AsyncSession, *, chapter_id: str) -> dict[str, Any]:
     return _read_payload(chapter, refreshed or row, note=note)
 
 
+async def save_plan(
+    db: AsyncSession,
+    *,
+    chapter_id: str,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    """保存**人工编辑后**的草稿（免费，**只写草稿列**，绝不落正式行）。
+
+    为什么需要它（需求里的一个缺口）：需求说「人工编辑直接改 plan JSON 草稿列」，
+    但四件套里没有"保存编辑"的端点 —— 不补的话编辑只能活在浏览器内存里，
+    刷新就丢，与"草稿刷新不丢"的验收矛盾。
+    """
+    chapter = await _load_chapter_or_404(db, chapter_id)
+    row = await drafts.get_draft(db, chapter_id)
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "drama_plan_brief_required",
+                "message": "这一集还没有保存过商品信息（brief），没有草稿可改。",
+                "fix": "先保存 brief（免费），再点生成或手工填一份草稿。",
+            },
+        )
+    if drafts.lease_active(row):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "drama_plan_generating",
+                "message": "这一集正在生成中，先等它结束再保存手改的草稿（否则会被生成结果覆盖）。",
+                "fix": "等生成结束后重新保存。",
+            },
+        )
+    # 两步走：先按 DTO 校验**结构**（类型/必填/多余字段），再跑确定性归一化。
+    # 分两步的理由：结构坏掉时若直接进归一化，用户会收到"模型返回里没有可用镜头"这种
+    # 与他的手改无关的报错；这里要给他"草稿结构不合法"的准确原因。
+    try:
+        DramaPlanDraft.model_validate(plan or {})
+    except Exception as exc:  # noqa: BLE001 - 结构不合法要如实报，不能把坏草稿写进库
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "drama_plan_invalid_draft",
+                "message": f"草稿结构不合法，未保存：{exc}",
+                "fix": "检查镜头字段的类型（shots 必须是数组、每镜要有 index 与 title 等）。",
+            },
+        ) from exc
+
+    # 手改草稿走**和模型产物同一套**确定性归一化：景别/机位/运镜别名、时长档位、
+    # 镜头序号连续、悬空角色引用剔除。理由：这些字段在 DTO 里是普通字符串，
+    # 不归一的话 `shot_details.camera_shot` 会把「不存在的景别」这种脏值原样落库。
+    # 归一化产生的 warning 随草稿返回，页面可以显示，不会静默改掉用户输入。
+    plan_dto, warnings = orchestration.postprocess_plan(
+        plan or {}, shot_count=max(1, len((plan or {}).get("shots") or []))
+    )
+    plan_dto.warnings = list(dict.fromkeys([*(plan_dto.warnings or []), *warnings]))
+    row.plan = plan_dto.model_dump()
+    # 状态不在这里改：状态表达的是「模型生成过没有」，手改草稿不改变这个事实
+    await db.flush()
+    await db.refresh(row)
+    return _read_payload(
+        chapter,
+        row,
+        note="草稿已保存（免费）。正式产物要等你点「确认落成正式内容」。",
+    )
+
+
 async def confirm(db: AsyncSession, *, chapter_id: str) -> dict[str, Any]:
     """确认落库（materialize，一个事务；失败整体回滚）。"""
     chapter = await _load_chapter_or_404(db, chapter_id)

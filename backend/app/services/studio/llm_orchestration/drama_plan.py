@@ -328,7 +328,7 @@ def postprocess_plan(
 
     if not shots:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="模型返回里没有任何可用镜头，本次生成视为失败（不落草稿）。",
         )
 
