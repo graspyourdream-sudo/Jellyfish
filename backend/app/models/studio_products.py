@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -90,6 +90,19 @@ class Product(Base, TimestampMixin):
         nullable=False,
         default=ProjectVisualStyle.live_action,
         comment="画面表现形式（现实/动漫等）",
+    )
+    # 商品资产的来源投影（「剧情广告完整闭环」实施契约 §一.5 新增列）。
+    # 商品是**全局资产**（三张 products* 表都不放 project_id），所以要回指"是哪个项目的
+    # 哪一章的策划确认把它落下来的"，只能靠这一列 JSON：
+    # `{"source": "drama_plan", "project_id": ..., "chapter_id": ..., "card_updated_at": ...}`。
+    # 空 `{}` = 不是策划落库（手工上传 / 迁移前的历史数据），读侧据此区分，
+    # 与 `drama_plan_materials` 里那一行是同一件事的两个投影（一个在资产上、一个在关系表里）。
+    provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
+        comment="来源投影：{source: 'drama_plan', project_id, chapter_id, card_updated_at}；{} = 非策划落库",
     )
 
     prompt_template: Mapped["PromptTemplate | None"] = relationship()
