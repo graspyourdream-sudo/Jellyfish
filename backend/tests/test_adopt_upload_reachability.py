@@ -341,6 +341,14 @@ async def test_upload_dry_run_never_probes_and_never_uploads(
     """
     from app.services import paid_outlet_guard as guard
 
+    if storage.is_local_storage():
+        pytest.skip(
+            "本环境是**本地存储**驱动（STORAGE_DRIVER 默认 auto → local，通常因为该 worktree 没有 "
+            "backend/.env）：写本地磁盘按设计**不算** OSS 出口、不走这道闸门，"
+            "所以本用例的前提（OSS 出口守卫拦住上传）不成立。"
+            "要跑本用例请把对象存储驱动配好（见 backend/.env.example）。"
+        )
+
     monkeypatch.setenv(DRY_RUN_ENV, "1")
     monkeypatch.delenv(CONFIRM_ENV, raising=False)
     calls = _install_probe(monkeypatch, None)
