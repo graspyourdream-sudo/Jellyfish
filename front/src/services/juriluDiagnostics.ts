@@ -8,7 +8,13 @@
  *   这里按诊断里的**真实证据**判断阶段：第一步非 2xx / 没取到 scriptId → getScriptPage；
  *   第一步成功但第二步某条解析 0 条或报错 → getStoryboardPage（并带上第二步自己的状态码）。
  *
- * 铁律：只输出状态码、布尔值、阶段名、编码名与计数，**绝不回显任何凭证或正文**。
+ * 铁律：只输出状态码、布尔值、环节名、计数与「是否带凭证」，**绝不回显任何凭证或正文**。
+ *
+ * 阶段 B 追加口径（审计 §4.7 服务层 537-539）：本诊断最终落在默认收起的「技术详情」里，
+ * 但**话术必须换成用户语言** —— 内部函数名（`getScriptPage`）→「脚本接口」、
+ * `scriptId` →「脚本编号」、`Cookie` →「登录凭证」、`Authorization` →「授权头」、
+ * `编码 / 载荷 / 解析器 / 2xx` → 用户能懂的说法。原始环节名仍由
+ * `resolveJuriluFailureStage` 返回（**技术字段**，供分支判断与单测）。
  */
 
 type AnyRecord = Record<string, unknown>
@@ -24,6 +30,30 @@ export interface StoryboardAttemptShape {
 
 const STAGE_SCRIPT = 'getScriptPage'
 const STAGE_STORYBOARD = 'getStoryboardPage'
+
+/**
+ * 环节名 → 用户语言（审计 §4.7-537：`接口阶段 getScriptPage` 里的环节名是内部函数名，模式 2）。
+ *
+ * **只映射已登记的环节；未登记一律给中文兜底「抓取接口」，绝不回显原值**
+ * （与 `enumLabels.labelFor` 同一条铁律）。
+ */
+const STAGE_LABELS: Record<string, string> = {
+  [STAGE_SCRIPT]: '脚本接口',
+  [STAGE_STORYBOARD]: '分镜接口',
+}
+
+/** 未登记环节的中文兜底。 */
+const UNKNOWN_STAGE_LABEL = '抓取接口'
+
+/** 把内部环节名换成用户语言；`getScriptPage（未取到脚本编号）` 这类后缀原样保留（它已是中文）。 */
+function stageLabel(stage: string): string {
+  const raw = String(stage ?? '').trim()
+  if (!raw) return UNKNOWN_STAGE_LABEL
+  const parenIndex = raw.indexOf('（')
+  const base = (parenIndex >= 0 ? raw.slice(0, parenIndex) : raw).trim()
+  const suffix = parenIndex >= 0 ? raw.slice(parenIndex) : ''
+  return `${STAGE_LABELS[base] ?? UNKNOWN_STAGE_LABEL}${suffix}`
+}
 
 function asRecord(value: unknown): AnyRecord | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as AnyRecord) : null
@@ -66,7 +96,8 @@ export function resolveJuriluFailureStage(diag: AnyRecord): { stage: string; sta
     return { stage: stage || STAGE_SCRIPT, status: scriptStatus }
   }
   if (scriptCount === 0) {
-    return { stage: `${STAGE_SCRIPT}（未取到 scriptId）`, status: diag.script_status }
+    /* 审计 §4.7-537：`scriptId` 是内部字段名（模式 2）→ 用户语言「脚本编号」。 */
+    return { stage: `${STAGE_SCRIPT}（未取到脚本编号）`, status: diag.script_status }
   }
   const failed = findFailedStoryboardAttempt(diag)
   if (failed) return { stage: STAGE_STORYBOARD, status: failed.status }
@@ -83,17 +114,19 @@ export function describeStoryboardZeroRecords(attempt: StoryboardAttemptShape | 
   const parsedTotal = Object.values(counts).reduce<number>((sum, value) => sum + (asNumber(value) ?? 0), 0)
   const status = asNumber(attempt.status)
 
+  /* 口径来源：审计 §4.7-538 —— 四条都换成用户能懂的话：
+     「编码 / 载荷 / 解析器 / 2xx」是开发术语，用户只需要知道「是不是我账号的问题」。 */
   if (decodeErrors.length) {
-    return `响应声明编码 ${decodeErrors.join('/')}，但载荷没解开（我方解析问题，不是接口拒绝）`
+    return `接口返回的内容格式我方没能解析（不是你账号的问题）`
   }
   if (unsupported.length) {
-    return `响应用了暂不支持的编码 ${unsupported.join('/')}（需要补解析器）`
+    return `接口用了本版本还不支持的内容格式，需要升级后再试`
   }
   if (parsedTotal > 0) {
-    return `响应里其实有 ${parsedTotal} 条记录，但一条也没落成分镜（解析问题）`
+    return `接口其实返回了 ${parsedTotal} 条记录，但没能整理成分镜（我方处理问题）`
   }
   if (status !== null && status < 300) {
-    return '接口返回 2xx 但确实没有分镜记录（不是凭证问题）'
+    return '接口调用成功，但这一集确实没有分镜记录（不是账号问题）'
   }
   return ''
 }
@@ -111,12 +144,14 @@ export function extractJuriluDiagnostics(error: unknown): string {
   if (!diag) return ''
   const { stage, status } = resolveJuriluFailureStage(diag)
   const parts: string[] = []
-  if (stage) parts.push(`接口阶段 ${stage}`)
+  /* 审计 §4.7-537：`接口阶段` 是开发术语（`阶段` ＋ 接口），改「脚本接口 / 分镜接口」。 */
+  if (stage) parts.push(`所在环节 ${stageLabel(stage)}`)
   if (status !== undefined && status !== null && `${status}`.trim() !== '') parts.push(`HTTP ${status}`)
-  parts.push(`带 Cookie：${diag.has_cookie ? '是' : '否'}`)
-  parts.push(`额外带 Authorization：${diag.has_auth ? '是' : '否'}`)
+  /* 审计 §4.7-539：`Cookie` / `Authorization` 是请求头名（模式 4），改「登录凭证 / 授权头」。 */
+  parts.push(`已带登录凭证：${diag.has_cookie ? '是' : '否'}`)
+  parts.push(`已附授权头：${diag.has_auth ? '是' : '否'}`)
   const mode = String(diag.auth_header_mode ?? '').trim()
-  if (mode) parts.push(`授权模式 ${mode}`)
+  if (mode) parts.push(`凭证携带方式 ${mode}`)
   if (stage.startsWith(STAGE_STORYBOARD)) {
     const detail = describeStoryboardZeroRecords(findFailedStoryboardAttempt(diag))
     if (detail) parts.push(detail)

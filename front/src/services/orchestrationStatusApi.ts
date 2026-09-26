@@ -13,7 +13,8 @@
  * 解析（纯逻辑）在 `pages/aiStudio/components/realRunModeCore.ts`，本文件只负责取数。
  */
 
-import { OpenAPI } from './generated'
+/* 同 `llmPipelineApi`：显式指向 `core/OpenAPI`（目录导入在 Node ESM 下不可用）。 */
+import { OpenAPI } from './generated/core/OpenAPI.ts'
 
 export const ORCHESTRATION_STATUS_PATH = '/api/v1/studio/llm/orchestration/status'
 
@@ -23,11 +24,22 @@ export const ORCHESTRATION_REFRESH_EVENT = 'jellyfish:orchestration-status-refre
 /** 取状态失败时抛出（带 HTTP 状态码，便于区分「后端没起」与「返回异常」）。 */
 export class OrchestrationStatusError extends Error {
   status: number
+  /**
+   * **技术字段**（审计 §4.7「服务层」）：后端 `message` 原文与响应体前 200 字。
+   *
+   * 为什么不再拼进 `message`：本异常最终在 `RealRunModeBadge` 的默认收起折叠区里渲染
+   * （`读取失败原文：`＋请求地址），而 `message` 一旦被别的出口（Alert 标题 / toast）
+   * 取走就会把后端原文与响应体带上主区。现在 `message` 只留一句中文结论。
+   */
+  readonly backendMessage: string
+  readonly responseText: string
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, backendMessage = '', responseText = '') {
     super(message)
     this.name = 'OrchestrationStatusError'
     this.status = status
+    this.backendMessage = backendMessage
+    this.responseText = responseText
   }
 }
 
@@ -46,10 +58,15 @@ export async function fetchOrchestrationStatusData(): Promise<Record<string, unk
     payload = undefined
   }
   if (!response.ok) {
-    const message = typeof payload?.message === 'string' ? payload.message : text.slice(0, 200)
+    /* 审计 §4.7-535：改前把「后端 message / 响应体前 200 字」原样拼进 message
+       （`读取守卫状态失败（HTTP xxx）：…`），最终在 `RealRunModeBadge` 主区直渲。
+       现在 message = 中文结论，原文进 `backendMessage` / `responseText` 技术字段。 */
+    const backendMessage = typeof payload?.message === 'string' ? payload.message : ''
     throw new OrchestrationStatusError(
-      `读取守卫状态失败（HTTP ${response.status}）：${message || '无响应体'}`,
+      `读取运行模式状态失败，请稍后重试`,
       response.status,
+      backendMessage,
+      String(text ?? '').slice(0, 200),
     )
   }
   const data = payload?.data

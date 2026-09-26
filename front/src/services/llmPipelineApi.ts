@@ -11,32 +11,134 @@
  * 生产流程的 5 个页面都从这里取能力，避免每页各写一套。
  */
 
-import { OpenAPI } from './generated'
+/* 显式指向 `core/OpenAPI` 而不是目录 `./generated`：目录导入在 Vite 下可用、
+   **在 Node ESM（`node --test`）下会报 ERR_UNSUPPORTED_DIR_IMPORT**，
+   而本文件的错误构造口径必须能被单测直接验证（审计 §4.7 服务层要求「原文进技术字段」）。
+   生成物本身一个字都没改。 */
+import { OpenAPI } from './generated/core/OpenAPI.ts'
 import {
   extractJuriluDiagnostics as extractJuriluDiagnosticsFromModule,
   type StoryboardAttemptShape,
-} from './juriluDiagnostics'
+} from './juriluDiagnostics.ts'
 
 export type AnyRecord = Record<string, any>
 
 /**
+ * 一次失败响应的**技术字段**（审计 §4.7「服务层」口径）。
+ *
+ * 为什么要有它：改前 `callApi` / `callApiDelete` / `callApiPatch` / `parseScriptDocument`
+ * 都把「后端原文 + `detail` 的 `JSON.stringify` + 整个响应体 + `HTTP {status}`」
+ * 拼进 `error.message`，而页面普遍 `message.error(error.message)` —— 等于把第三层内容
+ * （后端错误原文 / 响应体 / 内部 ID）摆到主区（模式 6 + 模式 4）。
+ * 现在：**`message` 只保留一句中文结论**，原文全部收进本结构（默认收起的「技术详情」读取）。
+ */
+export type RequestFailureTechnical = {
+  /** HTTP 状态码（主区不显示） */
+  readonly status: number
+  /** 后端统一信封 `meta.error.message`（或 `payload.message`）原文 */
+  readonly backendMessage: string
+  /** 后端 `detail` 原值（对象原样保留，供结构化错误读取） */
+  readonly detail: unknown
+  /** 完整响应体文本（截断到 2000 字；技术详情层用） */
+  readonly responseText: string
+}
+
+/** 响应体在技术字段里的保留上限（够排查，又不至于把大响应体整份挂内存里）。 */
+const RESPONSE_TEXT_LIMIT = 2000
+
+function truncateResponseText(text: string): string {
+  const value = String(text ?? '')
+  return value.length > RESPONSE_TEXT_LIMIT ? `${value.slice(0, RESPONSE_TEXT_LIMIT)}…` : value
+}
+
+/**
+ * HTTP 状态码 → **主区中文结论**（产品自己写的句子，不随后端措辞漂移，审计 §7.1-8）。
+ *
+ * 不含状态码本身、不含接口路径、不含后端原文 —— 这些都在 `RequestFailureTechnical` 里。
+ */
+export function requestFailureConclusion(status: number): string {
+  if (status === 400) return '提交的内容没有被接受，请检查后重试'
+  if (status === 401 || status === 403) return '登录或访问凭证已失效，请重新登录后再试'
+  if (status === 404) return '要操作的内容不存在，可能已被删除，请刷新后再试'
+  if (status === 409) return '当前状态不允许这一步操作，请刷新后再试'
+  if (status === 413) return '文件太大，请换一个小一些的文件'
+  if (status === 422) return '填写的内容不符合要求，请检查后重试'
+  if (status === 429) return '操作太频繁，请稍后再试'
+  if (status >= 500) return '服务端出错了，请稍后重试'
+  return '这一步没有成功，请稍后重试'
+}
+
+/**
  * 带 HTTP 状态码的请求异常。
  *
- * 为什么需要：五类生成状态（DRY_RUN 门禁 / 模型未配置 / 参数缺失 / 服务错误 / 正在处理）
+ * 为什么需要：五类生成状态（演练模式拦截 / 模型未配置 / 参数缺失 / 服务错误 / 正在处理）
  * 要靠状态码区分，而普通 Error 只剩一句 message，前端只能猜。
- * 它继承 Error，所以既有 `catch (e) { e.message }` 的调用方行为不变。
+ * 它继承 Error，所以既有 `catch (e) { e.message }` 的调用方行为不变
+ * （**字段名与类型契约不变**：`message` / `status` / `diagnostics` 都在，
+ * 只新增 `technical` 与 `detail` 两个技术字段）。
  */
 export class GenerationRequestError extends Error {
   status: number
   /** 后端信封 `meta.diagnostics`（脱敏，不含任何凭证）：错误排查用 */
   diagnostics?: Record<string, unknown>
+  /**
+   * 后端 `detail` 原值（技术字段）。
+   *
+   * 单独挂一份的理由：既有结构化错误读取（`assetPromptQuality.readStructuredServerError`）
+   * 会读 `error.detail` —— 「显式确认覆盖」这类流程靠它，不能因为改了 `message` 就丢。
+   */
+  detail?: unknown
+  /** 后端原文 / 响应体 / 状态码（**技术详情层专用**；主区一句话在 `message`） */
+  technical?: RequestFailureTechnical
 
-  constructor(message: string, status: number, diagnostics?: Record<string, unknown>) {
+  constructor(
+    message: string,
+    status: number,
+    diagnostics?: Record<string, unknown>,
+    technical?: RequestFailureTechnical,
+  ) {
     super(message)
     this.name = 'GenerationRequestError'
     this.status = status
     this.diagnostics = diagnostics
+    this.technical = technical
+    this.detail = technical?.detail
   }
+}
+
+/**
+ * 由一次失败响应构造 `GenerationRequestError`（服务层唯一的错误构造出口）。
+ *
+ * 口径：`message = action ? `${action}：${结论}` : 结论`，**绝不含后端原文 / 状态码 / 响应体**。
+ * 导出给同型薄封装（`dramaPlanApi.callApiPut`）复用，避免同一条管道出现两种口径。
+ */
+export function buildRequestFailure(
+  action: string | null,
+  status: number,
+  text: string,
+  payload: AnyRecord | undefined,
+  diagnostics?: Record<string, unknown>,
+): GenerationRequestError {
+  const meta = (payload?.meta ?? {}) as AnyRecord
+  const error = (meta.error ?? {}) as AnyRecord
+  const technical: RequestFailureTechnical = {
+    status,
+    backendMessage: String(error.message ?? payload?.message ?? '').trim(),
+    detail: payload?.detail,
+    responseText: truncateResponseText(text),
+  }
+  const conclusion = requestFailureConclusion(status)
+  return new GenerationRequestError(action ? `${action}：${conclusion}` : conclusion, status, diagnostics, technical)
+}
+
+function throwRequestFailure(
+  action: string | null,
+  status: number,
+  text: string,
+  payload: AnyRecord | undefined,
+  diagnostics?: Record<string, unknown>,
+): never {
+  throw buildRequestFailure(action, status, text, payload, diagnostics)
 }
 
 async function callApi<T = AnyRecord>(path: string, body?: AnyRecord): Promise<T> {
@@ -54,12 +156,11 @@ async function callApi<T = AnyRecord>(path: string, body?: AnyRecord): Promise<T
   }
   if (!response.ok) {
     const meta = (payload?.meta ?? {}) as AnyRecord
-    const error = (meta.error ?? {}) as AnyRecord
-    const detail = payload?.detail
-    const suffix = detail ? `（${typeof detail === 'string' ? detail : JSON.stringify(detail)}）` : ''
-    throw new GenerationRequestError(
-      String(error.message ?? payload?.message ?? text ?? `HTTP ${response.status}`) + suffix,
+    throwRequestFailure(
+      null,
       response.status,
+      text,
+      payload,
       (meta.diagnostics as Record<string, unknown> | undefined) ?? undefined,
     )
   }
@@ -82,14 +183,7 @@ async function callApiDelete<T = AnyRecord>(path: string): Promise<T> {
     payload = undefined
   }
   if (!response.ok) {
-    const meta = (payload?.meta ?? {}) as AnyRecord
-    const error = (meta.error ?? {}) as AnyRecord
-    const detail = payload?.detail
-    const suffix = detail ? `（${typeof detail === 'string' ? detail : JSON.stringify(detail)}）` : ''
-    throw new GenerationRequestError(
-      String(error.message ?? payload?.message ?? text ?? `HTTP ${response.status}`) + suffix,
-      response.status,
-    )
+    throwRequestFailure(null, response.status, text, payload)
   }
   return (payload?.data ?? null) as T
 }
@@ -109,17 +203,43 @@ async function callApiPatch<T = AnyRecord>(path: string, body: AnyRecord): Promi
     payload = undefined
   }
   if (!response.ok) {
-    const meta = (payload?.meta ?? {}) as AnyRecord
-    const error = (meta.error ?? {}) as AnyRecord
-    const detail = payload?.detail
-    const suffix = detail ? `（${typeof detail === 'string' ? detail : JSON.stringify(detail)}）` : ''
-    throw new GenerationRequestError(
-      String(error.message ?? payload?.message ?? text ?? `HTTP ${response.status}`) + suffix,
-      response.status,
-    )
+    throwRequestFailure(null, response.status, text, payload)
   }
   return (payload?.data ?? null) as T
 }
+
+/**
+ * 生成客户端（`services/generated/core/request.ts`，**自动产物、不手改**）在
+ * 未登记状态码上会把**完整响应体**拼进 `ApiError.message`：
+ * `Generic Error: status: 409; status text: …; body: {…}`（审计 §4.7 模式 6 + §3.3）。
+ *
+ * 生成物不许手改 → 在**封装层**统一收口：任何页面把异常交给用户之前，
+ * 用本函数取「主区那一句」，原文用 `technicalTextOf` 取（进默认收起的「技术详情」）。
+ *
+ * ⚠️ 只读不改：**不修改传入的 error 对象**（`message` 原样保留）——
+ * 「演练模式拦截」的识别要靠 `body:` 里的 JSON（`generationStatusCore.readErrorCode`），
+ * 就地改 `message` 会把这个判定打瞎。
+ */
+export function toUserFacingApiErrorText(error: unknown, fallback: string): string {
+  const status = Number((error as { status?: unknown } | undefined)?.status)
+  if (Number.isFinite(status) && status > 0) {
+    const conclusion = requestFailureConclusion(status)
+    return `${fallback || '这一步没有成功'}：${conclusion}`
+  }
+  return fallback || '这一步没有成功，请稍后重试'
+}
+
+/** 异常的**原文**（技术详情层用；带 `body:` 的响应体也在此，供技术详情展开）。 */
+export function technicalTextOf(error: unknown): string {
+  if (error instanceof Error) return String(error.message ?? '')
+  if (typeof error === 'string') return error
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
+}
+
 
 /* ------------------------------------------------------------------ 类型 */
 
@@ -557,8 +677,10 @@ export interface ParsedDocument {
  * 解析剧本文档为纯文本。
  *
  * 后端只解析、不落盘、不写库、不上传对象存储（`POST /studio/documents/parse`），
- * 因此 DRY_RUN 下也能用，且不会产生任何费用。
- * 旧版 `.doc` 会返回明确错误（「请另存为 DOCX」），这里原样抛出给用户看。
+ * 因此演练模式下也能用，且不会产生任何费用。
+ * 旧版 `.doc` 会被后端明确拒绝 —— 主区给**产品自己写的结论**（含「另存为 DOCX」这个
+ * 可行动作），后端原文只进技术字段（审计 §4.7-581：改前这里连**整个响应体**都当兜底，
+ * 且不加任何中文前缀，是最裸的一处）。
  */
 export async function parseScriptDocument(file: File): Promise<ParsedDocument> {
   const form = new FormData()
@@ -576,11 +698,8 @@ export async function parseScriptDocument(file: File): Promise<ParsedDocument> {
   }
   if (!response.ok) {
     const meta = (payload?.meta ?? {}) as AnyRecord
-    const error = (meta.error ?? {}) as AnyRecord
-    throw new GenerationRequestError(
-      String(error.message ?? payload?.message ?? text ?? `HTTP ${response.status}`),
-      response.status,
-    )
+    throwRequestFailure('剧本文件解析失败，请确认格式（旧版 .doc 请先另存为 DOCX）后重试', response.status, text, payload,
+      (meta.diagnostics as Record<string, unknown> | undefined) ?? undefined)
   }
   return (payload?.data ?? null) as ParsedDocument
 }
@@ -856,7 +975,9 @@ export async function persistGeneratedVideo(shotId: string, url: string, name?: 
     usage_kind: 'generated_video',
   })
   const fileId = String(created?.id ?? '').trim()
-  if (!fileId) throw new Error('视频已生成但登记素材失败（没有拿到 file_id）')
+  /* 审计 §4.7-533：改前是 `视频已生成但登记素材失败（没有拿到 file_id）` —— 后端字段名
+     `file_id` 直接上屏（模式 2）。主区改成产品口径的中文结论 + 可行动作。 */
+  if (!fileId) throw new Error('视频已经生成，但没有登记成功；请重试，或打开「技术详情」查看记录')
   await callApiPatch(`/api/v1/studio/shots/${encodeURIComponent(shotId)}`, {
     generated_video_file_id: fileId,
   })
@@ -1288,11 +1409,14 @@ export async function downloadDeliveryTxt(
 
   const response = await fetch(url)
   if (!response.ok) {
+    /* 审计 §4.7-534：改前 `导出失败：HTTP ${status}（${text.slice(0, 120)}）` ——
+       响应体前 120 字里可能含地址 / 字段名（模式 4）。主区只给中文结论，
+       状态码与响应体收进技术字段（`technical`）。 */
     const text = await response.text().catch(() => '')
-    throw new Error(`导出失败：HTTP ${response.status}${text ? `（${text.slice(0, 120)}）` : ''}`)
+    throwRequestFailure('导出失败，请稍后重试', response.status, text, undefined)
   }
   const blob = await response.blob()
-  if (!blob.size) throw new Error('导出失败：后端返回了空文件')
+  if (!blob.size) throw new Error('导出失败：服务端返回了空文件，请稍后重试')
 
   const disposition = response.headers.get('content-disposition') || ''
   const matched = /filename="?([^";]+)"?/i.exec(disposition)

@@ -14,7 +14,10 @@
  */
 
 import { OpenAPI } from './generated/core/OpenAPI'
-import { GenerationRequestError, callApi } from './llmPipelineApi'
+/* `GenerationRequestError` 只用于再导出（`export type`），所以走 `import type`；
+   `buildRequestFailure` 是构造出口（值），必须走值导入。 */
+import { buildRequestFailure, callApi } from './llmPipelineApi'
+import type { GenerationRequestError } from './llmPipelineApi'
 
 const API = '/api/v1/studio'
 
@@ -134,14 +137,10 @@ async function callApiPut<T = Record<string, unknown>>(path: string, body: Recor
     payload = undefined
   }
   if (!response.ok) {
-    const meta = (payload?.meta ?? {}) as Record<string, unknown>
-    const error = (meta.error ?? {}) as Record<string, unknown>
-    const detail = payload?.detail
-    const suffix = detail ? `（${typeof detail === 'string' ? detail : JSON.stringify(detail)}）` : ''
-    throw new GenerationRequestError(
-      String(error.message ?? payload?.message ?? text ?? `HTTP ${response.status}`) + suffix,
-      response.status,
-    )
+    /* 与 `callApi` 同口径（审计 §4.7 服务层）：`message` 只保留中文结论，
+       后端原文 / `detail` / 响应体 / 状态码收进 `GenerationRequestError.technical`。
+       本文件是 `callApi` 的同型薄封装，**不在这里另起一套话术** —— 复用同一个构造出口。 */
+    throw buildRequestFailure(null, response.status, text, payload)
   }
   return (payload?.data ?? null) as T
 }
