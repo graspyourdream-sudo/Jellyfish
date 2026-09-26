@@ -329,18 +329,22 @@ const ProjectWorkbench: React.FC = () => {
     { key: 'filesPath', label: '文件管理', onClick: () => navigate('/files') },
   ]
 
-  if (!project && !projectLoading) {
-    return (
-      <Card>
-        <Empty description="项目不存在" />
-        <Link to="/projects">
-          <Button type="link" icon={<ArrowLeftOutlined />}>
-            返回项目列表
-          </Button>
-        </Link>
-      </Card>
-    )
-  }
+  /**
+   * 项目不存在 / 已删除：只算一个布尔值，**不再在这里早期 return**。
+   *
+   * 历史问题（审计 §5.5-A1 / R26，截图 `p2_e3_bad_project-1.png`）：这条分支原来就写在
+   * 这里——在 ~40 个 hook 之后、`openAssetEditor`（`useCallback`）之前。于是当
+   * `projectLoading` 由 true 翻成 false 而 `project === undefined` 时，这一次渲染比上一次
+   * **少调用一个 hook**，React 直接抛
+   * `Rendered fewer hooks than expected. This may be caused by an accidental early return statement.`，
+   * 被 `main.tsx` 顶层 ErrorBoundary 接住，整棵树（含 `MainLayout` 侧边导航）一起消失，
+   * 页面完全不可用。
+   *
+   * 现在所有 hook 在每次渲染都无条件执行，空态挪到组件最后一个 return 处渲染。
+   * 本页由 `App.tsx` 的 `<Route path="projects/:projectId">` 嵌套在
+   * `<Route path="/" element={<MainLayout />}>` 之下，正常渲染空态即可保住侧边导航。
+   */
+  const projectMissing = !project && !projectLoading
 
   /**
    * 打开既有资产编辑页（原第 2 步面板里的同一套跳转口径，改版后由工作台卡片调用）。
@@ -490,6 +494,20 @@ const ProjectWorkbench: React.FC = () => {
         onEnterStudio={(step) => openChapterStudio(step)}
         onGoStep={openStep}
       />
+    )
+  }
+
+  // 空态在**所有 hook 之后**渲染：hook 数量在 loading → 不存在 的前后两次渲染之间保持一致（§5.5-A1）。
+  if (projectMissing) {
+    return (
+      <Card>
+        <Empty description="项目不存在或已被删除" />
+        <Link to="/projects">
+          <Button type="link" icon={<ArrowLeftOutlined />}>
+            返回项目列表
+          </Button>
+        </Link>
+      </Card>
     )
   }
 
