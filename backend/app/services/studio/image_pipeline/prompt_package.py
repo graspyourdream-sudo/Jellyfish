@@ -46,6 +46,7 @@ REFERENCE_SLOT_BY_TYPE: dict[str, str] = {
     "scene": "scene",
     "prop": "props",
     "costume": "costumes",
+    "product": "products",
 }
 MAX_REFERENCE_ASSETS = 20
 

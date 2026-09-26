@@ -28,7 +28,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.studio import (
     Character,
     Costume,
+    Product,
     ProjectCostumeLink,
+    ProjectProductLink,
     ProjectPropLink,
     ProjectSceneLink,
     Prop,
@@ -43,6 +45,7 @@ SLOT_LABELS: dict[str, str] = {
     "scene": "场景",
     "props": "道具",
     "costumes": "服装",
+    "products": "商品",
     # 声音不是"资产"，而是镜头级音频文件（files.type=audio），单列一个槽位
     "audio": "声音",
 }
@@ -53,6 +56,7 @@ SLOT_ASSET_TYPE: dict[str, str] = {
     "scene": "scene",
     "props": "prop",
     "costumes": "costume",
+    "products": "product",
 }
 
 
@@ -134,6 +138,16 @@ async def _bound_asset_ids(db: AsyncSession, *, shot_id: str) -> dict[str, dict[
     ).all()
     for asset_id, name in rows:
         result["costumes"][str(asset_id)] = str(name or "")
+
+    rows = (
+        await db.execute(
+            select(ProjectProductLink.product_id, Product.name)
+            .join(Product, Product.id == ProjectProductLink.product_id)
+            .where(ProjectProductLink.shot_id == shot_id)
+        )
+    ).all()
+    for asset_id, name in rows:
+        result["products"][str(asset_id)] = str(name or "")
 
     return result
 

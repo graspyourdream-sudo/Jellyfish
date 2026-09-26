@@ -50,8 +50,17 @@ verify_uploaded_url_reachable = _verify_uploaded_url_reachable
 # DRY_RUN 占位地址使用的不可达域名（见 llm_orchestration/dry_run.py）
 PLACEHOLDER_URL_MARKERS: tuple[str, ...] = ("dry-run.invalid",)
 
-# 支持采纳的资产类型（出图服务契约只覆盖这三类图片）
-ADOPTABLE_ENTITY_TYPES: tuple[str, ...] = ("character", "scene", "prop", "costume", "actor")
+# 支持采纳的资产类型（**读取侧**口径：能收到「采纳」动作的资产类型全集）。
+# 注意：这里不是「能出图的类型」——出图服务契约只覆盖 character/scene/prop 三类，
+# 服装与商品走 Jellyfish 自己的通道，各自在提交侧按类型路由（见 costume_channel）。
+ADOPTABLE_ENTITY_TYPES: tuple[str, ...] = (
+    "character",
+    "scene",
+    "prop",
+    "costume",
+    "actor",
+    "product",
+)
 
 
 @dataclass(slots=True)

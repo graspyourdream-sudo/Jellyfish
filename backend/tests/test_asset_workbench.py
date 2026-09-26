@@ -312,7 +312,15 @@ def test_real_project_shape_needs_profile_and_no_fake_ready() -> None:
     assert "分析本章资产" in payload["analysis"]["hint"]
 
     assert payload["summary"]["total"] == 11
-    assert payload["summary"]["by_type"] == {"character": 7, "scene": 1, "prop": 3, "costume": 0}
+    # 商品（product）在 MVP 里不进工作台平权，但 ASSET_TYPES 已含它，
+    # 因此 by_type 会多一个恒为 0 的键（前端页签是写死的四类，不按这个键渲染）。
+    assert payload["summary"]["by_type"] == {
+        "character": 7,
+        "scene": 1,
+        "prop": 3,
+        "costume": 0,
+        "product": 0,
+    }
     assert payload["summary"]["needs_profile"] == 11
     assert payload["summary"]["prompt_ready"] == 0
 

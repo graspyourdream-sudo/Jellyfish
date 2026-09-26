@@ -77,8 +77,9 @@ CHAPTER_TEMPORAL_FIELDS: dict[str, tuple[str, ...]] = {
     "costume": ("occasion",),
 }
 
-#: 全局资产（需要章节隔离的三类）；角色归属项目，不属于全局资产。
-GLOBAL_ASSET_TYPES: tuple[str, ...] = ("scene", "prop", "costume")
+#: 全局资产（需要章节隔离的四类）；角色归属项目，不属于全局资产。
+#: 商品与场景/道具/服装同口径：表里不放 project_id，归属靠 project_*_links 的三档作用域。
+GLOBAL_ASSET_TYPES: tuple[str, ...] = ("scene", "prop", "costume", "product")
 
 
 def is_global_asset(asset_type: str) -> bool:

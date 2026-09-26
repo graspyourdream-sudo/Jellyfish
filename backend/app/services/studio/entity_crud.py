@@ -190,7 +190,7 @@ async def create_entity(
     await db.flush()
     await db.refresh(obj)
 
-    if entity_type_norm in {"actor", "scene", "prop", "costume"}:
+    if entity_type_norm in {"actor", "scene", "prop", "costume", "product"}:
         count = int(getattr(obj, "view_count", 1) or 1)
         angles = list(DEFAULT_VIEW_ANGLES[: min(max(count, 0), len(DEFAULT_VIEW_ANGLES))])
         for angle in angles:
@@ -214,7 +214,7 @@ async def create_entity(
             shot_id=link_shot_id,
         )
 
-    if link_shot_id is not None and entity_type_norm in {"scene", "prop", "costume"}:
+    if link_shot_id is not None and entity_type_norm in {"scene", "prop", "costume", "product"}:
         # 就地新建（带 shot_id）也要把提取候选回写为 linked：
         # character 走 upsert_shot_character_link → 内部已回写；scene/prop/costume 走的是通用
         # upsert_project_link（纯业务关联，不管候选），于是"新建并关联"之后候选仍是 pending，

@@ -13,7 +13,12 @@
  * - 服装：穿着人物、身份时代、款式、颜色、材质、配饰、使用场合。
  */
 
-export type AssetProfileFieldType = 'character' | 'scene' | 'prop' | 'costume'
+export type AssetProfileFieldType =
+  | 'character'
+  | 'scene'
+  | 'prop'
+  | 'costume'
+  | 'product'
 
 export type AssetProfileFieldSpec = {
   /** 后端字段键（`manual_overrides` 里的键） */
@@ -77,6 +82,15 @@ export const ASSET_PROFILE_FIELD_SPECS: Record<AssetProfileFieldType, AssetProfi
     { key: 'material', label: '材质', placeholder: '例：织锦缎，暗纹提花', visual: true },
     { key: 'accessories', label: '配饰', placeholder: '例：翡翠手串、白玉簪', visual: true },
     { key: 'occasion', label: '使用场合', placeholder: '例：堂前逼问嫁妆的正装场合', visual: true },
+  ],
+  product: [
+    { key: 'appearance', label: '外观描述', placeholder: '例：白色磨砂塑料瓶身，金色压泵，正面印品牌名', visual: true },
+    { key: 'material', label: '材质', placeholder: '例：磨砂 PET 塑料，金属压泵', visual: true },
+    { key: 'color', label: '颜色', placeholder: '例：主色纯白，辅色香槟金', visual: true },
+    { key: 'package', label: '包装', placeholder: '例：方形瓶身 + 白色外盒，盒面有烫金线', visual: true },
+    { key: 'logo', label: 'Logo与品牌标识', placeholder: '例：瓶身正面居中金色字标，不得改动字形与位置', visual: true },
+    { key: 'spec', label: '规格', placeholder: '例：净含量 100ml，瓶高 16cm', visual: false },
+    { key: 'selling_points', label: '关联卖点', placeholder: '例：三秒吸收不黏腻、孕妇可用', visual: false },
   ],
 }
 

@@ -176,7 +176,9 @@ def test_asset_profiles_route_returns_user_flow_and_technical_detail(routed_clie
     assert girl["fields"]["appearance"] == "鹅蛋脸杏眼，肤色白皙，身形纤细"
     assert [ref["shot_index"] for ref in girl["shot_refs"]] == [1, 2]
     assert girl["suggested_action"] == "create_new"
-    assert set(flow["field_labels"]) == {"character", "scene", "prop", "costume"}
+    # field_labels 按 ASSET_TYPES 生成：商品（第五类资产）在 MVP 不进实体提取/工作台平权，
+    # 但它**有**资料字段表（asset_profiles.PROFILE_FIELD_SPECS），所以这里也会出现。
+    assert set(flow["field_labels"]) == {"character", "scene", "prop", "costume", "product"}
 
     # 技术详情（默认收起）
     detail = data["technical_detail"]

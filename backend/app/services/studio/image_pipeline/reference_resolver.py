@@ -23,6 +23,7 @@ from app.models.studio import (
     CharacterImage,
     CostumeImage,
     FileItem,
+    ProductImage,
     PropImage,
     SceneImage,
 )
@@ -33,6 +34,7 @@ IMAGE_MODEL_BY_ASSET_TYPE: dict[str, type] = {
     "scene": SceneImage,
     "prop": PropImage,
     "costume": CostumeImage,
+    "product": ProductImage,
 }
 
 PARENT_FIELD_BY_ASSET_TYPE: dict[str, str] = {
@@ -40,6 +42,7 @@ PARENT_FIELD_BY_ASSET_TYPE: dict[str, str] = {
     "scene": "scene_id",
     "prop": "prop_id",
     "costume": "costume_id",
+    "product": "product_id",
 }
 
 

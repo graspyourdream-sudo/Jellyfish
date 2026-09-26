@@ -133,6 +133,12 @@ class CostumeImageRead(AssetImageBase):
     costume_id: str
 
 
+class ProductImageRead(AssetImageBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    product_id: str
+
+
 class CharacterImageRead(AssetImageBase):
     model_config = ConfigDict(from_attributes=True)
 
@@ -142,7 +148,9 @@ class CharacterImageRead(AssetImageBase):
 class ProjectAssetReadinessItem(BaseModel):
     """项目内一项资产的准备状态（四类资产同一口径，见 `project_asset_readiness`）。"""
 
-    asset_type: Literal["character", "scene", "prop", "costume"] = Field(..., description="资产类型")
+    asset_type: Literal["character", "scene", "prop", "costume", "product"] = Field(
+        ..., description="资产类型"
+    )
     asset_id: str = Field(..., description="资产 ID")
     name: str = Field("", description="资产名称")
     has_pending_candidate: bool = Field(

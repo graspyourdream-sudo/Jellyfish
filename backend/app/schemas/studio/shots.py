@@ -285,6 +285,13 @@ class ProjectCostumeLinkRead(ProjectLinkBase):
     thumbnail: str = Field("", description="服装缩略图下载地址")
 
 
+class ProjectProductLinkRead(ProjectLinkBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    product_id: str
+    thumbnail: str = Field("", description="商品缩略图下载地址")
+
+
 class ShotFrameImageBase(BaseModel):
     id: int = Field(..., description="图片行 ID")
     shot_detail_id: str = Field(..., description="所属镜头细节 ID")
@@ -316,7 +323,7 @@ class ShotFrameImageRead(ShotFrameImageBase):
     model_config = ConfigDict(from_attributes=True)
 
 
-ShotLinkedAssetType = Literal["character", "prop", "scene", "costume"]
+ShotLinkedAssetType = Literal["character", "prop", "scene", "costume", "product"]
 
 
 class ShotLinkedAssetItem(BaseModel):

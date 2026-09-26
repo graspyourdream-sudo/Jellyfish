@@ -44,13 +44,14 @@ from dataclasses import dataclass
 from typing import Any
 
 #: 参与「资产准备」的四类资产（与 candidate_type / project_*_links 同名）。
-ASSET_TYPES: tuple[str, ...] = ("character", "scene", "prop", "costume")
+ASSET_TYPES: tuple[str, ...] = ("character", "scene", "prop", "costume", "product")
 
 TYPE_LABELS: dict[str, str] = {
     "character": "角色",
     "scene": "场景",
     "prop": "道具",
     "costume": "服装",
+    "product": "商品",
 }
 
 
@@ -111,6 +112,20 @@ PROFILE_FIELD_SPECS: dict[str, tuple[ProfileFieldSpec, ...]] = {
         ProfileFieldSpec("material", "材质"),
         ProfileFieldSpec("accessories", "配饰"),
         ProfileFieldSpec("occasion", "使用场合"),
+    ),
+    "product": (
+        # 商品资料**分两档**（用户 2026-09-26 口径）：必填只有外观描述，
+        # 其余全部 optional。原因是 `profile_missing_fields()` 会把每个空字段都算进
+        # 「待补资料」，字段一多，只填了商品名 + 一句描述的 brief 就会被整批判成"资料不全"。
+        # 名称不是资料字段（它是 products.name 列），所以这里唯一必填的是外观描述。
+        ProfileFieldSpec("appearance", "外观描述"),
+        ProfileFieldSpec("material", "材质", required=False),
+        ProfileFieldSpec("color", "颜色", required=False),
+        ProfileFieldSpec("package", "包装", required=False),
+        ProfileFieldSpec("logo", "Logo与品牌标识", required=False),
+        # 规格与卖点是文字信息，不直接落到画面上（与「相关剧情」同理）
+        ProfileFieldSpec("spec", "规格", visual=False, required=False),
+        ProfileFieldSpec("selling_points", "关联卖点", visual=False, required=False),
     ),
 }
 
@@ -338,6 +353,13 @@ DEFAULT_TYPE_ALIASES: dict[str, str] = {
     "服装": "costume",
     "服饰": "costume",
     "戏服": "costume",
+    "products": "product",
+    "product": "product",
+    "goods": "product",
+    "merchandise": "product",
+    "商品": "product",
+    "产品": "product",
+    "货品": "product",
 }
 
 
