@@ -182,9 +182,41 @@ function readScan(relPath: string): string {
   return readFileSync(resolve(AISTUDIO_ROOT, relPath), 'utf8')
 }
 
-/** 只保留代码（去注释），用于「渲染点有没有接上管道」这类源码级断言。 */
+/**
+ * 只保留代码（去注释），用于「渲染点有没有接上管道」这类源码级断言。
+ *
+ * ⚠️ **不能用**「先正则去块注释、再去行注释」的朴素写法：`ChapterStudio.tsx` 里有
+ * `accept=".jpg,…,image/*"` 这种**字符串里的块注释起止符**，朴素正则会从那里开始
+ * 吞掉后面一大段代码（本批实测：那种实现之后 `已关联场景` 这类代码整段消失，
+ * 让「源码级断言」变成假绿）。这里改成**逐行**处理，且只做两件确定安全的事：
+ *   1. 丢掉「整行都是注释」的行（`//` / `*` / `/*` / `{/*` 开头，含块注释正文）；
+ *   2. 截掉行尾的 `//` 注释，但 `//` 前面是 `:`（`http://`）时不算注释。
+ * 这样永远不会跨行吞代码，代价是行尾注释里的词可能残留 —— 本测试的断言模式
+ * 都不长在行尾注释里（本批逐条核对过）。
+ */
 function stripComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+  const out: string[] = []
+  let inBlock = false
+  source.split('\n').forEach((line) => {
+    const trimmed = line.trim()
+    if (inBlock) {
+      if (trimmed.includes('*/')) inBlock = false
+      out.push('')
+      return
+    }
+    if (trimmed.startsWith('//') || trimmed === '' || trimmed.startsWith('*')) {
+      out.push('')
+      return
+    }
+    if (trimmed.startsWith('/*') || trimmed.startsWith('{/*')) {
+      if (!trimmed.includes('*/')) inBlock = true
+      out.push('')
+      return
+    }
+    const matched = /(^|[^:])\/\//.exec(line)
+    out.push(matched ? line.slice(0, matched.index + matched[0].length - 2) : line)
+  })
+  return out.join('\n')
 }
 
 /* ------------------------------------------------- 技术详情层标记区间（豁免） */
@@ -517,6 +549,28 @@ test('同一字段同口径：已保存提示词来源在「① 工作区」与�
   assert.ok(CJK_RE.test(unknownSource), `未登记来源码的兜底必须含中文：${unknownSource}`)
   assert.ok(!unknownSource.includes('brand_new_source'), `未登记来源码被原样回显：${unknownSource}`)
   assert.equal(videoPromptSourceLabel(''), '', '空来源返回空串，调用方用自己的「未标记」兜底')
+})
+
+test('模式 1 回落：参考图 / 场景 / 角色名称读取失败时一律给中文兜底（§4.3 模式 1 第 2-4 条）', () => {
+  const source = stripComments(readScan('chapter/ChapterStudio.tsx'))
+  const offenders = [
+    [/shotLinkedAssetNameByFileId\.get\(fid\) \?\? fid/, '`?? fid` 会把 file_id 端上正文与悬停 title'],
+    [/sceneNameMap\[linkedSceneId\] \?\? linkedSceneId/, '`?? linkedSceneId` 会把场景内部 ID 端上屏'],
+    [/characterNameMap\[cid\] \?\? cid/, '`?? cid` 会把角色内部 ID 端上屏'],
+  ]
+    .filter(([pattern]) => (pattern as RegExp).test(source))
+    .map(([, reason]) => reason as string)
+  assert.deepEqual(offenders, [], `这些回落会把内部编号端上主区（§4.3 模式 1）：\n${offenders.join('\n')}`)
+  assert.ok(
+    /shotLinkedAssetNameByFileId\.get\(fid\) \?\? '（未命名参考图）'/.test(source),
+    '参考图名读取失败要给中文兜底',
+  )
+  assert.ok(
+    /title=\{shotLinkedAssetNameByFileId\.get\(fid\) \?\? '（未命名参考图）'\}/.test(source),
+    '悬停 title 与正文必须同口径（标题也是主区）',
+  )
+  assert.ok(source.includes('（场景名称读取失败）'), '场景名读取失败要给中文兜底')
+  assert.ok(source.includes('（角色名称读取失败）'), '角色名读取失败要给中文兜底')
 })
 
 test('ShotBoundFilesPanel：资产名 / 声音名 / 槽位都不许用内部编号兜底（§4.3 模式 1）', () => {
