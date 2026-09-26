@@ -5816,7 +5816,8 @@ function Inspector(props: {
                         <div className="cs-group-title flex items-center justify-between gap-2">
                           <span>{frameLabel[ft]}图片</span>
                           <Space size={8}>
-                            <Tooltip title="上传手头已有的图片作为该帧（写进 shot_frame_images，不触发生图、不消耗额度）">
+                            {/* 审计 §4.3 模式 2：Tooltip **悬停即见**，里面不许写后端表名 */}
+                            <Tooltip title="上传手头已有的图片作为该帧（只做登记，不触发生图、不消耗额度）">
                               <Upload
                                 showUploadList={false}
                                 accept=".jpg,.jpeg,.png,.webp,.gif,image/*"
@@ -7105,7 +7106,8 @@ function Inspector(props: {
                           ) : null}
                           {keyframeGuidanceSummary.length > 0 ? (
                             <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-3 text-xs text-blue-800">
-                              <div className="font-medium">补充 Guidance</div>
+                              {/* 审计 §4.3 模式 2：主区留英文内部术语「Guidance」 */}
+                              <div className="font-medium">补充生成要求</div>
                               <div className="mt-2 flex flex-wrap gap-2">
                                 {keyframeGuidanceSummary.map((item) => (
                                   <Tooltip key={item} title={item}>
@@ -7366,7 +7368,7 @@ function Inspector(props: {
                       </div>
                       <div className="mt-3 grid gap-3 md:grid-cols-2">
                         <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-xs text-emerald-800">
-                          <div className="font-medium">实际保留的 Guidance</div>
+                          <div className="font-medium">实际保留的生成要求</div>
                           {keyframePromptSelectedGuidance.length > 0 ? (
                             <div className="mt-2 flex flex-wrap gap-2">
                               {keyframePromptVisibleSelectedGuidanceDetails.map((item) => (
@@ -7398,7 +7400,7 @@ function Inspector(props: {
                           )}
                         </div>
                         <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-3 text-xs text-amber-800">
-                          <div className="font-medium">已压缩的 Guidance</div>
+                          <div className="font-medium">已压缩的生成要求</div>
                           {keyframePromptDroppedGuidance.length > 0 ? (
                             keyframePromptDecisionCollapsed ? (
                               <div className="mt-2 text-amber-700">
@@ -7527,7 +7529,7 @@ function Inspector(props: {
                 <div className="mt-1">
                   {savedVideoPrompt
                     ? '打开弹窗时已回填该已保存内容，并且不会被大模型结果自动覆盖；点击「保存提示词」才会写回。'
-                    : '当前草稿尚未落库，交付（PromptFlowPage）读不到；点击「保存提示词」可写入该镜头。'}
+                    : '当前草稿尚未落库，交付页面（「提示词导入/交付」）读不到；点击「保存提示词」可写入该镜头。'}
                 </div>
                 <div className="mt-1">
                   {`本次保存将标记来源为：${videoPromptSourceLabel(videoPromptSaveSource)}`}

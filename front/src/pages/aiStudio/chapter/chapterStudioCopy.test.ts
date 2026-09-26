@@ -569,6 +569,26 @@ test('R13：掩码后不许残留「槽位」「接口」这类中文内部词�
   assert.equal(maskInternalIds('本镜已具备生成条件：提示词与参考帧齐全'), '本镜已具备生成条件：提示词与参考帧齐全')
 })
 
+test('模式 2 补充：主区不留英文内部术语（Guidance / PromptFlowPage）与后端表名（悬停即见也算）', () => {
+  // 只判「用户可见文本面」：`guidanceLevelSummary` 这类**代码标识符**不是文案
+  const surfaces = extractScanSurfaces(readScan('chapter/ChapterStudio.tsx'))
+  const banned = ['Guidance', 'PromptFlowPage', 'shot_frame_images', 'shot_details']
+  const offenders = surfaces
+    .filter((surface) => banned.some((term) => surface.text.includes(term)))
+    .map((surface) => `:${surface.line} ${surface.text.trim().slice(0, 80)}`)
+  assert.deepEqual(
+    offenders,
+    [],
+    `主区文案里还有内部术语 / 后端标识（审计 §2.3 模式 2、§5.5-D「悬停即见」）：\n${offenders.join('\n')}`,
+  )
+  // 悬停即见的 Tooltip 也要干净（§5.5-D：`title` 里的地址悬停就看得见，字段名同理）
+  const tooltips = surfaces.filter((surface) => surface.kind === 'jsx-attr' && surface.attr === 'title')
+  const dirtyTooltips = tooltips
+    .filter((surface) => /[a-z]+_[a-z]+/.test(surface.text))
+    .map((surface) => `:${surface.line} ${surface.text.trim().slice(0, 80)}`)
+  assert.deepEqual(dirtyTooltips, [], `这些悬停提示里含后端字段/表名：\n${dirtyTooltips.join('\n')}`)
+})
+
 test('模式 1 回落：参考图 / 场景 / 角色名称读取失败时一律给中文兜底（§4.3 模式 1 第 2-4 条）', () => {
   const source = stripComments(readScan('chapter/ChapterStudio.tsx'))
   const offenders = [
