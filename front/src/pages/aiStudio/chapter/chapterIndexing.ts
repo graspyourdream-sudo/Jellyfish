@@ -16,3 +16,22 @@ export function nextChapterIndex(existingIndexes: readonly (number | null | unde
   const max = valid.length > 0 ? Math.max(...valid) : 0
   return Math.floor(max) + 1
 }
+
+/**
+ * 一集**显示出来的名字**（需求清单第 1 条：剧集名称可编辑）。
+ *
+ * 同一个坑的第二次出现：章节目录里显示的名字此前是**由集数推导**出来的
+ * （固定渲染「第N集」），完全不读已经存在的名称字段 ——
+ * 于是"用户看到的名字"和"库里能改的那个值"是两回事，改名也就无从下手。
+ *
+ * 统一成一个口径后：**有名字用名字**，没名字才退回「第N集」这个默认名；
+ * 默认名只是**缺省显示**，一样可以被改名覆盖（不再是"改不掉"）。
+ */
+export function chapterDisplayName(
+  chapter: { index: number },
+  title?: string | null,
+): string {
+  const named = String(title ?? '').trim()
+  if (named) return named
+  return `第${chapter.index}集`
+}

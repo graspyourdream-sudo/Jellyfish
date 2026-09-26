@@ -4,6 +4,7 @@ import type { MenuProps, TableColumnsType } from 'antd'
 import {
   EditOutlined,
   FileSearchOutlined,
+  FormOutlined,
   LoadingOutlined,
   MoreOutlined,
   PlusOutlined,
@@ -22,7 +23,7 @@ import { getChapterPreparationState } from '../chapterPreparation'
 import { loadChapterFlowStats, type ChapterFlowStats } from '../projectFlowStats'
 import { executeTaskCancel } from '../../../components/taskActionHelpers'
 import { TASK_COPY } from '../../../components/taskCopy'
-import { nextChapterIndex } from '../../../chapter/chapterIndexing'
+import { chapterDisplayName, nextChapterIndex } from '../../../chapter/chapterIndexing'
 import { parseScriptDocument } from '../../../../../services/llmPipelineApi'
 import { classifyGenerationFailure, failureText } from '../../../components/generationGate'
 import { useTaskPageContext } from '../../../components/taskPageContext'
@@ -84,6 +85,19 @@ export function ChaptersTab() {
 
   const [editOpen, setEditOpen] = useState(false)
   const [editingChapter, setEditingChapter] = useState<Chapter | null>(null)
+  /**
+   * 剧集名称（后端 `chapters.title`）的**改名**状态。
+   *
+   * 为什么单独一套状态、而不是复用原文编辑器：原文编辑器只发 `raw_text` /
+   * `condensed_text`，**从不发 `title`** —— 这也是"剧集名改不了"的直接原因
+   * （需求清单第 1 条）。改名走的就是既有的
+   * `PATCH /api/v1/studio/chapters/{id}`（`ChapterUpdate.title` 早就在契约里），
+   * 不需要新字段、不需要改库。
+   */
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [renamingChapter, setRenamingChapter] = useState<Chapter | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const [renaming, setRenaming] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [createTitle, setCreateTitle] = useState('')
   const [importingDoc, setImportingDoc] = useState(false)
@@ -167,6 +181,50 @@ export function ChaptersTab() {
   const openEditModal = (chapter: Chapter) => {
     setEditingChapter(chapter)
     setEditOpen(true)
+  }
+
+  /**
+   * 打开「修改剧集名称」。
+   *
+   * 预填的是**当前显示的剧集名**（`title` 为空时就是「第N集」这个默认名），
+   * 这样用户看到什么就能改什么，不用先猜"系统内部把它存成什么"。
+   */
+  const openRenameModal = (chapter: Chapter) => {
+    setRenamingChapter(chapter)
+    setRenameValue(chapterDisplayName(chapter, chapter.title))
+    setRenameOpen(true)
+  }
+
+  /**
+   * 保存剧集名称。
+   *
+   * 走既有的章节更新端点（`ChapterUpdate.title`），只发 `title` 一个字段 ——
+   * 不发 `raw_text` / `condensed_text`，避免"改个名字顺手把原文一起回写"。
+   */
+  const handleRename = async () => {
+    const target = renamingChapter
+    if (!target) return
+    const next = renameValue.trim()
+    if (!next) {
+      showUserWarning(null, '剧集名称不能为空：请填写一个名字，或点「取消」保持原样。')
+      return
+    }
+    setRenaming(true)
+    try {
+      await StudioChaptersService.updateChapterApiV1StudioChaptersChapterIdPatch({
+        chapterId: target.id,
+        requestBody: { title: next },
+      })
+      patchChapterLocal(target.id, { title: next })
+      message.success('剧集名称已更新')
+      setRenameOpen(false)
+      setRenamingChapter(null)
+      void refresh()
+    } catch (error) {
+      showUserError(error, '剧集名称没保存成功：请稍后重试。')
+    } finally {
+      setRenaming(false)
+    }
   }
 
   const openCreateNextStep = (chapter: Chapter, hasRawText: boolean) => {
@@ -444,6 +502,12 @@ export function ChaptersTab() {
           }
         : null,
       {
+        key: 'rename',
+        label: '修改剧集名称',
+        icon: <FormOutlined />,
+        onClick: () => openRenameModal(record),
+      },
+      {
         key: 'raw',
         label: '编辑原文',
         icon: <EditOutlined />,
@@ -462,21 +526,40 @@ export function ChaptersTab() {
   }
 
   const columns: TableColumnsType<Chapter> = [
-    { title: '章节', dataIndex: 'index', key: 'index', width: 80, render: (v: number) => `第${v}集` },
+    // 集数是**编号**（由 `index` 推出来的序号），不是剧集名称；名称单独一列且可改
+    { title: '集数', dataIndex: 'index', key: 'index', width: 80, render: (v: number) => `第${v}集` },
     {
-      title: '标题',
+      title: '剧集名称',
       dataIndex: 'title',
       key: 'title',
       ellipsis: true,
       render: (title: string, record) => (
-        <Button
-          type="link"
-          size="small"
-          style={{ paddingInline: 0 }}
-          onClick={() => openEditModal(record)}
-        >
-          {title || '未命名章节'}
-        </Button>
+        /*
+         需求清单第 1 条：**剧集名称可编辑**。
+         此前这一列点开的是「原文编辑器」（它只发 raw_text / condensed_text，改不了名字），
+         所以界面上根本没有改剧集名的入口。现在这一列开的是**改名**；
+         原文编辑仍然在右侧「更多操作」里的「编辑原文」，两个入口不再互相顶替。
+        */
+        <Space size={4}>
+          <Button
+            type="link"
+            size="small"
+            style={{ paddingInline: 0 }}
+            onClick={() => openRenameModal(record)}
+            data-testid={`rename-chapter-${record.id}`}
+          >
+            {chapterDisplayName(record, title)}
+          </Button>
+          <Tooltip title="修改剧集名称">
+            <Button
+              type="text"
+              size="small"
+              icon={<FormOutlined />}
+              aria-label="修改剧集名称"
+              onClick={() => openRenameModal(record)}
+            />
+          </Tooltip>
+        </Space>
       ),
     },
     { title: '分镜数', dataIndex: 'storyboardCount', key: 'storyboardCount', width: 90 },
@@ -712,6 +795,39 @@ export function ChaptersTab() {
           void refresh()
         }}
       />
+
+      <Modal
+        title="修改剧集名称"
+        open={renameOpen}
+        onCancel={() => {
+          setRenameOpen(false)
+          setRenamingChapter(null)
+        }}
+        onOk={() => void handleRename()}
+        okText="保存名称"
+        confirmLoading={renaming}
+        width={480}
+        destroyOnClose
+      >
+        <div className="space-y-3">
+          <div>
+            <span className="text-gray-600 text-sm">剧集名称</span>
+            <Input
+              placeholder="例如：出租屋里的争吵"
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onPressEnter={() => void handleRename()}
+              maxLength={80}
+              showCount
+              className="mt-1"
+              data-testid="chapter-rename-input"
+            />
+          </div>
+          <div className="text-[11px] text-gray-500 leading-5">
+            这个名字就是剧集列表里显示的名字。集数（第几集）由章节顺序决定，不随名称改变。
+          </div>
+        </div>
+      </Modal>
 
       <Modal
         title="新建章节"
