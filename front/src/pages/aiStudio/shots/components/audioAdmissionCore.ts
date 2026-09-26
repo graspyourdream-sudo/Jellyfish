@@ -16,6 +16,10 @@
  *   把已生成的音频混流/回贴成成片音轨是**另一条路径**，当前未实现。
  */
 
+// 阶段 B ③（审计 §4.3 模式 6 / §5.5-F）：`excluded_reason` / `how_to_fix` 是后端原文，
+// 原来**完全没走**掩码管道（审计记为「掩码后直渲」，实为未掩码），这里在唯一出口统一接上。
+import { toUserFacingText } from '../../components/userFacingMessage.ts'
+
 /** 后端计划响应里的参考音频审计（字段与 `VideoAudioPlanRead` 对齐，全部可选以兼容旧响应）。 */
 export type AudioAudit = {
   included?: boolean
@@ -29,6 +33,14 @@ export type AudioAudit = {
   vendor_supports_reference_audio?: boolean
   note?: string
 }
+
+/**
+ * 「已绑定，但这次请求用不上它」的**唯一标题口径**。
+ *
+ * 审计 §4.3 模式 5：旧文案是「已绑定，但供应商无法访问」——「供应商」是主区禁词。
+ * 用户需要知道的是「这段声音这次用不上」，不是厂商叫什么，所以改成业务说法。
+ */
+export const AUDIO_NOT_REACHABLE_TITLE = '已绑定，但当前服务取不到这条声音'
 
 export type AudioAdmissionTone = 'success' | 'warning' | 'info' | 'default'
 
@@ -48,13 +60,20 @@ export type AudioAdmissionView = {
   terminology: string
 }
 
-/** 已携带时也要说清边界：只有"会进请求"这一件事被验证过。 */
+/**
+ * 已携带时也要说清边界：只有"会进请求"这一件事被验证过。
+ *
+ * ⚠️ 这两段是**纯文本渲染**（`Typography.Text` / `Alert` description），
+ * 所以不许写 `**加粗**` 这类 markdown 记号 —— 它会字面显示成星号
+ * （审计 §4.3 渲染缺陷项 R12）。要强调就用中文措辞。
+ * 另外「供应商」是主区禁词（审计 §4.3 模式 5 / §7.3）→ 统一说「生成服务」。
+ */
 export const REFERENCE_AUDIO_SCOPE_NOTE =
-  '参考音频会送进供应商请求（本轮仅在**请求计划层**验证它会被带进请求）；'
-  + '供应商是否据此影响生成结果，尚未有真实证据。'
+  '参考音频会送进生成服务的请求（本轮只在「请求计划层」验证它会被带进请求）；'
+  + '生成服务是否据此影响生成结果，尚未有真实证据。'
 
 export const REFERENCE_AUDIO_VS_FINAL_TRACK =
-  '「参考音频」是**输入**；「最终成片的音轨」来自供应商侧 generate_audio（模型自己生成），'
+  '「参考音频」是输入；「最终成片的音轨」是输出 —— 由生成服务在出片时自己合成，'
   + '把已生成的音频混流/回贴成成片音轨是另一条路径，当前未实现。'
 
 /** 后端原因码 → 给用户看的短标签（后端没给码时退回状态文案）。 */
@@ -66,7 +85,7 @@ const REASON_TAGS: Record<string, string> = {
   no_address: '已绑定，但解析不出可公网访问的地址',
   local_path: '已绑定，但地址是本地/相对路径',
   private_address: '已绑定，但地址指向本机/内网',
-  data_url_rejected: '已绑定，但供应商不接受内嵌音频',
+  data_url_rejected: '已绑定，但生成服务不接受内嵌音频',
 }
 
 const INCLUDED_TAGS: Record<string, string> = {
@@ -111,7 +130,7 @@ export function describeAudioAdmission(audit: AudioAudit | null | undefined): Au
       tag: REASON_TAGS.opt_out,
       tone: 'default',
       title: '本镜已明确标记：无需声音',
-      detail: text(audit.excluded_reason),
+      detail: text(audit.excluded_reason) ? toUserFacingText(audit.excluded_reason, '') : '',
       fix: '',
       blocked: false,
       terminology,
@@ -123,8 +142,10 @@ export function describeAudioAdmission(audit: AudioAudit | null | undefined): Au
       tag: REASON_TAGS.not_bound,
       tone: 'default',
       title: '这条分镜还没有绑定声音',
-      detail: text(audit.excluded_reason) || '未绑定：本次生成请求不携带参考音频。',
-      fix: text(audit.how_to_fix),
+      detail: text(audit.excluded_reason)
+        ? toUserFacingText(audit.excluded_reason, '未绑定：本次生成请求不携带参考音频')
+        : '未绑定：本次生成请求不携带参考音频。',
+      fix: text(audit.how_to_fix) ? toUserFacingText(audit.how_to_fix, '') : '',
       blocked: false,
       terminology,
     }
@@ -147,9 +168,14 @@ export function describeAudioAdmission(audit: AudioAudit | null | undefined): Au
   return {
     tag: REASON_TAGS[reasonCode] || '已绑定，但本次请求不携带它',
     tone: 'warning',
-    title: '已绑定，但供应商无法访问',
-    detail: text(audit.excluded_reason) || '供应商取不到这条声音，本次生成请求不会携带它。',
-    fix: text(audit.how_to_fix),
+    title: AUDIO_NOT_REACHABLE_TITLE,
+    // 审计 §4.3 模式 6 / §5.5-F：后端原文先过「掩码 → 洗句 → 业务化改写」三级管道
+    detail: text(audit.excluded_reason)
+      ? toUserFacingText(audit.excluded_reason, '这条声音这次送不出去：生成服务取不到它')
+      : '这条声音这次送不出去：生成服务取不到它。',
+    fix: text(audit.how_to_fix)
+      ? toUserFacingText(audit.how_to_fix, '把这条声音换成公网可访问的地址后重新绑定')
+      : '',
     blocked: true,
     terminology,
   }
@@ -163,7 +189,7 @@ export function audioStateTag(
   if (audit) return describeAudioAdmission(audit).tag
   const state = text(legacyState)
   if (state === 'bound') return '声音已绑定（公网可用）'
-  if (state === 'bound_not_public') return '已绑定，但供应商无法访问'
+  if (state === 'bound_not_public') return AUDIO_NOT_REACHABLE_TITLE
   if (state === 'opt_out') return REASON_TAGS.opt_out
   if (state === 'missing') return REASON_TAGS.not_bound
   return '声音状态未知'

@@ -14,9 +14,12 @@
  * - 声音**是否进入视频生成请求**（= 作为「参考音频」）取决于两件事，口径来源是仓库
  *   `SIX_STEP_ACCEPTANCE.md` 第 128 行的官方协议要点（`audio_urls`：最多 3 条、总时长 ≤15s、
  *   需与参考图/参考视频一起用、只收公网 URL 或 `asset://`、与首尾帧图片互斥）：
- *   1. 供应商支持参考音频：seedance 支持，字段是 `audio_urls`；
+ *   1. 生成服务要支持参考音频：seedance 支持，字段是 `audio_urls`；
  *   2. 我们这边的音频地址必须是**公网 http(s)** 或 **`asset://`** —— 本机/相对地址（如 `/files/xxx.mp3`）、
- *      内网地址、供应商不接受的 data URL 都会在请求计划层被排除。
+ *      内网地址、生成服务不接受的 data URL 都会在请求计划层被排除。
+ *
+ * ⚠️ 上面这些实现细节（协议文件名 / `audio_urls` / `asset://` / `/files/...`）**只留在本注释里**，
+ * 不许再出现在用户可见文案中（审计 §4.3 模式 4/5 点名了这条长段落）。
  *   任一条件不满足时，计划预览与本区块会**明确说明"本次未携带"以及原因**（带修法），不会静默丢弃。
  * - 术语（三处口径必须一致，见 `audioAdmissionCore.ts` 与 `docs/reference-audio-scope.md`）：
  *   「参考音频」是**输入**（本轮只验证到"会被带进请求"，供应商是否据此影响结果**尚无证据**）；
@@ -34,6 +37,8 @@ import {
   describeAudioAdmission,
   type AudioAudit,
 } from './audioAdmissionCore'
+// 阶段 B ③（审计 §4.3 模式 6）：本区块此前 `maskInternalIds` 引用数为 0，全部出口统一接管道
+import { showUserError, toUserFacingText } from '../../components/userFacingMessage'
 
 const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.oga', '.opus', '.wma', '.aiff', '.aif']
 
@@ -119,7 +124,7 @@ export function ShotAudioBindingSection({
       setFiles(items.filter((item) => String(item.type ?? '') === 'audio'))
       setError('')
     } catch (e) {
-      setError((e as Error)?.message || '音频素材列表加载失败')
+      setError(toUserFacingText(e, '音频素材加载失败'))
     } finally {
       setLoading(false)
     }
@@ -145,7 +150,7 @@ export function ShotAudioBindingSection({
         await onSave(fileId)
         message.success(fileId ? '已绑定声音到这条分镜' : '已解绑声音')
       } catch (e) {
-        message.error((e as Error)?.message || '保存声音绑定失败')
+        void showUserError(e, '保存声音绑定失败')
       } finally {
         setSaving(false)
       }
@@ -162,7 +167,7 @@ export function ShotAudioBindingSection({
         await onSaveOptOut(next)
         message.success(next ? '已标记：本镜无需声音' : '已取消"无需声音"标记')
       } catch (e) {
-        message.error((e as Error)?.message || '保存失败')
+        void showUserError(e, '保存失败')
       } finally {
         setSaving(false)
       }
@@ -197,7 +202,7 @@ export function ShotAudioBindingSection({
         await loadAudioFiles()
         await bindFile(fileId)
       } catch (e) {
-        message.error((e as Error)?.message || '音频上传失败（请确认是音频文件）')
+        void showUserError(e, '音频上传失败（请确认是音频文件）')
       } finally {
         setUploading(false)
       }
@@ -249,13 +254,10 @@ export function ShotAudioBindingSection({
           <Typography.Text type="secondary" className="text-[11px]">
             给这条分镜绑定配音 / 台词音频。绑定后它一定会出现在交付内容的
             「绑定素材·实际文件」里。「能不能进视频生成请求」（参考音频）是另一件事，
-            看两点：①供应商支持参考音频（seedance 支持，字段 `audio_urls`；官方口径是
-            最多 3 条、总时长 ≤15s、需与参考图/参考视频一起用、与首尾帧图片互斥 —— 见仓库
-            `SIX_STEP_ACCEPTANCE.md` 的官方协议要点，其中「最多 3 条」我们已强制，
-            时长与「需与参考图一起用」两条目前只是官方口径、尚未校验）；
-            ②地址必须是「公网 http(s)」或 `asset://`（本地 `/files/...`、内网地址、
-            供应商不吃的 data URL 都会被排除并给原因）。不满足时这里会直接显示
-            「已绑定，但供应商无法访问」及原因，不用等生成失败。{REFERENCE_AUDIO_VS_FINAL_TRACK}
+            看两点：①生成服务要支持参考音频；②地址必须是公网可访问的地址，或已登记的素材引用。
+            不满足时这里会直接显示「已绑定，但当前服务取不到这条声音」及原因，不用等生成失败。
+            参考音频的数量与时长按当前生成服务的规定执行（超出范围会被排除并给原因）。
+            {REFERENCE_AUDIO_VS_FINAL_TRACK}
           </Typography.Text>
         </div>
         <Space size={8}>
@@ -318,7 +320,7 @@ export function ShotAudioBindingSection({
           showIcon
           message={
             admission.blocked
-              ? `已绑定声音：${boundName} —— 已绑定，但供应商无法访问`
+              ? `已绑定声音：${boundName} —— ${admission.title}`
               : admission.tone === 'success'
                 ? `已绑定声音：${boundName}（会作为参考音频进入本次请求）`
                 : `已绑定声音：${boundName}`
@@ -359,7 +361,7 @@ export function ShotAudioBindingSection({
 
       {!loading && files.length === 0 ? (
         <div className="text-[11px] text-slate-400">
-          素材库里目前没有音频文件（`files.type=audio`）。上面的「上传音频并绑定」会同时完成上传与绑定。
+          素材库里目前没有音频文件。上面的「上传音频并绑定」会同时完成上传与绑定。
         </div>
       ) : null}
 
@@ -379,7 +381,7 @@ export function ShotAudioBindingSection({
           />
           <div className="flex items-center justify-between text-xs text-slate-500">
             <span>{`素材库里共 ${files.length} 条音频${keyword.trim() ? `，命中 ${filtered.length} 条` : ''}`}</span>
-            <Tag color="blue">type=audio</Tag>
+            <Tag color="blue">音频素材</Tag>
           </div>
           {filtered.length === 0 ? (
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有匹配的音频素材" />

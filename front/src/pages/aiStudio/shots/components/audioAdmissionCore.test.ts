@@ -2,7 +2,7 @@
  * 「参考音频」页面口径的回归测试（Node 内置测试运行器）。
  *
  * 锁三件事：
- *   1. **绑了但供应商取不到**时，必须在提交**之前**就显示「已绑定，但供应商无法访问」
+ *   1. **绑了取不到**时，必须在提交**之前**就显示「已绑定，但当前服务取不到这条声音」
  *      + 后端给的真实原因 + 修法（不是等生成失败才说）；
  *   2. **不许夸大**：携带时只能说"会进请求（本轮仅请求计划层验证）"，
  *      不能宣称"已支持参考音频影响生成"；
@@ -13,6 +13,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  AUDIO_NOT_REACHABLE_TITLE,
   REFERENCE_AUDIO_SCOPE_NOTE,
   REFERENCE_AUDIO_VS_FINAL_TRACK,
   audioStateTag,
@@ -20,11 +21,20 @@ import {
   type AudioAudit,
 } from './audioAdmissionCore.ts'
 
+/**
+ * 阶段 B ③（审计 §4.3 模式 5 / §7.3）：主区禁词。
+ *
+ * 这条断言是**新增**的（不是把旧期望放宽）：旧用例把「供应商」措辞**冻结**成了期望值，
+ * 按审计口径「供应商」不许出现在主区 —— 所以期望改成同一个常量，
+ * **同时**钉住这个常量本身不含禁词，防止有人改常量绕过去。
+ */
+const MAIN_SCREEN_FORBIDDEN_TERMS = ['供应商', 'provider', 'DRY_RUN', 'file_id'] as const
+
 function audit(overrides: Partial<AudioAudit> = {}): AudioAudit {
   return { included: false, file_id: 'file-audio-1', ...overrides }
 }
 
-test('本机相对路径 → 显示「已绑定，但供应商无法访问」并给原因与修法', () => {
+test('本机相对路径 → 显示「已绑定，但当前服务取不到这条声音」并给原因与修法', () => {
   const view = describeAudioAdmission(
     audit({
       state: 'local_path',
@@ -36,7 +46,10 @@ test('本机相对路径 → 显示「已绑定，但供应商无法访问」并
   )
 
   assert.equal(view.blocked, true)
-  assert.equal(view.title, '已绑定，但供应商无法访问')
+  assert.equal(view.title, AUDIO_NOT_REACHABLE_TITLE)
+  MAIN_SCREEN_FORBIDDEN_TERMS.forEach((term) => {
+    assert.ok(!view.title.includes(term), `主区标题不许含禁词「${term}」：${view.title}`)
+  })
   assert.match(view.detail, /本地\/相对地址/)
   assert.match(view.fix, /公网/)
   assert.equal(view.tone, 'warning')
@@ -56,7 +69,7 @@ test('内网地址 → 同样显示不可访问（http:// 开头也不算可用�
   )
 
   assert.equal(view.blocked, true)
-  assert.equal(view.title, '已绑定，但供应商无法访问')
+  assert.equal(view.title, AUDIO_NOT_REACHABLE_TITLE)
   assert.match(view.detail, /内网/)
 })
 
@@ -129,9 +142,28 @@ test('术语澄清：参考音频 ≠ 最终成片音轨（每个状态都带上
   assert.match(REFERENCE_AUDIO_SCOPE_NOTE, /请求计划层/)
 })
 
+test('阶段B③：标题常量与后端原文出口都不含主区禁词（审计 §4.3 模式 5 / 模式 6）', () => {
+  MAIN_SCREEN_FORBIDDEN_TERMS.forEach((term) => {
+    assert.ok(!AUDIO_NOT_REACHABLE_TITLE.includes(term), `标题常量含禁词「${term}」`)
+  })
+  // 后端 `excluded_reason` 原文里带「供应商」时，出口必须先过管道再上屏
+  const view = describeAudioAdmission(
+    audit({
+      state: 'local_path',
+      reason_code: 'local_path',
+      excluded_reason: '已绑定声音「验收配音」，但它解析出的是本地/相对地址（/files/files/voice.mp3）：供应商抓不到。',
+      how_to_fix: '把音频上传到公网（OSS 等），或登记一个公网音频地址后重新绑定。',
+    }),
+  )
+  const surface = `${view.title}｜${view.detail}｜${view.fix}｜${view.tag}`
+  MAIN_SCREEN_FORBIDDEN_TERMS.forEach((term) => {
+    assert.ok(!surface.includes(term), `主区出口仍含禁词「${term}」：${surface}`)
+  })
+})
+
 test('计划面板短标签：有审计用审计，没有审计时退回旧字段文案', () => {
   assert.match(audioStateTag({ included: true, state: 'public_url' }), /会携带/)
-  assert.equal(audioStateTag(null, 'bound_not_public'), '已绑定，但供应商无法访问')
+  assert.equal(audioStateTag(null, 'bound_not_public'), AUDIO_NOT_REACHABLE_TITLE)
   assert.equal(audioStateTag(null, 'bound'), '声音已绑定（公网可用）')
   assert.equal(audioStateTag(null, 'opt_out'), '本镜明确无需声音')
   assert.equal(audioStateTag(null, 'missing'), '声音未绑定')
