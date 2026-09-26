@@ -596,3 +596,57 @@ test('降级视图的资产键与契约视图一致（同一项资产只出现�
   const keys = result.data.items.map(workbenchItemKey)
   assert.deepEqual(keys, ['character:a', 'scene:a'])
 })
+
+/* -------------------------------------- ③b 「批量生成图」常驻按钮（需求清单第 2 条第 2 项） */
+
+test('选中项还没提示词时，主按钮是「生成图片提示词」，但「批量生成图」按钮**仍然在**', () => {
+  const items = fixture()
+  // char-1 有可用提示词（可生成图），char-4 提示词要重写、char-2 待补资料
+  const selected = ['character:char-1', 'character:char-2', 'character:char-4']
+  const command = deriveWorkbenchCommand({ items, selectedKeys: selected, analysis: { generated: true } })
+
+  // 这就是用户报的那个状态：主按钮那一刻只提供"生成提示词"，界面上没有批量出图入口
+  assert.equal(command.counts.needsPrompt, 1)
+  assert.equal(command.primaryAction, 'generate_prompts')
+  assert.match(command.primaryLabel, /^生成图片提示词（\d+）$/)
+
+  // 修复后：「批量生成图」常驻且可用，数字就是这次真的会出的张数
+  assert.equal(command.generateImagesCount, command.counts.generatable)
+  assert.equal(command.generateImagesLabel, `批量生成图（${command.counts.generatable}）`)
+  assert.equal(command.generateImagesDisabled, false)
+  assert.match(command.generateImagesHint, /按张计费/)
+})
+
+test('没有可生成项时「批量生成图」禁用，并说清该先做什么（不撒谎、不给假动作）', () => {
+  const items = fixture()
+  // 只选资料没补齐的项：没有任何可生成项
+  const command = deriveWorkbenchCommand({
+    items,
+    selectedKeys: ['character:char-2'],
+    analysis: { generated: true },
+  })
+  assert.equal(command.generateImagesCount, 0)
+  assert.equal(command.generateImagesDisabled, true)
+  assert.equal(command.generateImagesLabel, '批量生成图')
+  assert.match(command.generateImagesDisabledReason, /生成图片提示词|勾选/)
+  assert.equal(command.generateImagesHint, '')
+})
+
+test('没分析过本章资产时「批量生成图」也禁用，原因是先分析（与主按钮同口径）', () => {
+  const command = deriveWorkbenchCommand({
+    items: fixture(),
+    selectedKeys: ['character:char-1'],
+    analysis: { generated: false },
+  })
+  assert.equal(command.generateImagesDisabled, true)
+  assert.match(command.generateImagesDisabledReason, /分析本章资产/)
+})
+
+test('「全选本页签」选中的项与「批量生成图」口径一致（按钮数字 = 全选后能出的张数）', () => {
+  const items = fixture()
+  const allKeys = applyWorkbenchSelection(items, [], 'all', 'character')
+  const command = deriveWorkbenchCommand({ items, selectedKeys: allKeys, analysis: { generated: true } })
+  // 全选只收可批量项；其中"还没有图片"的项数就是批量生成图按钮上的数字
+  assert.deepEqual(allKeys.sort(), ['character:char-1', 'character:char-3', 'character:char-5', 'character:char-6'])
+  assert.equal(command.generateImagesCount, 1) // 只有 char-1 还没有图片
+})

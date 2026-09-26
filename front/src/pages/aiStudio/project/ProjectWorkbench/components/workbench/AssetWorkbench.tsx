@@ -225,6 +225,13 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
     setSelectedKeys((prev) => (checked ? Array.from(new Set([...prev, key])) : prev.filter((row) => row !== key)))
   }, [])
 
+  const handleSelectAll = useCallback(() => {
+    // 「全选本页签」：只收**可进批量**的项（服装不在出图契约内、提示词需重写的项
+    // batch_eligible=false），与「只选未生成项」「批量生成图」用同一套 isBatchEligible
+    // 口径，不另立一套（否则按钮上的数字会和真正提交的张数对不上）。
+    setSelectedKeys((prev) => applyWorkbenchSelection(items, prev, 'all', tab))
+  }, [items, tab])
+
   const handleSelectUngenerated = useCallback(() => {
     setSelectedKeys((prev) => applyWorkbenchSelection(items, prev, 'ungenerated', tab))
   }, [items, tab])
@@ -379,6 +386,8 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
         busy={runBusy}
         onGenerate={handlePrimary}
         onRegenerate={handleRegenerate}
+        onGenerateImages={handleGenerate}
+        onSelectAll={handleSelectAll}
         onSelectUngenerated={handleSelectUngenerated}
         onClearSelection={handleClearSelection}
         onStop={() => productionRef.current?.stop()}

@@ -381,6 +381,22 @@ export type WorkbenchCommand = {
   /** 批量重新生成按钮文案 */
   regenerateLabel: string
   regenerateDisabled: boolean
+  /**
+   * **「批量生成图」按钮**（需求清单第 2 条第 2 项）。
+   *
+   * 为什么要单独一个按钮，而不是让主按钮变来变去：主按钮按"下一步真正能做的事"走，
+   * 选中项还没有提示词时它就变成「生成图片提示词（N）」——那一刻界面上**没有任何**
+   * 批量出图的入口，用户看到的就是"只有批量生成提示词，没有批量生成图"。
+   * 这个按钮**常驻**并与「生成图片提示词」并排：已有提示词的项可以直接批量出图。
+   */
+  generateImagesLabel: string
+  generateImagesDisabled: boolean
+  /** 该按钮禁用时**为什么**（用户语言；可用时为空串） */
+  generateImagesDisabledReason: string
+  /** 该按钮**可用**时的一句说明（会花几张图的钱） */
+  generateImagesHint: string
+  /** 当前选中项里真正会进批量的张数（按钮数字与二次确认同口径） */
+  generateImagesCount: number
   counts: WorkbenchCommandCounts
 }
 
@@ -468,6 +484,11 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
       primaryHint: '',
       regenerateLabel: '批量重新生成已选项',
       regenerateDisabled: true,
+      generateImagesLabel: '批量生成图',
+      generateImagesDisabled: true,
+      generateImagesDisabledReason: '还没有分析过本章资产：先点「分析本章资产」。',
+      generateImagesHint: '',
+      generateImagesCount: 0,
       counts,
     }
   }
@@ -517,6 +538,25 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
   }
 
   const regenerateDisabled = busy || counts.regeneratable === 0
+  /* 「批量生成图」按钮：**常驻**，与「生成图片提示词」并排（需求清单第 2 条第 2 项）。
+     它的口径与 `keysForRun('generate')` 完全一致 —— 只有"可进批量、还没有图片"的项
+     才算数，所以按钮上的数字就是这次真的会出几张图。 */
+  const generateImagesCount = counts.generatable
+  const generateImagesDisabled = busy || generateImagesCount === 0
+  const generateImagesDisabledReason = (() => {
+    if (busy) return '本轮还在进行中；要中断后续请点「停止后续」。'
+    if (counts.selected === 0) return '先勾选要生成图片的资产，或点「全选本页签」/「只选未生成项」。'
+    if (counts.needsPrompt > 0 && counts.generatable === 0) {
+      return '选中的资产还没有图片提示词：先点「生成图片提示词」，或换选已经有提示词的项。'
+    }
+    if (counts.generating > 0) return '选中的资产正在生成，等这一轮跑完再点。'
+    return '所选资产都已有图片：需要再出一张请用「批量重新生成已选项」。'
+  })()
+  const generateImagesHint =
+    generateImagesDisabled || generateImagesCount === 0
+      ? ''
+      : `会为 ${generateImagesCount} 项生成图片（按张计费，提交前还会再确认一次）。`
+
   return {
     title,
     primaryAction,
@@ -530,6 +570,12 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
     regenerateLabel:
       counts.regeneratable > 0 ? `批量重新生成已选项（${counts.regeneratable}）` : '批量重新生成已选项',
     regenerateDisabled,
+    generateImagesLabel:
+      generateImagesCount > 0 ? `批量生成图（${generateImagesCount}）` : '批量生成图',
+    generateImagesDisabled,
+    generateImagesDisabledReason: generateImagesDisabled ? generateImagesDisabledReason : '',
+    generateImagesHint,
+    generateImagesCount,
     counts,
   }
 }

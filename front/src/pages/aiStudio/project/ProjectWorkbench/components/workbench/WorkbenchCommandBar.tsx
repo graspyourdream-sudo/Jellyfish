@@ -55,6 +55,12 @@ export type WorkbenchCommandBarProps = {
   busy: boolean
   onGenerate: () => void
   onRegenerate: () => void
+  /**
+   * **「批量生成图」按钮**（需求清单第 2 条第 2 项）：与主按钮（可能是「生成图片提示词」）
+   * **并排常驻**，让"已有提示词、想直接出图"的用户不必先绕一圈。
+   */
+  onGenerateImages: () => void
+  onSelectAll: () => void
   onSelectUngenerated: () => void
   onClearSelection: () => void
   onStop: () => void
@@ -93,6 +99,8 @@ export function WorkbenchCommandBar(props: WorkbenchCommandBarProps) {
     busy,
     onGenerate,
     onRegenerate,
+    onGenerateImages,
+    onSelectAll,
     onSelectUngenerated,
     onClearSelection,
     onStop,
@@ -217,6 +225,26 @@ export function WorkbenchCommandBar(props: WorkbenchCommandBarProps) {
               {command.regenerateLabel}
             </Button>
           </Tooltip>
+          {/*
+            「批量生成图」**常驻**并与主按钮并排（需求清单第 2 条第 2 项）。
+            主按钮是可变的（"下一步真正能做的事"）：选中项还没提示词时它会变成
+            「生成图片提示词（N）」——那一刻界面上就没有任何批量出图入口了。
+            这个按钮把"批量生成图"这件事**永远留在一个固定的位置上**。
+            它故意**不做 primary**：主操作仍然只有一个（工作台既有约定），
+            这里要解决的是"找不到入口"，不是再选一个主操作。
+          */}
+          <Tooltip title={command.generateImagesDisabled ? command.generateImagesDisabledReason : command.generateImagesHint}>
+            <Button
+              disabled={command.generateImagesDisabled}
+              onClick={onGenerateImages}
+              data-testid="batch-generate-images"
+            >
+              {command.generateImagesLabel}
+            </Button>
+          </Tooltip>
+          <Button size="small" onClick={onSelectAll} data-testid="select-all">
+            全选本页签
+          </Button>
           <Button size="small" onClick={onSelectUngenerated} data-testid="select-ungenerated">
             只选未生成项
           </Button>
