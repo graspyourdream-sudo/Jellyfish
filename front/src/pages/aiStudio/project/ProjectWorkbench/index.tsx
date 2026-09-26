@@ -8,6 +8,7 @@ import {
   RightOutlined,
   AppstoreOutlined,
   InfoCircleOutlined,
+  ReadOutlined,
 } from '@ant-design/icons'
 import { Link, useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { type TabKey, isTabKey } from './constants'
@@ -562,6 +563,20 @@ const ProjectWorkbench: React.FC = () => {
               onClick={() => projectId && navigate(getProjectEditorPath(projectId))}
             >
               进入后期剪辑
+            </Button>
+            {/*
+              广告剧情流程的入口（「剧情策划」）。
+              它**不是**第六步：五步模型（resolveProjectStep / ProjectStepNav）一个字都没改，
+              方案确认落库后产出的就是第 1 步要读的章节与分镜，用户回来照常点「继续」。
+              之所以做成工作台里的按钮而不是新步骤：入口批已按用户口径后置，
+              本批只保证"项目内能进去"。
+            */}
+            <Button
+              icon={<ReadOutlined />}
+              disabled={!projectId}
+              onClick={() => projectId && navigate(`/drama-plan?projectId=${encodeURIComponent(projectId)}`)}
+            >
+              剧情策划
             </Button>
             <Dropdown menu={{ items: moreMenuItems }} placement="bottomRight">
               <Button icon={<EllipsisOutlined />}>更多</Button>

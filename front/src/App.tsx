@@ -22,6 +22,7 @@ import { ChapterShotsPage } from './pages/aiStudio/shots/ChapterShotsPage'
 import { ChapterShotEditPage } from './pages/aiStudio/shots/ChapterShotEditPage'
 import PromptFlowPage from './pages/aiStudio/promptFlow/PromptFlowPage'
 import LlmPipelinePage from './pages/aiStudio/llmPipeline/LlmPipelinePage'
+import DramaPlanPage from './pages/aiStudio/dramaPlan/DramaPlanPage'
 import './App.css'
 
 const App: React.FC = () => {
@@ -51,6 +52,7 @@ const App: React.FC = () => {
           <Route path="agents" element={<AgentManagement />} />
           <Route path="models" element={<ModelManagement />} />
           <Route path="llm-pipeline" element={<LlmPipelinePage />} />
+          <Route path="drama-plan" element={<DramaPlanPage />} />
           <Route path="settings" element={<Settings />} />
           <Route path="*" element={<NotFound />} />
         </Route>

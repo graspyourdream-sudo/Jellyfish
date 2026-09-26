@@ -11,6 +11,7 @@ import {
   ApiOutlined,
   CloudSyncOutlined,
   ThunderboltOutlined,
+  ReadOutlined,
 } from '@ant-design/icons'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAppStore } from '../store/useAppStore'
@@ -42,6 +43,7 @@ const MainLayout: React.FC = () => {
     if (location.pathname.startsWith('/agents')) return ['agents']
     if (location.pathname.startsWith('/models')) return ['models']
     if (location.pathname.startsWith('/llm-pipeline')) return ['llm-pipeline']
+    if (location.pathname.startsWith('/drama-plan')) return ['drama-plan']
     if (location.pathname.startsWith('/settings')) return ['settings']
     return []
   }, [location.pathname])
@@ -59,6 +61,7 @@ const MainLayout: React.FC = () => {
       agents: 'Agent管理',
       models: '模型管理',
       'llm-pipeline': 'LLM 调试台（开发）',
+      'drama-plan': '剧情策划',
       settings: t('menu.settings'),
       chapters: '章节管理',
       studio: '分镜工作室',
@@ -126,6 +129,12 @@ const MainLayout: React.FC = () => {
       key: 'prompt-flow',
       icon: <CloudSyncOutlined />,
       label: <Link to="/prompt-flow">提示词导入/交付</Link>,
+    },
+    // 广告剧情流程：商品卖点 → 剧情方案 → 确认落成章节/分镜/资产（进工作台之前的入口）
+    {
+      key: 'drama-plan',
+      icon: <ReadOutlined />,
+      label: <Link to="/drama-plan">剧情策划</Link>,
     },
     {
       key: 'models',
