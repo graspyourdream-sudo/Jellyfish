@@ -12,8 +12,12 @@
 
 // 阶段 B ③（审计 §4.3 模式 3）：帧类型不许原值上屏，复用同目录已有的 frameTypeLabel
 import { frameTypeLabel } from './shotStatusText.ts'
-// 阶段 B ③（审计 §4.3 模式 6）：`frame_block_reasons` 是后端原文，进主区前先过三级管道
-import { toUserFacingText } from '../../components/userFacingMessage.ts'
+/* 阶段 B ③（审计 §4.3 模式 6）：`frame_block_reasons` 是后端原文，不能直接进主区。
+   第 3 批收尾（审计 §4.3 模式 4 / §7.1-6）：**主区改用产品自己写的中文结论**，
+   后端原文（`reference_preflight._classify_ref` 会把 host 拼进原因：
+   `参考图指向本机 / 内网地址（192.168.1.9）…`）只进 `technicalDetails`（技术详情层）。
+   过一遍 `toUserFacingText` 解决不了这个：它只掩内部 ID，不会去掉地址。 */
+import { maskInternalIds } from '../../components/maskInternalIds.ts'
 
 export type PromptDeliveryFile = {
   slot?: string
@@ -39,14 +43,74 @@ export type PromptDeliveryRowLike = {
 
 export type StepState = 'not_started' | 'partial' | 'ready'
 
+/* ----------------------------------------- 帧不可用原因：主区结论 ↔ 技术详情原文 */
+
+/**
+ * `frame_block_reasons`（后端原文）→ **成对文案**：主区结论 + 技术详情原文。
+ *
+ * 审计 §4.3 模式 4 的出口：「后半段原因里带地址」。
+ * 后端 `reference_preflight._classify_ref` 的三条原因里，
+ * 本机 / 内网那条会把 **host 拼进句子**（例如 `192.168.1.9`），
+ * 相对路径那条会写「本机 / 项目内相对路径」。这些都属于第三层，
+ * 而用户真正需要知道的是「这一帧为什么用不了、怎么补」——
+ * 所以主区按原因**分类**给产品自己写的中文结论，原句只进 `technicalDetails`。
+ */
+export type FrameBlockReasonView = {
+  /** 主区：产品自己写的中文结论（含下一步动作），不含地址 / 存储形态 */
+  mainText: string
+  /** 技术详情层（默认收起）：后端原文（去内部 ID 后保留原措辞）；没有原文时为空串 */
+  technicalDetail: string
+}
+
+/** 主区结论（一律中文，一律给下一步动作）。 */
+export const FRAME_BLOCK_LOCAL_TEXT =
+  '这一帧的图只存在本机或内网，生成服务取不到它：先把它上传到公网地址，再设为该帧。'
+export const FRAME_BLOCK_INLINE_TEXT =
+  '这一帧用的是内嵌图片，生成服务不接受：把这张图上传到公网地址后再设为该帧。'
+export const FRAME_BLOCK_UNREACHABLE_TEXT =
+  '这一帧的图生成服务打不开（地址没有公开读权限，或对象不存在）：换一张图，或重新上传到公网地址。'
+export const FRAME_BLOCK_UNVERIFIED_TEXT =
+  '这一帧的图没法确认生成服务能不能取到：换一张图，或重新上传到公网地址。'
+/** 兜底：与旧口径一致的那句话（旧实现是 `toUserFacingText` 的 fallback，现在是主区的唯一口径） */
+export const FRAME_BLOCK_FALLBACK_TEXT = '这一帧这次用不了：可以重新生成或换一张参考图。'
+
+/** 后端原因 → 主区结论的分类规则（只按**形态**分，不逐字匹配后端整句）。 */
+const FRAME_BLOCK_RULES: ReadonlyArray<{ readonly pattern: RegExp; readonly mainText: string }> = [
+  // 本机 / 内网 / 相对路径（后端那条会把 host 拼进句子）
+  { pattern: /本机|内网|相对路径|localhost|127\.0\.0\.1|192\.168\./i, mainText: FRAME_BLOCK_LOCAL_TEXT },
+  // 内嵌 base64 data URL
+  { pattern: /data\s*url|base64|内嵌/i, mainText: FRAME_BLOCK_INLINE_TEXT },
+  // 匿名探活拿到了明确的失败状态码
+  { pattern: /HTTP\s*\d{3}/i, mainText: FRAME_BLOCK_UNREACHABLE_TEXT },
+  // 探活没跑完 / 无法确认
+  { pattern: /探活|无法确认|没有完成/i, mainText: FRAME_BLOCK_UNVERIFIED_TEXT },
+]
+
+export function describeFrameBlockReason(reason: unknown): FrameBlockReasonView {
+  const raw = String(reason ?? '').trim()
+  if (!raw) return { mainText: '', technicalDetail: '' }
+  const rule = FRAME_BLOCK_RULES.find((item) => item.pattern.test(raw))
+  return {
+    mainText: rule ? rule.mainText : FRAME_BLOCK_FALLBACK_TEXT,
+    technicalDetail: `生成服务原始说明：${maskInternalIds(raw)}`,
+  }
+}
+
 export type ShotReadiness = {
   shotId: string
   code: string
   title: string
   /** 当前步骤状态 */
   stepState: StepState
-  /** 缺少的具体内容（给用户看的） */
+  /** 缺少的具体内容（给用户看的；**全部是产品自己写的中文句子**） */
   missing: string[]
+  /**
+   * 技术详情层（默认收起）才允许出现的内容：后端给的原因原文
+   * （`frame_block_reasons`，去内部 ID 后保留措辞）。
+   *
+   * 与 `missing` 成对：同一件事，主区一句话，原文在这里。
+   */
+  technicalDetails: string[]
   /** 生成就绪（含参考帧要求） */
   canGenerate: boolean
   /** 导出就绪（只看提示词 + 标注绑定缺失） */
@@ -85,7 +149,13 @@ export type ReadinessInput = {
    * 判定口径来自后端 `resolve_vendor_image_ref`，与计划预检、提交前校验是同一份实现。
    */
   unusableFrameTypes?: string[]
-  /** 不可用/缺失帧的具体原因（后端原样带回，页面直接展示） */
+  /**
+   * 不可用/缺失帧的具体原因（后端原样带回）。
+   *
+   * ⚠️ 这串**不进主区**（审计 §4.3 模式 4：原因里带本机 / 内网 host 与相对路径）：
+   * 经 `describeFrameBlockReason` 分类后，主区只出产品自己写的中文结论，
+   * 原文进 `ShotReadiness.technicalDetails`（默认收起的「技术详情」）。
+   */
   frameBlockReasons?: string[]
   /** 计划是否已经拿到并有效（未拿到时不能算生成就绪） */
   planReady?: boolean
@@ -95,6 +165,7 @@ export type ReadinessInput = {
 export function evaluateShotReadiness(input: ReadinessInput): ShotReadiness {
   const { row } = input
   const missing: string[] = []
+  const technicalDetails: string[] = []
   const exportWarnings: string[] = []
   const prompt = String(row.video_prompt ?? '').trim()
   const hasPrompt = Boolean(prompt)
@@ -120,8 +191,15 @@ export function evaluateShotReadiness(input: ReadinessInput): ShotReadiness {
     missing.push(`参考帧已上传但当前服务取不到：${blockedFrames.map(frameTypeLabel).join('、')}`)
   }
   for (const reason of input.frameBlockReasons ?? []) {
-    // 审计 §4.3 模式 6：这串直接渲染在主区「本镜还缺什么」里（源头 ChapterStudio 传 frame_block_reasons）
-    if (reason) missing.push(toUserFacingText(reason, '这一帧这次用不了：可以重新生成或换一张参考图'))
+    /* 审计 §4.3 模式 4/6 + §7.1-6（成对文案）：
+       旧实现是 `missing.push(toUserFacingText(reason, '这一帧这次用不了…'))` ——
+       那是「后端句子的改写结果」，而且原因里带地址（本机 / 内网 host、/files/ 相对路径）时
+       管道并不会去掉地址。现在主区只放产品自己写的结论，原文进 technicalDetails。 */
+    const described = describeFrameBlockReason(reason)
+    if (described.mainText && !missing.includes(described.mainText)) missing.push(described.mainText)
+    if (described.technicalDetail && !technicalDetails.includes(described.technicalDetail)) {
+      technicalDetails.push(described.technicalDetail)
+    }
   }
   if (input.planReady === false && required.length) missing.push('生成计划尚未加载完成')
   missing.push(...(input.extraBlockers ?? []))
@@ -144,6 +222,7 @@ export function evaluateShotReadiness(input: ReadinessInput): ShotReadiness {
     title: row.shot_title,
     stepState,
     missing,
+    technicalDetails,
     canGenerate,
     canExport,
     exportWarnings,

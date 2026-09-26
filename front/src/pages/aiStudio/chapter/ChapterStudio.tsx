@@ -63,7 +63,7 @@ import {
 import { useLocation, useNavigate, useParams, Link } from 'react-router-dom'
 import { ChapterShotAssetBindingSection } from '../shots/components/ChapterShotAssetBindingSection'
 import { ShotAudioBindingSection } from '../shots/components/ShotAudioBindingSection'
-import { audioStateTag } from '../shots/components/audioAdmissionCore'
+import { audioStateTag, describeAudioAdmission } from '../shots/components/audioAdmissionCore'
 import { StudioStepProgressStrip } from './components/StudioStepProgressStrip'
 import {
   FilmService,
@@ -132,6 +132,7 @@ import { useShotRequestPlan, REFERENCE_MODE_OPTIONS, referenceModeLabel, videoMo
 import { frameTypeLabel, resolveShotStatus, type ShotStatusText } from './components/shotStatusText'
 import { ExportScopeModal } from './components/ExportScopeModal'
 import {
+  describeFrameBlockReason,
   evaluateShotReadiness,
   summarizeStepState,
   STEP_STATE_META,
@@ -140,7 +141,12 @@ import {
 } from './components/shotReadiness'
 import { TASK_COPY } from '../components/taskCopy'
 // 阶段 B ①：后端原文 → 主区的中文结论（掩码 → 洗句 → 业务化改写三级管道）
-import { showUserError, showUserWarning, toUserFacingText } from '../components/userFacingMessage'
+// 第 3 批收尾：`showUserConclusion` 用于「产品自己写的中文结论 + 原文只进技术详情」的成对文案
+import { showUserConclusion, showUserError, showUserWarning, toUserFacingText } from '../components/userFacingMessage'
+// 第 3 批收尾（审计 §4.3 模式 6）：warnings / 后端原因原文进技术详情层前先掩内部 ID
+import { maskInternalIds } from '../components/maskInternalIds'
+// 第 3 批收尾：第三层内容一律用**全仓唯一**的技术详情折叠壳（不另建一套）
+import { TechnicalDetailSection } from '../project/ProjectWorkbench/components/workbench/TechnicalDetailCollapse'
 import {
   TARGET_RATIO_SOURCE,
   framePromptSourceLabel as framePromptSourceLabelShared,
@@ -5050,6 +5056,27 @@ function Inspector(props: {
     },
   })
 
+  /**
+   * 第 3 批收尾（审计 §4.3 模式 4/6 + §7.1-6 成对文案）：④「本次请求实际使用的帧」里
+   * 后端给的**帧不可用原因**（`reference_preflight` 会把本机 / 内网 host 拼进句子）——
+   * 主区只出产品自己写的中文结论，原句只进技术详情层。
+   */
+  const requestFrameReasonNotes = useMemo(
+    () => (requestPlan.plan?.frames ?? [])
+      .map((frame: VideoPlanFrame) => describeFrameBlockReason(frame.reason).technicalDetail)
+      .filter((item: string) => Boolean(item)),
+    [requestPlan.plan],
+  )
+
+  /**
+   * 第 3 批收尾：④ 的声音准入结论复用 `describeAudioAdmission` 的**同一份**口径 ——
+   * 主区给中文结论，后端 `excluded_reason` / `how_to_fix`（可能带 `/files/...` 地址）只进技术详情。
+   */
+  const planAudioAdmission = useMemo(
+    () => describeAudioAdmission(requestPlan.plan?.audio ?? null),
+    [requestPlan.plan?.audio],
+  )
+
   const confirmGenerateKeyframeWithPrompt = async () => {
     if (!selectedShot?.id) {
       message.warning('请先选择一个分镜')
@@ -5108,9 +5135,17 @@ function Inspector(props: {
 
       const notes = result.provider_notes ?? []
       if (notes.length) {
-        // 审计 §4.3 模式 6：这是唯一一处把生成服务方的原话铺到主区 toast 的地方
-        // （`:5086`），原文只进「技术详情」，主区只给中文结论。
-        void showUserWarning(notes[0], '这一条有需要注意的地方', '生成关键帧')
+        /* 审计 §4.3 模式 6：这是唯一一处把生成服务方的原话铺到主区 toast 的地方（`:5086`）。
+           第 3 批收尾（审计 §7.1-6）：**主区给产品自己写的中文结论**，后端原话
+           （可能含「参考图未透传」/ 存储地址 / 环境变量名）只进「技术详情」——
+           走 `showUserConclusion` 而不是 `showUserWarning`，避免「后端长文本过一遍管道
+           仍然是后端文本」这个上一批在交付预览上踩过的坑。 */
+        void showUserConclusion(
+          'warning',
+          '生成服务对这次结果有额外说明（可能没有按你选的参考图出图）。建议先核对再采用；原始说明见「技术详情」。',
+          notes.join('\n'),
+          '生成关键帧',
+        )
       }
 
       if (result.dry_run) {
@@ -6482,8 +6517,10 @@ function Inspector(props: {
                                   ) : null}
                                   <span className="text-[11px] text-gray-500">{frame.usable ? '本次请求会使用' : '本次请求用不了'}</span>
                                   {frame.reason ? (
+                                    /* 第 3 批收尾（审计 §4.3 模式 4）：后端原因里带本机 / 内网 host 与相对路径 ——
+                                       主区只出产品自己写的中文结论，原句在下面默认收起的「技术详情」里。 */
                                     <div className="mt-0.5 max-w-[520px] text-[10px] leading-4 text-orange-600">
-                                      {toUserFacingText(frame.reason, '这一帧这次用不了：可以重新生成或换一张参考图')}
+                                      {describeFrameBlockReason(frame.reason).mainText}
                                     </div>
                                   ) : null}
                                 </div>
@@ -6506,14 +6543,31 @@ function Inspector(props: {
                               {audioStateTag(requestPlan.plan.audio, requestPlan.plan.audio_state)}
                             </Tag>
                             <span className="text-[11px] text-gray-500">声音文件与内部 ID 见「技术详情」。</span>
+                            {requestFrameReasonNotes.length || planAudioAdmission.technicalDetail ? (
+                              /* 第 3 批收尾（审计 §4.3 模式 4/6）：④ 里两处后端原文 ——
+                                 帧不可用原因（含本机 / 内网 host）与声音地址 / 原始说明 ——
+                                 只出现在默认收起的「技术详情」里（复用全仓唯一折叠壳）。 */
+                              <TechnicalDetailSection testId="request-audit-detail" hint="生成服务对这次参考图与声音的原始说明">
+                                {requestFrameReasonNotes.length ? (
+                                  <ul className="list-disc pl-4 text-[11px]">
+                                    {requestFrameReasonNotes.map((item: string, index: number) => (
+                                      <li key={`request-frame-reason-${index}`}>{item}</li>
+                                    ))}
+                                  </ul>
+                                ) : null}
+                                {planAudioAdmission.technicalDetail ? (
+                                  <div className="whitespace-pre-wrap text-[11px]">{planAudioAdmission.technicalDetail}</div>
+                                ) : null}
+                              </TechnicalDetailSection>
+                            ) : null}
                             {/* 绑了但用不上：计划阶段就把原因与修法写出来（不等到提交失败） */}
                             {requestPlan.plan.audio?.included === false && requestPlan.plan.audio?.file_id ? (
+                              /* 第 3 批收尾（审计 §4.3 模式 4/6）：后端 `excluded_reason` 里带 `/files/...` 这类
+                                 存储形态 —— 主区改用 `describeAudioAdmission` 的产品结论，原文（含地址）只进技术详情层。 */
                               <div className="mt-1 max-w-[560px] text-[10px] leading-4 text-orange-600">
-                                <div>{toUserFacingText(String(requestPlan.plan.audio.excluded_reason || ''), '这条声音这次送不出去：生成服务取不到它')}</div>
-                                {requestPlan.plan.audio.how_to_fix ? (
-                                  <div className="text-slate-500">
-                                    怎么修：{toUserFacingText(requestPlan.plan.audio.how_to_fix, '把这条声音换成公网可访问的地址后重新绑定')}
-                                  </div>
+                                <div>{planAudioAdmission.detail}</div>
+                                {planAudioAdmission.fix ? (
+                                  <div className="text-slate-500">怎么修：{planAudioAdmission.fix}</div>
                                 ) : null}
                               </div>
                             ) : null}
@@ -6603,17 +6657,16 @@ function Inspector(props: {
                         </Descriptions>
                       ) : null}
                       {requestPlan.plan?.warnings?.length ? (
+                        /* 第 3 批收尾（审计 §4.3 模式 6 + §7.1-6 成对文案）：
+                           这里原先把后端 warnings 过一遍管道后逐条铺在主区 —— 实机走查抓到的是
+                           一句**英文后端原文**（`Required frame image is missing: 首帧;please generate it 首帧`）。
+                           主区改成产品自己写的中文结论；后端原文在同一页默认收起的
+                           「技术详情 → 后端原始提示」里可查。 */
                         <Alert
                           type="info"
                           showIcon
-                          message="补充说明"
-                          description={
-                            <ul className="list-disc pl-4 text-[11px]">
-                              {requestPlan.plan.warnings.slice(0, 4).map((warning: string, index: number) => (
-                                <li key={`plan-warning-${index}`}>{toUserFacingText(warning, '这一步有需要注意的地方')}</li>
-                              ))}
-                            </ul>
-                          }
+                          message={`这次提交计划有 ${requestPlan.plan.warnings.length} 条需要注意的地方`}
+                          description="例如：参考图没有全部用上、时长或画幅按默认值提交、参考音频这次不会带上。生成前请核对上面的参考方式 / 画幅 / 参考图数量；生成服务的原始说明见「技术详情 → 后端原始提示」。"
                         />
                       ) : null}
                       {part('gen_ref_videos')}
@@ -6871,11 +6924,23 @@ function Inspector(props: {
                             : '下面输入框的文本与镜头里保存的内容不同：本次按输入框提交（来源＝本次输入），不会自动改镜头里的保存值。'}
                       </div>
                       {keyframePlanPreview.warnings.length ? (
-                        <ul className="list-disc pl-5 text-[11px] text-amber-600">
-                          {keyframePlanPreview.warnings.slice(0, 4).map((item, index) => (
-                            <li key={`plan-warning-${index}`}>{item}</li>
-                          ))}
-                        </ul>
+                        /* 第 3 批收尾（审计 §4.3 模式 4/6 + §7.1-6 成对文案）：
+                           旧实现把后端 warnings **原样**逐条铺在主区（里面含「已跳过：[file_id…]」
+                           这类内部编号与「供应商「x」没有配置 API Key」这类点名）。
+                           现在主区只给产品自己写的中文结论，后端原话进默认收起的「技术详情」。 */
+                        <>
+                          <div className="rounded bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-700">
+                            {`这次的提交计划有 ${keyframePlanPreview.warnings.length} 条需要注意的地方：参考图可能没有全部用上，或本次用的提示词与镜头里保存的那份不同。`}
+                            生成前请先核对上面的提示词来源与「参考图映射」；原始说明见下面的「技术详情」。
+                          </div>
+                          <TechnicalDetailSection testId="keyframe-plan-warning-detail" hint="生成服务对这次提交计划的原始说明">
+                            <ul className="list-disc pl-5 text-[11px]">
+                              {keyframePlanPreview.warnings.map((item, index) => (
+                                <li key={`plan-warning-${index}`}>{maskInternalIds(String(item))}</li>
+                              ))}
+                            </ul>
+                          </TechnicalDetailSection>
+                        </>
                       ) : null}
                     </div>
                   ) : (
@@ -7568,12 +7633,23 @@ function Inspector(props: {
                     : '暂时读不到是否允许真实付费（未取到计划预览）。'}
                 </div>
                 {videoPinnedPlan && videoPinnedPlan.warnings.length > 0 ? (
-                  <ul className="mt-1 list-disc pl-4">
-                    {/* 审计 §4.3 模式 6：`:7519` 这一族 warnings 直渲后端原文，同文件 `:6575` 已用管道 */}
-                    {videoPinnedPlan.warnings.map((item) => (
-                      <li key={item}>{toUserFacingText(item, '这一条有需要注意的地方')}</li>
-                    ))}
-                  </ul>
+                  /* 第 3 批收尾（审计 §4.3 模式 4/6 + §7.1-6 成对文案）：
+                     旧实现把后端 warnings 过一遍管道后逐条铺在主区 —— 那仍然是**后端句子的改写结果**，
+                     且原因里可能带本机 / 内网 host。主区改成产品自己写的中文结论，
+                     后端原话进默认收起的「技术详情」。 */
+                  <div className="mt-1">
+                    <div className="rounded bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
+                      {`这次的提交计划有 ${videoPinnedPlan.warnings.length} 条需要注意的地方：可能有个别参考图没能带上，或时长 / 画幅按项目默认值提交。`}
+                      生成前请先核对上面的方案标签与参考图；原始说明见下面的「技术详情」。
+                    </div>
+                    <TechnicalDetailSection testId="video-pinned-plan-warning-detail" hint="生成服务对这次提交计划的原始说明">
+                      <ul className="mt-0 list-disc pl-4">
+                        {videoPinnedPlan.warnings.map((item: string, index: number) => (
+                          <li key={`video-pinned-warning-${index}`}>{maskInternalIds(item)}</li>
+                        ))}
+                      </ul>
+                    </TechnicalDetailSection>
+                  </div>
                 ) : null}
                 {/* 审计 §4.3 模式 4：「DRY_RUN 守卫只作用于直提端点…」整句下沉到「技术详情」 */}
               </div>

@@ -306,6 +306,9 @@ export function clearTechnicalDetails(): void {
 
 type MessageKind = 'error' | 'warning' | 'info' | 'success'
 
+/** toast 级别（`showUserConclusion` 的入参类型，导出以便调用点复用同一份级别口径）。 */
+export type UserMessageKind = MessageKind
+
 /** toast 输出接口（默认走 antd `message`；测试注入假实现以便断言「主区只出中文结论」）。 */
 export type UserMessageNotifier = (kind: MessageKind, title: string) => void | Promise<void>
 
@@ -371,4 +374,41 @@ export function showUserInfo(raw: unknown, fallback: string, scope = ''): Promis
 /** 成功提示（成功文案本身就是中文结论，不走原文管道）。 */
 export function showUserSuccess(text: string): void {
   void emit('success', String(text ?? ''))
+}
+
+/* ------------------------------- 产品自己写的中文结论 + 原文进技术详情（成对文案入口） */
+
+/**
+ * 主区给**产品自己写的中文结论**、后端原文只进技术详情层（审计 §7.1-6 的成对文案）。
+ *
+ * ## 为什么还需要这个入口（与 `showUserError` / `showUserWarning` 的分工）
+ *
+ * `showUserError` / `showUserWarning` 的主区文案是**后端句子过管道后的改写结果**
+ * （`toUserFacingText`）。后端句子一旦「脏」（含 `DRY_RUN=` / 环境变量 / 地址），
+ * 管道会整句丢弃并退回 `fallback` —— 于是用户本来就该看到的那个中文结论
+ * 变成了通用句（「这一步没有成功，请稍后重试」），这是**信息削减**。
+ *
+ * 本入口把两个职责拆开：
+ * - **主区**：调用方直接给一句产品自己写的中文结论（具体、可据以行动），
+ *   不再由后端句子派生；
+ * - **技术详情层**：后端原文经 `maskInternalIds` 后写入「最近一次原始信息」
+ *   （`readTechnicalDetails` 读取），默认收起的折叠区可以展开查。
+ *   ⚠️ 这一层**只掩内部 ID、不做洗句**：技术详情层的定义就是「允许放内部信息
+ *   （接口路径、环境变量名、后端错误原文）」（审计 §2.1），把它洗掉就等于用户再也查不到原文。
+ *
+ * ⚠️ 本函数**不改** `toUserFacingText` / `buildUserFacingMessage` 的既有兜底规则，
+ * 其它区域的行为一个字节都不受影响。
+ */
+export function showUserConclusion(
+  kind: MessageKind,
+  conclusion: string,
+  raw?: unknown,
+  scope = '',
+): Promise<UserFacingMessage> {
+  const title = String(conclusion ?? '').trim() || USER_FACING_FALLBACK
+  const source =
+    typeof raw === 'string' ? raw : raw === null || raw === undefined ? '' : String((raw as Error)?.message ?? raw)
+  const detail = source.trim() ? maskInternalIds(source) : ''
+  if (detail) rememberTechnicalDetail({ title, detail, scope })
+  return emit(kind, title).then(() => ({ title, detail }))
 }
