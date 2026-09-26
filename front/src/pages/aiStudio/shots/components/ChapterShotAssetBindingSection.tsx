@@ -61,6 +61,26 @@ const ASSET_TYPE_LABELS: Record<string, string> = {
   costume: '服装',
 }
 
+/**
+ * 后端成本提示 → 主区可显示的一句（审计 §4.6 模式 3/5）。
+ *
+ * 运行时实测（本批走查）后端原话形如：
+ * `估算 1 批，输入约 850 tokens、输出约 600 tokens（deepseek-chat 量级 < ¥0.1）；DRY_RUN 下不产生任何费用。`
+ * —— 同一句里既有**模型名**（模式 5）又有 **`DRY_RUN`**（模式 3/4）。
+ *
+ * 用户真正要看的是「大概多少钱、会不会产生费用」，所以这里只做两处**定点**收口：
+ *   1. 括号里的「模型名 + 量级 + 金额」→ 「预计费用 + 金额」（保住金额，去掉模型名）；
+ *   2. `DRY_RUN` → 「演练模式」。
+ * 原文一字不改地留在下面的「技术详情」里（`cost-note-technical-detail`）。
+ */
+function describePreviewCostNote(note: string): string {
+  return String(note ?? '')
+    .replace(/（[^）]*?(<\s*¥\s*[\d.]+)[^）]*）/g, '（预计费用 $1）')
+    .replace(/(?<![A-Za-z0-9_])DRY_RUN(?![A-Za-z0-9_])\s*/g, '演练模式')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
 /* 兜底一律给中文（审计 §7.4：`MAP[k] ?? k` 是模式 3 的兜底坑，未登记不许回显原值）。 */
 function slotLabel(slot: string): string {
   return SLOT_LABELS[slot] ?? '其它关联'
@@ -392,7 +412,7 @@ export function ChapterShotAssetBindingSection({
           <Typography.Text type="secondary" className="text-[11px]">
             系统按当前项目已有资产给出「角色 / 场景 / 道具 / 服装」四类关联建议：
             明确匹配的默认勾选，多候选或与现有绑定冲突的留给你逐条判断；
-            点「确认全部推荐」即可一次写入，保存后本镜状态立即刷新。推荐接口只读不写库。
+            点「确认全部推荐」即可一次写入，保存后本镜状态立即刷新。这个推荐只读、不写库。
           </Typography.Text>
         </div>
         <Space size={8}>
@@ -540,7 +560,16 @@ export function ChapterShotAssetBindingSection({
             </div>
           </TechnicalDetailSection>
           {preview.cost_note ? (
-            <div className="text-[11px] text-slate-500">{preview.cost_note}</div>
+            <div className="text-[11px] text-slate-500">
+              {describePreviewCostNote(preview.cost_note)}
+              <TechnicalDetailSection
+                className="mt-1"
+                testId="binding-preview-cost-technical-detail"
+                hint="服务端给出的费用原话（含内部模型标识与开关状态），只用于核对。"
+              >
+                <div>{preview.cost_note}</div>
+              </TechnicalDetailSection>
+            </div>
           ) : null}
 
           <Alert

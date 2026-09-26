@@ -442,6 +442,40 @@ test('区域6 渲染点专项：演练开关原文只进「技术详情」（双
   )
 })
 
+test('区域6 渲染点专项：后端成本提示的主区口径（模型名与 DRY_RUN 不进主区，原文进技术详情）', () => {
+  /* 运行时实测（本批走查）后端原话：
+     `估算 1 批，输入约 850 tokens、输出约 600 tokens（deepseek-chat 量级 < ¥0.1）；DRY_RUN 下不产生任何费用。`
+     —— 同一句里既有模型名（模式 5）又有 `DRY_RUN`（模式 3/4）。主区只做两处定点收口：
+     括号里的模型名 → 「预计费用 <金额>」；`DRY_RUN` → 「演练模式」。 */
+  assertRenderedOnlyInsideTechnicalDetail(
+    ASSET_BINDING,
+    'hint="服务端给出的费用原话（含内部模型标识与开关状态），只用于核对。"',
+    'binding-preview-cost-technical-detail',
+  )
+  const binding = stripComments(readScan(ASSET_BINDING))
+  assert.ok(
+    /describePreviewCostNote\(preview\.cost_note\)/.test(binding),
+    '成本提示必须过 `describePreviewCostNote(...)`（不能直接渲后端原话）',
+  )
+  // 折叠块**内**渲染原话是允许的（第三层），所以这里只看块外
+  const costBlock = foldBlock('binding-preview-cost-technical-detail', ASSET_BINDING)
+  assert.equal(
+    /\{preview\.cost_note\}/.test(binding.split(costBlock).join('')),
+    false,
+    '`{preview.cost_note}` 直接上主区的写法又回来了（模型名 + DRY_RUN 会一起上屏）',
+  )
+  assert.ok(
+    /预计费用 \$1/.test(binding),
+    '括号里的模型名必须换成「预计费用 + 金额」（保住金额、去掉模型名）',
+  )
+  // 主区文案的「接口」也是内部口径（§5.5-G 的残留禁词）→ 已改「这个推荐只读、不写库」
+  assert.equal(
+    /推荐接口只读不写库/.test(binding),
+    false,
+    '「推荐接口只读不写库」又回来了（「接口」是内部口径）',
+  )
+})
+
 test('区域6 渲染点专项：资产绑定表的列名与逐条 reason 口径', () => {
   const binding = stripComments(readScan(ASSET_BINDING))
   assert.ok(binding.includes("title: '建议依据'"), '列名必须是「建议依据」（审计 §4.6 模式 6：原来叫「理由」）')
@@ -598,6 +632,7 @@ test('区域6 手工核对登记：`shots/**` 里**已知未处理**的动态插
    * | `ChapterShotEditPage` 两处 | `existence-check 返回为空 / 调用失败` | 「没有查到该资产是否已存在，请重试」/「查询资产失败，请重试」 |
    * | `ChapterShotEditPage` 两处提取失败 | `message.error(defaultTaskActionErrorMessage(...))` | `showUserConclusion(...)` + 原文进技术详情 |
    * | `ChapterShotAssetBindingSection` | `DRY_RUN 守卫状态` / `JELLYFISH_DRY_RUN` / `llm_called=…` / `后端提示` / 列名「理由」/ 列名「槽位」/ `候选资产数` / `批次` | 全部改中文或收进「技术详情」 |
+   * | `ChapterShotAssetBindingSection` 的成本提示 | `（deepseek-chat 量级 < ¥0.1）；DRY_RUN 下不产生任何费用。`（运行时实测原文） | 定点收口为「（预计费用 < ¥0.1）；演练模式下不产生任何费用。」，原话进技术详情 |
    *
    * ## ② 仍未处理（逐条写明为什么）
    *
@@ -618,6 +653,7 @@ test('区域6 手工核对登记：`shots/**` 里**已知未处理**的动态插
     { marker: '当前处于 DRY_RUN 守卫状态', note: 'DRY_RUN 上主区（§4.6 模式 6）回潮了' },
     { marker: 'JELLYFISH_DRY_RUN', note: '环境变量名上主区（§4.6 模式 4）回潮了' },
     { marker: 'llm_called=', note: '`llm_called=` 上主区（§4.6 模式 2）回潮了' },
+
     { marker: 'message="后端提示"', note: '「后端提示」标题（§4.6 模式 2）回潮了' },
     { marker: "title: '理由'", note: '「理由」列名（§4.6 模式 6）回潮了' },
     { marker: "title: '槽位'", note: '「槽位」列名（§7.3 主区禁词）回潮了' },
