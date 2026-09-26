@@ -97,10 +97,10 @@ test('阶段映射：失败原因里的后台参数会被洗掉，不会漏给�
   assert.match(failed.detail, /^原因：/)
 })
 
-test('阶段映射：候选待确认 → 提示勾选后可一次确认', () => {
+test('阶段映射：待确认内容 → 提示勾选后可一次确认', () => {
   const pending = describeUserStage({ shotCount: 12, hasExtracted: true, pendingCandidateCount: 3 })
   assert.equal(pending.key, 'pending_confirm')
-  assert.equal(pending.label, '有 3 组候选等待确认')
+  assert.equal(pending.label, '有 3 项待你确认')
   assert.match(pending.detail, /确认选中项/)
 })
 

@@ -110,17 +110,18 @@ export function buildPromptBoardSaveBody(input: BuildSaveBodyInput): PromptBoard
 export function juriluScriptScopeError(rows: SaveEntryRow[], matchedScriptId: string): string | null {
   const scriptId = asText(matchedScriptId)
   if (scriptId === '') {
-    return '巨日禄分镜没有可用的脚本组（matchedScriptId 为空）：默认不跨 scriptId 合并，本次不发保存请求。'
+    /* 审计 §4.2：主区文案里不许出现 `script_id` / `scriptId` 这类字段名与内部组编号 */
+    return '这次抓取的剧本没有可用的组：默认不跨组合并，本次不发保存请求。'
   }
   const list = Array.isArray(rows) ? rows : []
   for (let index = 0; index < list.length; index += 1) {
     const rowScriptId = asText(list[index]?.scriptId)
     const position = index + 1
     if (rowScriptId === '') {
-      return `第 ${position} 条没有脚本组（script_id 为空）：无法证明它属于脚本组 ${scriptId}，本次不发保存请求。`
+      return `第 ${position} 条没有所属组：无法确认它属于当前这一组，本次不发保存请求。`
     }
     if (rowScriptId !== scriptId) {
-      return `第 ${position} 条属于脚本组 ${rowScriptId}，与当前脚本组 ${scriptId} 不一致：默认不跨 scriptId 合并，本次不发保存请求。`
+      return `第 ${position} 条属于另一组，与当前选中的组不一致：默认不跨组合并，本次不发保存请求。`
     }
   }
   return null

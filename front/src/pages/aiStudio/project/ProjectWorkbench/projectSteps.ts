@@ -41,7 +41,7 @@ export const PROJECT_STEPS: ProjectStepMeta[] = [
   {
     key: 'extract_assets',
     label: '资产准备',
-    description: '提取人物/场景/道具/服装候选 → 审核 → 关联或新建 → 图片提示词 → 图片 → 定版',
+    description: '确认人物/场景/道具/服装 → 审核 → 关联或新建 → 图片提示词 → 图片 → 定版',
     group: 'prep',
   },
   {

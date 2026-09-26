@@ -56,35 +56,35 @@ export const BASIS_ITEM_ORDER: BasisItemKey[] = [
 export const BASIS_ITEM_LABEL: Record<BasisItemKey, string> = {
   scriptAndShots: '① 原始剧本与相关分镜',
   assetProfile: '② 规范化资产资料（含别名合并结果）',
-  globalProfile: '③-a 全局资产通用资料（不属于本章依据）',
+  globalProfile: '③-a 所有项目共用的通用资料（不属于本章依据）',
   scopedBasis: '③-b 本章/本项目保存的剧本依据',
-  requestStructure: '④ 图片提示词接口的脱敏请求结构',
-  finalPrompts: '⑤ 最终提示词与差异',
+  requestStructure: '④ 图片提示词服务的脱敏请求结构',
+  finalPrompts: '⑤ 本次真正会用的提示词与差异',
   projectStyle: '项目整体风格',
   userSupplement: '你的补充/修改',
   typeRequirement: '该资产类型的出图要求',
 }
 
 /** 面板标题与收起态的那句话。 */
-export const BASIS_PANEL_TITLE = '生成依据'
+export const BASIS_PANEL_TITLE = '这次用了哪些资料'
 export const BASIS_PANEL_HINT = '本次生成实际用到的资料都在这里（默认收起）'
-export const BASIS_PANEL_PLACEHOLDER = '暂无生成依据'
-export const NO_BASIS_TEXT = '本次未提供生成依据'
+export const BASIS_PANEL_PLACEHOLDER = '暂时没有记录'
+export const NO_BASIS_TEXT = '这次没有记录用到的资料'
 export const BASIS_ITEM_EMPTY_TEXT = '本次未提供'
 export const BASIS_TECHNICAL_TITLE = '技术详情'
 
-/** 后端返回了依据字段、但每一项都是空的时候的如实说明（不是"没提供"，是"给了但为空"）。 */
+/** 返回了资料清单、但每一项都是空的时候的如实说明（不是"没提供"，是"给了但为空"）。 */
 export const BASIS_EMPTY_FROM_SERVER_TEXT =
-  '后端这次返回了生成依据字段，但每一项都是空的：本次生成没有用到项目风格、资产资料、剧本片段或分镜依据。'
+  '这次返回了资料清单，但每一项都是空的：本次生成没有用到项目风格、资产资料、剧本片段或分镜依据。'
 
-/** 契约字段还没上线时的如实说明（不编造、也不假装有）。 */
+/** 拿不到资料清单时的如实说明（不编造、也不假装有）。 */
 export const BASIS_ABSENT_TEXT =
-  '后端这次没有返回生成依据字段，因此看不到本次用了哪些资料（①~③ 由后端提供）；④ 请求结构与 ⑤ 最终提示词是前端自己记录的，没有就是没有。位置先留在这里，字段上线后会自动显示。'
+  '这次没有返回资料清单，因此看不到本次用了哪些资料（①~③ 由服务端提供）；④ 请求结构与 ⑤ 本次真正会用的提示词是本页自己记录的，没有就是没有。这一块暂时没有内容。'
 
-/** 全局资产（场景 / 道具 / 服装）的数据隔离说明（角色属项目内资产，不适用）。 */
+/** 所有项目共用的资产（场景 / 道具 / 服装）的数据隔离说明（角色只属于当前项目，不适用）。 */
 export const GLOBAL_ASSET_SCOPE_NOTE =
-  '该资产是**全局资产**（场景 / 道具 / 服装）：通用资料保存在全局资产库里；' +
-  '「本章依据 / 本章补充」按 **项目 + 章节** 单独保存，不会写回全局。'
+  '该资产所有项目共用（场景 / 道具 / 服装）：通用资料保存在共用资产库里；' +
+  '「本章依据 / 本章补充」按 项目 + 章节 单独保存，不会影响别的项目。'
 
 export type BasisProfileField = { label: string; value: string }
 export type BasisShotRef = { shotId: string; shotIndex: string; title: string }
@@ -153,12 +153,12 @@ export const STRUCTURED_SOURCE_LABEL: Record<string, string> = {
   'asset_description+chapter_record': '资产描述（全局）+ 本章资产资料（按项目 + 章节持久化保存）',
   chapter_overlay: '本章资产资料（章节隔离层，含剧本片段与出场镜头）',
   'asset_description+chapter_overlay': '资产描述（全局）+ 本章资产资料（章节隔离层）',
-  'chapter_overlay+candidate_profile': '本章资产资料 + 候选结构化资料（都按项目 + 章节保存）',
+  'chapter_overlay+candidate_profile': '本章资产资料 + 结构化资料（都按项目和章节保存）',
   'asset_description+chapter_overlay+candidate_profile':
-    '资产描述（全局）+ 本章资产资料 + 候选结构化资料',
-  asset_description: '资产描述（全局资产库里的通用资料）',
-  candidate_profile: '候选结构化资料（按项目+章节保存，含剧本片段与出场镜头）',
-  'asset_description+candidate_profile': '资产描述（全局）+ 候选结构化资料（本章，含剧本片段与出场镜头）',
+    '资产描述（全局）+ 本章资产资料 + 结构化资料',
+  asset_description: '资产描述（共用资产库里的通用资料）',
+  candidate_profile: '结构化资料（按项目和章节保存，含剧本片段与出场镜头）',
+  'asset_description+candidate_profile': '资产描述（全局）+ 结构化资料（本章，含剧本片段与出场镜头）',
   request: '调用方传入的资料',
   none: '没有任何资料（只剩空话兜底）',
   script_excerpt: '剧本片段',
@@ -872,14 +872,14 @@ export function buildBasisItems(basis: GenerationBasis): BasisItem[] {
         const text = basis.globalProfile.trim()
         const lines = [text]
         if (basis.globalAsset) {
-          lines.push('（该资产是全局资产：以上是全局资产库里的通用资料，**不属于本章依据**）')
+          lines.push('（该资产所有项目共用：以上是共用资产库里的通用资料，不属于本章依据）')
         }
         return { key, label: BASIS_ITEM_LABEL[key], provided: true, lines, summary: text.slice(0, 40) }
       }
       case 'scopedBasis': {
         const lines = [...basis.scopedBasis]
         if (basis.globalAsset) {
-          lines.push('（本章依据/补充按 项目 + 章节 隔离保存；不会写回全局资产）')
+          lines.push('（本章依据/补充按 项目 + 章节 隔离保存；不会影响别的项目）')
         }
         return {
           key,
@@ -901,7 +901,7 @@ export function buildBasisItems(basis: GenerationBasis): BasisItem[] {
       }
       case 'finalPrompts': {
         const lines: string[] = []
-        if (basis.finalPrompt.trim()) lines.push(`最终提示词：${basis.finalPrompt.trim()}`)
+        if (basis.finalPrompt.trim()) lines.push(`本次真正会用的提示词：${basis.finalPrompt.trim()}`)
         if (basis.promptDifferences.length > 0) {
           lines.push(...basis.promptDifferences.map((item) => `与其它资产的差异：${item}`))
         }
@@ -945,7 +945,7 @@ export function describeStructuredSource(code: string): string {
   const known = STRUCTURED_SOURCE_LABEL[key]
   if (known) return known
   if (/^[a-z][a-z0-9_+]*$/.test(key)) {
-    return '本章资产资料（后端未在本页登记这种来源码，代码见技术详情）'
+    return '本章资产资料（本页没有登记这种来源码，代码见技术详情）'
   }
   return key
 }
@@ -967,7 +967,7 @@ export function summarizeGenerationBasis(basis: GenerationBasis): string {
   if (isBasisItemProvided(basis, 'scopedBasis')) parts.push(`本章依据 ${basis.scopedBasis.length} 条`)
   if (isBasisItemProvided(basis, 'globalProfile')) parts.push('全局通用资料')
   if (isBasisItemProvided(basis, 'requestStructure')) parts.push('脱敏请求结构')
-  if (isBasisItemProvided(basis, 'finalPrompts')) parts.push('最终提示词')
+  if (isBasisItemProvided(basis, 'finalPrompts')) parts.push('本次采用的提示词')
   if (isBasisItemProvided(basis, 'projectStyle')) parts.push('项目风格')
   if (isBasisItemProvided(basis, 'userSupplement')) parts.push('你的补充')
   if (isBasisItemProvided(basis, 'typeRequirement')) parts.push('出图要求')
@@ -987,7 +987,7 @@ export function describeBasisAvailability(basis: GenerationBasis): string {
 
 /** 技术详情用的字段名清单（主界面不展示）。 */
 export function describeBasisFieldNames(basis: GenerationBasis): string {
-  if (!basis.fromServer) return '本次回包里没有生成依据字段'
+  if (!basis.fromServer) return '本次回包里没有资料清单'
   return basis.fieldNames.join(', ')
 }
 

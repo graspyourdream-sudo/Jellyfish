@@ -135,10 +135,10 @@ test('不确定就不宣称可用：拿不到提示词内容 → 状态是"未�
   const verdict = resolvePromptQuality({ prompt: null, assetName: '韩虹' })
   assert.equal(verdict.status, 'unknown')
   assert.equal(verdict.usable, false)
-  assert.equal(verdict.label, '提示词质量未知')
+  assert.equal(verdict.label, '质量还没判定')
   const notice = buildQualityNotice(verdict)
   assert.equal(notice.canGenerate, true)
-  assert.match(notice.title, /未知/)
+  assert.match(notice.title, /还没判定/)
   assert.equal(findReadyCopy(`${verdict.label}${verdict.reason}${notice.title}${notice.lines.join('')}`).length, 0)
 })
 

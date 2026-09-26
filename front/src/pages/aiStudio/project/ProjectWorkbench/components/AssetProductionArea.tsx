@@ -59,6 +59,8 @@ import { StudioProjectsService } from '../../../../../services/generated'
 import { getAssetImagePrompts, saveAssetImagePrompts } from '../../../../../services/llmPipelineApi'
 import type { GenerationGateSnapshot } from '../../../components/generationGate'
 import { classifyGenerationFailure, failureText } from '../../../components/generationGate'
+// 阶段 B ①：模式 6 出口统一走三级管道（去 ID → 去内部术语 → 业务化改写 + 中文兜底）
+import { toUserFacingText } from '../../../components/userFacingMessage.ts'
 import type { ProjectSignalAsset } from '../hooks/useProjectStepSignals'
 import { getProjectSignalAssetTypeLabel } from '../hooks/useProjectStepSignals'
 import { assetPrepInputFromReadiness, resolveAssetPrepStatus } from '../assetPrepStatus'
@@ -839,7 +841,7 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
         const patch = resolveTaskQueryPatch(query)
         if (patch) updateTask(task.key, patch)
       } catch (error) {
-        message.error(error instanceof Error ? error.message : '查询任务失败')
+        message.error(toUserFacingText(error, '查询任务失败：请稍后重试'))
       } finally {
         setBusy(task.key, false)
       }
@@ -1605,9 +1607,9 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
           try {
             await applyPrimary(requiresPrimaryReplaceConfirmation(asset))
           } catch (error) {
-            // 数据不同步（例如别处刚改过定版）导致后端拒绝：用后端原文再确认一次，不猜、不静默
+            // 数据不同步（例如别处刚改过定版）导致后端拒绝：先过脱敏管道再放进确认框，不猜、不静默
             if ((error as { status?: number } | null)?.status !== 409) throw error
-            const detail = error instanceof Error ? error.message : '该资产已有定版图，需要你确认后才能替换。'
+            const detail = toUserFacingText(error, '该资产已有定版图，需要你确认后才能替换。')
             await new Promise<void>((resolve, reject) => {
               Modal.confirm({
                 title: '该资产已有定版图，确认替换吗？',
@@ -1774,17 +1776,17 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
         if (!result.prompt) {
           message.warning(
             result.slotMissing
-              ? '后端这次没有返回这个类型的提示词槽位（可能还在补槽位表）：可以在下面手工填写后保存到资产，保存后出图会直接读它。'
+              ? '这一类暂时不能一键生成：可以在下面手工填写并保存到资产，保存后出图会直接读它。'
               : '这次没有拿到提示词内容，请稍后重试或手工填写。',
           )
           return
         }
         setPromptSlotDrafts({ [slot.category || PROMPT_CATEGORY_BY_TYPE[asset.type]]: result.prompt })
         if (!result.llmCalled) {
-          message.warning('演练模式下后端没有真的调用大模型，这是模板内容：可以手工修改后再保存。')
+          message.warning('演练模式下没有真的调用大模型，这是模板内容：可以手工修改后再保存。')
         }
       } catch (error) {
-        message.error(error instanceof Error ? error.message : '生成提示词失败')
+        message.error(toUserFacingText(error, '生成提示词失败：请稍后重试'))
       } finally {
         setPromptGenerating(false)
       }
@@ -1829,7 +1831,12 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
       serverWarnings: promptWarningsByKey[asset.key],
     })
     if (verdict.status === 'unusable') {
-      message.error(`这条提示词暂时不能保存：${verdict.reason}${verdict.fixes[0] ? `；怎么修：${verdict.fixes[0]}` : ''}`)
+      // 主区只留「怎么修」那一句；具体质量原因归弹窗里的「质量原因」块（已中文转述）
+      message.error(
+        verdict.fixes[0]
+          ? `这条提示词暂时不能保存。怎么修：${verdict.fixes[0]}`
+          : '这条提示词暂时不能保存：请按弹窗里「质量原因」给出的原因补充外观信息后再试。',
+      )
       return
     }
     // 合并写回：只改这一个槽位，该资产其它已保存的槽位原样保留（保存接口是整列替换）
@@ -1862,9 +1869,10 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
         message.success(`已保存「${asset.name}」的图片提示词（出图会立刻读它）`)
         onReload?.()
       } catch (error) {
-        // 后端的结构化中文错误（409 要显式确认 / 422 质量拦截）优先原样展示
+        // 模式 6：结构化中文错误（409 要显式确认 / 422 质量拦截）也先过三级管道再上屏
         const failure = describePromptSaveFailure(error)
-        message.error(failure.fix ? `${failure.message}（${failure.fix}）` : failure.message)
+        const detail = failure.fix ? `${failure.message}（${failure.fix}）` : failure.message
+        message.error(toUserFacingText(detail, '保存提示词失败：请稍后重试'))
       } finally {
         setPromptSaving(false)
       }
@@ -1919,17 +1927,17 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
               </Tag>
             </Tooltip>
           ) : null}
-          {/* 数据隔离：全局资产（场景/道具/服装）的通用资料在全局库，本章依据按 项目+章节 隔离 */}
+          {/* 数据隔离：场景/道具/服装是"所有项目共用"（通用资料在共用库），本章依据按 项目+章节 隔离 */}
           {isGlobalAssetType(record.type) ? (
             <Tooltip title={`${describeAssetScopeCopy(record.type).statement} ${describeAssetScopeCopy(record.type).writeStatement}`}>
               <Tag color="geekblue" bordered={false} className="mr-0">
-                全局资产
+                所有项目共用
               </Tag>
             </Tooltip>
           ) : (
             <Tooltip title={describeAssetScopeCopy(record.type).statement}>
               <Tag bordered={false} className="mr-0 text-gray-400">
-                项目内资产
+                仅本项目
               </Tag>
             </Tooltip>
           )}
@@ -2099,7 +2107,7 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
     return (
       <Empty
         image={Empty.PRESENTED_IMAGE_SIMPLE}
-        description="项目还没有人物 / 场景 / 道具 / 服装资产：请先在上面确认提取候选（关联已有资产或新建）"
+        description="项目还没有人物 / 场景 / 道具 / 服装资产：请先在上面把剧本里的角色/场景/道具/服装确认下来（关联已有资产或新建）"
       >
         <Button
           type="primary"
@@ -2366,8 +2374,9 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
                 }
                 description={
                   <ul className="list-disc pl-5 text-[11px]">
-                    {progress.failureReasons.map((reason) => (
-                      <li key={reason}>{reason}</li>
+                    {/* 模式 6：每条原因都先过三级管道（去 ID → 去内部术语 → 业务化改写 + 中文兜底） */}
+                    {progress.failureReasons.map((reason, index) => (
+                      <li key={`${index}-${reason}`}>{toUserFacingText(reason, '这一项没有生成成功')}</li>
                     ))}
                   </ul>
                 }
@@ -2500,7 +2509,7 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
               key={asset.key}
               payload={basisPayloadFor(asset)}
               extras={basisExtrasFor(asset)}
-              caption={`针对「${asset.name}」${basisPayloadFor(asset) ? '' : '（还没有它的生成依据）'}`}
+              caption={`针对「${asset.name}」${basisPayloadFor(asset) ? '' : '（还没有它的资料）'}`}
               showTechnical={false}
               footer={
                 /* 用户可见的「补充/修改资产资料」入口：就贴在生成依据旁边 */
@@ -2707,7 +2716,7 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
               payload={detailTask.promptBasis}
               caption={`结果「${detailTask.assetName}」`}
             />
-            <TechnicalDetailSection testId="technical-detail-raw-fields" hint="接口返回的原始字段">
+            <TechnicalDetailSection testId="technical-detail-raw-fields" hint="服务返回的原始字段">
               <pre className="m-0 max-h-[320px] overflow-auto rounded bg-gray-50 p-2 text-[11px] leading-5">
                       {JSON.stringify(
                         {
@@ -2761,9 +2770,17 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
                 <Descriptions size="small" column={1} bordered>
                   {currentPlanTargets.slice(0, 10).map((target, index) => (
                     <Descriptions.Item key={`${target.source_task_id}-${index}`} label={target.name || target.source_asset_id}>
-                      {`幂等键 ${target.source_task_id}｜提示词来源 ${target.prompt_source ?? ''}｜计划里的已有图片输入字段：${
-                        target.reference_image || '（默认流程不传）'
-                      }`}
+                      {/*
+                        审计 §6.1：**任务号一律进技术详情**。这里是默认收起的折叠区内部，
+                        所以可以显示编号；但中文说明与编号分成相邻的两段写（编号用 <code> 呈现），
+                        不在同一个模板字面量里插值内部编号 —— 那种形态会被当成主区文案。
+                      */}
+                      {`幂等键 `}
+                      <code>{target.source_task_id}</code>
+                      {`｜提示词来源 `}
+                      <code>{target.prompt_source ?? ''}</code>
+                      {`｜计划里的已有图片输入字段：`}
+                      <code>{target.reference_image || '（默认流程不传）'}</code>
                     </Descriptions.Item>
                   ))}
                 </Descriptions>

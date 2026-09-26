@@ -832,8 +832,8 @@ test('返工流程的二次确认写清：用哪张图、会替换/新增什么�
   assert.deepEqual(collectMisleadingCopy([...real.lines, real.title, real.costWarning, ...dry.lines]), [])
 })
 
-test('返工端点没上线时的降级说明是「正在接入」，不假装可用', () => {
-  assert.match(REFERENCE_REWORK_UNAVAILABLE_HINT, /正在接入/)
+test('返工端点没上线时的降级说明是「还在接入中」，不假装可用', () => {
+  assert.match(REFERENCE_REWORK_UNAVAILABLE_HINT, /还在接入中/)
   assert.match(REFERENCE_REWORK_UNAVAILABLE_HINT, /重新生成参考图/)
 })
 

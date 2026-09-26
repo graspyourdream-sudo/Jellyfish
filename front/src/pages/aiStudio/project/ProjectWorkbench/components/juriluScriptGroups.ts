@@ -136,12 +136,11 @@ export function groupFieldTexts(group: JuriluScriptGroup): GroupFieldTexts {
   const updated = asText(group.updated_at)
   const seqMin = asText(group.seq_min)
   const seqMax = asText(group.seq_max)
-  const seqField = asText(group.seq_field)
 
   let seqRangeText = '未提供分镜序号范围'
   if (seqMin !== '' || seqMax !== '') {
     const range = `${seqMin === '' ? '（未提供）' : seqMin}–${seqMax === '' ? '（未提供）' : seqMax}`
-    seqRangeText = seqField === '' ? `分镜序号 ${range}（未提供序号字段名）` : `分镜序号 ${range}（序号来自字段 ${seqField}）`
+    seqRangeText = `分镜序号 ${range}`
   }
 
   const missing: string[] = []
@@ -152,14 +151,12 @@ export function groupFieldTexts(group: JuriluScriptGroup): GroupFieldTexts {
   return {
     titleText: titleMissing ? MISSING_TITLE_TEXT : title,
     titleMissing,
-    titleSourceText: asText(group.title_source) === '' ? '未提供标题来源' : `标题来源字段 ${group.title_source}`,
+    titleSourceText: asText(group.title_source) === '' ? '未提供标题来源' : '标题来源已记录',
     createdAtText: created === '' ? `创建时间：${MISSING_TIME_TEXT}` : `创建时间：${created}`,
     updatedAtText: updated === '' ? `更新时间：${MISSING_TIME_TEXT}` : `更新时间：${updated}`,
     recordCountText: `${asCount(group.record_count)} 条分镜`,
     seqRangeText,
-    missingMetaNotice: missing.length
-      ? `后端未提供这些字段（${missing.join(' / ')}）：字段名清单见下方 raw_keys，不编造取值`
-      : '',
+    missingMetaNotice: missing.length ? '这一组缺少标题/时间信息，不影响选组' : '',
   }
 }
 
@@ -216,7 +213,7 @@ export function versionInfo(group: JuriluScriptGroup): VersionInfo {
   return {
     timestampEvidence,
     label: timestampEvidence ? NEWEST_TAG_TEXT : '',
-    factsTitle: '后端给出的客观事实',
+    factsTitle: '判断依据',
     facts,
     hint: timestampEvidence ? hint : '',
     disclaimer: timestampEvidence ? NEWEST_DISCLAIMER : '',
@@ -237,7 +234,7 @@ export function summarizeScriptGroups(groups: JuriluScriptGroup[]): {
   const recordTotal = groups.reduce((sum, group) => sum + asCount(group.record_count), 0)
   const notice =
     `本次共 ${groupCount} 个脚本组、合计 ${recordTotal} 条分镜；${DEFAULT_MERGE_NOTICE}，请先选择一组再匹配镜头。` +
-    '（接口一次返回的总条数不等于同一集的连续镜头。）'
+    '（一次拿到的总条数不等于同一集的连续镜头。）'
   return { groupCount, recordTotal, notice }
 }
 
@@ -277,13 +274,13 @@ export function sampleSectionTitle(group: JuriluScriptGroup, limit = 5): string 
 
 export function rawKeysText(group: JuriluScriptGroup): string {
   const keys = asTextList(group.raw_keys)
-  return keys.length ? keys.join('、') : '后端未返回 raw_keys（拿不到可用字段名清单）'
+  return keys.length ? keys.join('、') : '这次没有读到可用信息项'
 }
 
 /** 「整组导入」的口径说明（用户升级要求：选中一组就把**整组**送进预览与匹配）。 */
 export function wholeGroupNotice(group: JuriluScriptGroup | null): string {
   if (!group) return '还没选择脚本组：选一组后，该组全部记录会一起进入统一预览与匹配。'
-  return `整组导入：本组 ${asCount(group.record_count)} 条记录会全部进入统一预览与匹配（不截断、不抽样、不与其他 scriptId 混合）。`
+  return `整组导入：本组 ${asCount(group.record_count)} 条记录会全部进入统一预览与匹配（不截断、不抽样、不与其他剧本组混合）。`
 }
 
 /* ------------------------------------------------- 整组分镜 → 统一预览映射 */
@@ -364,9 +361,9 @@ export function groupCoverageNotice(expectedRecords: number, actualRows: number)
   const actual = Math.max(0, Math.trunc(actualRows ?? 0))
   if (expected === 0 || expected === actual) return ''
   if (actual < expected) {
-    return `后端只返回了 ${actual} 条分镜，但该组记录数是 ${expected} 条：可能有记录没解析出来或没进配对计划（本页不做截断，如实显示）。`
+    return `这次只返回了 ${actual} 条分镜，但该组记录数是 ${expected} 条：可能有记录没解析出来或没进匹配结果（本页不做截断，如实显示）。`
   }
-  return `后端返回了 ${actual} 条分镜，多于该组记录数 ${expected} 条：请核对是否混入了别的 scriptId。`
+  return `这次返回了 ${actual} 条分镜，多于该组记录数 ${expected} 条：请核对是否混入了别的剧本组。`
 }
 
 /* ------------------------------------------------ 镜头不足时的三个选项 */
@@ -532,8 +529,8 @@ export function targetChapterText(input: {
   const idTail = chapterIdTail(input.chapterId)
   const shotCount = Math.max(0, Math.trunc(input.shotCount ?? 0))
   const shotCountText = input.matched
-    ? `本集镜头 ${shotCount} 个（后端真实值）`
-    : '镜头数：点「用这一组匹配镜头」后按后端真实值显示'
+    ? `本集镜头 ${shotCount} 个`
+    : '镜头数：点「用这一组匹配镜头」后显示'
   return { text: `当前目标章节：${label}｜ID ${idTail}｜${shotCountText}`, idTail, shotCountText }
 }
 
@@ -583,20 +580,22 @@ export function resolveJuriluFlow(input: JuriluFlowInput): JuriluFlowState {
   })
 
   let statusText: string
+  /* 审计 §4.2 模式 1 / §6.1：内部**组编号**（巨日禄的 scriptId）一律不上主区，
+     只说「这一组」。这里原本每一条状态文案都把 `${selectedId}` 端给用户。 */
   if (stage === 'matching') {
-    statusText = `正在用脚本组 ${selectedId} 匹配镜头：后端返回之前不显示镜头数与缺口，也不会提供任何建镜头入口。`
+    statusText = '正在用这一组匹配镜头：拿到结果之前不显示镜头数与缺口，也不会提供任何建镜头入口。'
   } else if (stage === 'matched') {
     const missing = Math.max(0, targetCount - shotCount)
     statusText =
       missing > 0
-        ? `已用脚本组 ${selectedId} 匹配 ${entryCount} 条：${input.chapterLabel || '目标章节'} 现有 ${shotCount} 个镜头，缺少 ${missing} 个。`
-        : `已用脚本组 ${selectedId} 匹配 ${entryCount} 条：${input.chapterLabel || '目标章节'} 现有 ${shotCount} 个镜头，数量一致，可以直接确认保存。`
+        ? `已用这一组匹配 ${entryCount} 条：${input.chapterLabel || '目标章节'} 现有 ${shotCount} 个镜头，缺少 ${missing} 个。`
+        : `已用这一组匹配 ${entryCount} 条：${input.chapterLabel || '目标章节'} 现有 ${shotCount} 个镜头，数量一致，可以直接确认保存。`
   } else if (stage === 'stale') {
     statusText = '上次匹配结果已经作废（脚本组或目标章节变了）：预览表已清空，请重新点「用这一组匹配镜头」。'
   } else if (stage === 'selected') {
-    statusText = `已选脚本组 ${selectedId}，但还没点「用这一组匹配镜头」：预览表里不会有巨日禄分镜，也不会显示镜头缺口或建镜头入口。`
+    statusText = '已经选好一组了，但还没点「用这一组匹配镜头」：预览表里不会有巨日禄分镜，也不会显示镜头缺口或建镜头入口。'
   } else {
-    statusText = '尚未选择脚本组：默认不跨 scriptId 合并，预览表里不会有巨日禄分镜。请先选一组，再点「用这一组匹配镜头」。'
+    statusText = '尚未选择脚本组：默认不跨组合并，预览表里不会有巨日禄分镜。请先选一组，再点「用这一组匹配镜头」。'
   }
 
   const shortage = canShowShortage
@@ -656,7 +655,7 @@ export function planCreateMissingShots(input: CreateMissingInput): CreateMissing
   if (count <= 0) {
     return { allowed: false, count: 0, reason: `当前镜头数（${latest} 个）已经不少于本组条数（${target} 条），无需创建。` }
   }
-  return { allowed: true, count, reason: `将按后端最新镜头数补齐 ${count} 个（${latest} → ${target}）。` }
+  return { allowed: true, count, reason: `将按当前最新镜头数补齐 ${count} 个（${latest} → ${target}）。` }
 }
 
 /* ---------------------------------------------------------------- 选择状态机 */
@@ -706,39 +705,41 @@ export function resolveScriptSelection(input: ScriptSelectionInput): ScriptSelec
   const requiresSelection = input.requiresScriptSelection === true
 
   if (ids.length > 1) {
-    // 用户明确要求「默认不跨 scriptId 合并」，前端也按单选处理；真出现多选就退回"未选择"
-    notices.push(`一次只能选一组：收到 ${ids.length} 个 script_id，已按"未选择"处理（不跨 scriptId 合并）。`)
+    // 用户明确要求「默认不跨组」合并，前端也按单选处理；真出现多选就退回"未选择"
+    notices.push(`一次只能选一组：收到 ${ids.length} 组，已按「未选择」处理（不跨组合并）。`)
   }
 
   const single = ids.length === 1 ? ids[0] : ''
   const selected = single === '' ? null : (groups.find((group) => group.script_id === single) ?? null)
 
   if (single !== '' && !selected) {
-    notices.push(`选中的脚本组 ${single} 不在本次返回的脚本组里：请重新选择一组。`)
+    // 内部组编号不上屏（审计 §4.2 模式 1）：说的是"你选的那一组"而不是它的编号
+    notices.push('选中的这一组不在本次返回的脚本组里：请重新选择一组。')
   }
   // 空选择 / 多选 / 选了不存在的组：一律不发匹配请求
   const requestScriptIds = selected ? [selected.script_id] : []
   if (!selected) {
-    notices.push('默认不跨 scriptId 合并：请先选择一个脚本组，再点「用这一组匹配镜头」。')
+    notices.push('默认不跨剧本组合并：请先选择一个脚本组，再点「用这一组匹配镜头」。')
   }
 
   const responseIds = (input.responseSelectedIds ?? []).map((item) => asText(item)).filter((item) => item !== '')
   if (responseIds.length > 1) {
-    notices.push(`后端回显了 ${responseIds.length} 个 selected_script_ids：本页只按一组处理，请谨慎保存。`)
+    notices.push(`这次回显了 ${responseIds.length} 组选择：本页只按一组处理，请谨慎保存。`)
   }
 
-  // 后端要求先选组，却返回了 rows → 一律丢弃（不许渲染成"同一集的连续镜头"）
+  // 这次要求先选组，却返回了 rows → 一律丢弃（不许渲染成"同一集的连续镜头"）
   const dropRows = requiresSelection && rowCount > 0
   if (dropRows) {
     notices.push(
-      `后端返回 requires_script_selection=true，同时给了 ${rowCount} 条分镜：已按「必须重新选组」处理，这 ${rowCount} 条一条都不会进入预览表。`,
+      `这次要求先选组，却同时给了 ${rowCount} 条分镜：已按「必须重新选组」处理，这 ${rowCount} 条一条都不会进入预览表。`,
     )
   }
   if (requiresSelection) {
-    notices.push('后端要求先选脚本组（requires_script_selection=true）：未选组前不会做镜头匹配。')
+    notices.push('这次要求先选脚本组：未选组前不会做镜头匹配。')
   }
   if (selected && !requiresSelection && rowCount === 0) {
-    notices.push(`已选脚本组 ${selected.script_id}，但这次没有返回任何分镜（该组可能解析为 0 条，或尚未匹配）。`)
+    // 内部组编号不上屏（审计 §4.2 模式 1）
+    notices.push('已经选好这一组了，但这次没有返回任何分镜（该组可能解析为 0 条，或尚未匹配）。')
   }
 
   return {
@@ -810,12 +811,12 @@ export function planGroupMatch(input: GroupSwitchInput): GroupMatchPlan {
   let notice: string
   if (switched && previous !== '') {
     notice = rows > 0
-      ? `已切换到脚本组 ${selected}：上一组（${previous}）的 ${rows} 条匹配结果已清空，正在用新组重新匹配。`
-      : `已切换到脚本组 ${selected}：正在用新组重新匹配（上一组 ${previous} 没有留下结果）。`
+      ? `已切换到新的一组：上一组的 ${rows} 条匹配结果已清空，正在重新匹配。`
+      : '已切换到新的一组：正在重新匹配（上一组没有留下结果）。'
   } else if (switched) {
-    notice = `开始匹配脚本组 ${selected}。`
+    notice = '开始匹配这一组。'
   } else {
-    notice = rows > 0 ? `重新匹配脚本组 ${selected}：先清空上一次的 ${rows} 条结果，不与新结果混在一起。` : `重新匹配脚本组 ${selected}。`
+    notice = rows > 0 ? `重新匹配：先清空上一次的 ${rows} 条结果，不与新结果混在一起。` : '重新匹配。'
   }
 
   return { send: true, scriptIds: [selected], clearBefore, clearCount: clearBefore ? rows : 0, notice, blockedReason: '' }
@@ -859,18 +860,23 @@ export function applyGroupSwitch<T>(input: GroupSwitchInput): GroupSwitchOutcome
     nextRows: [],
     clearedCount: rows,
     resetMatched: true,
-    notice: selected === '' ? '已取消选择脚本组：上一组的匹配结果已清空（不会自动合并）。' : `已选择脚本组 ${selected}：上一组的匹配结果已清空，点「用这一组匹配镜头」才会请求。`,
+    notice: selected === '' ? '已取消选择脚本组：上一组的匹配结果已清空（不会自动合并）。' : '已选择这一组：上一组的匹配结果已清空，点「用这一组匹配镜头」才会请求。',
   }
 }
 
-/** 已匹配组的展示文案（用于预览表抬头，避免用户忘记表里是哪一组）。 */
+/**
+ * 已匹配组的展示文案（用于预览表抬头，避免用户忘记表里是哪一组）。
+ *
+ * 审计 §4.2 模式 1：原来抬头里写着「当前脚本组：2936083」——**内部组编号**上了主区。
+ * 名字与条数足够让用户认出是哪一组，编号只进技术详情。
+ */
 export function activeGroupLabel(groups: JuriluScriptGroup[], scriptId: string): string {
   const id = asText(scriptId)
   if (id === '') return '尚未选择脚本组：当前表里不应有巨日禄分镜'
   const group = groups.find((item) => item.script_id === id)
-  if (!group) return `当前脚本组：${id}（不在本次脚本组清单里）`
+  if (!group) return '当前脚本组不在本次返回的清单里'
   const texts = groupFieldTexts(group)
-  return `当前脚本组：${id}${texts.titleMissing ? '' : `（${texts.titleText}）`} · ${texts.recordCountText}`
+  return `当前脚本组${texts.titleMissing ? '' : `（${texts.titleText}）`} · ${texts.recordCountText}`
 }
 
 /**
@@ -885,10 +891,12 @@ export function saveButtonText(includedCount: number): string {
 
 /**
  * 整组保存的口径说明（给用户看的一句话）。
- * 保存的对象 = 该组**所有勾选且匹配正常**的条目，来源写 jurilu、带上当前选中的那一个 scriptId。
+ * 保存的对象 = 该组**所有勾选且匹配正常**的条目，只保存本次选中的这一组（不与其他剧本组混合）。
+ *
+ * ⚠️ 组编号（`scriptId`）是内部标识：这里只用它判断"选没选组"，**不上屏**。
  */
 export function wholeGroupSaveNotice(includedCount: number, scriptId: string, groupRecordCount: number): string {
   const id = asText(scriptId)
-  const scope = id === '' ? '未选择脚本组（不能保存巨日禄分镜）' : `脚本组 ${id}`
-  return `整组保存：${scope} 共 ${Math.max(0, Math.trunc(groupRecordCount ?? 0))} 条记录，本次将保存勾选且匹配正常的 ${includedCount} 条（来源 jurilu，不与其他 scriptId 混合）。`
+  if (id === '') return '整组保存：还没有选择脚本组，暂时不能保存巨日禄分镜。'
+  return `整组保存：本组共 ${Math.max(0, Math.trunc(groupRecordCount ?? 0))} 条记录，本次将保存勾选且匹配正常的 ${includedCount} 条（本次只保存这一组，不与其他剧本组混合）。`
 }

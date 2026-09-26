@@ -53,7 +53,7 @@ export type PromptQualityVerdict = {
 export const PROMPT_QUALITY_STATUS_LABEL: Record<PromptQualityStatus, string> = {
   usable: '提示词包含外观信息',
   unusable: '提示词不可用',
-  unknown: '提示词质量未知',
+  unknown: '质量还没判定',
 }
 
 /** 四种不可用情形各自的短标签。 */
@@ -62,7 +62,7 @@ export const PROMPT_QUALITY_CODE_LABEL: Record<PromptQualityCode, string> = {
   insufficient_appearance: '外观信息不足，需人工补充',
   generic_only: '只有名称与通用摄影词',
   duplicated: '与其它资产高度重复',
-  server_blocked: '后端判定不可用',
+  server_blocked: '服务端判定不可用',
 }
 
 /** 每种原因的"怎么修"。 */
@@ -269,7 +269,14 @@ export const MIN_INFORMATIVE_CORE_LENGTH = 2
 /** 两个资产的提示词相似到什么程度算「高度重复」。 */
 export const DUPLICATE_SIMILARITY_THRESHOLD = 0.9
 
-/** 主界面上**不许**出现的说法（把不可用说成就绪）。 */
+/**
+ * 主界面上**不许**出现的说法（把不可用说成就绪）。
+ *
+ * ⚠️ 这是**禁语表本身**：数组里必须把被禁的说法原样写出来，否则无从检查。
+ * 它属于「词表定义行」的结构性豁免（验收测试 `userFacingCopy.test.ts` 的
+ * `TERM_TABLE_CONSTANTS` 已登记），所以里面出现「生成依据」不算主区泄漏 ——
+ * 不要为了避开扫描而把表项换成一句没人会写的占位文案。
+ */
 export const FORBIDDEN_READY_COPY = ['已就绪', '提示词已就绪', '生成依据已就绪']
 
 /** 文案里是否出现了"说成就绪"的说法（测试与自检用）。 */
@@ -695,7 +702,7 @@ export function resolvePromptQuality(input: PromptQualityInput): PromptQualityVe
     return unusableVerdict(
       code,
       detail ||
-        `${PROMPT_QUALITY_CODE_LABEL[code]}：后端判定这条提示词不能用于出图。`,
+        `${PROMPT_QUALITY_CODE_LABEL[code]}：服务端判定这条提示词不能用于出图。`,
       { source: 'server', fixes: server.fixes, rawReasons: warnings },
     )
   }
@@ -709,7 +716,7 @@ export function resolvePromptQuality(input: PromptQualityInput): PromptQualityVe
     const detail = warnings.find((item) => INSUFFICIENT_APPEARANCE_MARKERS.some((m) => item.includes(m)))
     return unusableVerdict(
       'insufficient_appearance',
-      detail ? `后端标注：${detail}` : `这条提示词里有「${marker}」的痕迹：主体的外观信息不够，需要你先补充。`,
+      detail ? `服务端标注：${detail}` : `这条提示词里有「${marker}」的痕迹：主体的外观信息不够，需要你先补充。`,
       { source: detail ? 'server' : 'local', rawReasons: warnings },
     )
   }
@@ -805,7 +812,7 @@ export function describePromptSaveFailure(error: unknown): {
   const fallback = readStructuredServerError(raw)
   const picked = structured.code || structured.message ? structured : fallback
   const message =
-    picked.message || `保存提示词失败：${maskInternalIds(raw).trim() || '接口没有给出原因'}`
+    picked.message || `保存提示词失败：${maskInternalIds(raw).trim() || '服务没有给出原因'}`
   return {
     code: picked.code,
     message,

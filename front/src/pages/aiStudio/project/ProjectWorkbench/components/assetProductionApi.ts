@@ -292,7 +292,7 @@ export async function createImageSlot(
   })
   const row = (res.data ?? {}) as { id?: number; file_id?: string | null }
   if (typeof row.id !== 'number') {
-    throw new Error('新增图片槽位失败：接口没有返回图片编号')
+    throw new Error('新增图片失败：服务没有返回图片编号')
   }
   return { id: row.id, file_id: row.file_id ?? null }
 }
@@ -395,7 +395,7 @@ export async function fetchReferenceReworkAvailability(force = false): Promise<R
     if (!response.ok) {
       referenceReworkAvailability = {
         available: false,
-        reason: '暂时读不到后端接口清单（无法确认该能力是否已上线）。',
+        reason: '暂时读不到可用能力清单，无法确认这个功能现在能不能用。',
         reasonCode: 'unknown',
       }
       return referenceReworkAvailability
@@ -410,7 +410,7 @@ export async function fetchReferenceReworkAvailability(force = false): Promise<R
   } catch {
     referenceReworkAvailability = {
       available: false,
-      reason: '暂时读不到后端接口清单（无法确认该能力是否已上线）。',
+      reason: '暂时读不到可用能力清单，无法确认这个功能现在能不能用。',
       reasonCode: 'unknown',
     }
   }
@@ -568,7 +568,7 @@ export async function previewAssetImagePrompt(args: {
       slot: serverProfileSlot.slot,
       slotMissing: false,
       profileSource: 'server',
-      profileNote: '本次的资产资料由后端按「资产描述 → 候选结构化资料 → 剧本片段」装配（见「生成依据」）。',
+      profileNote: '本次的资产资料按「资产描述 → 结构化资料 → 剧本片段」自动装配（见「这次用了哪些资料」）。',
       requestBody: serverProfileSlot.requestBody,
     }
   }
@@ -603,8 +603,8 @@ export async function previewAssetImagePrompt(args: {
     slotMissing: !matched,
     profileSource: 'request',
     profileNote: hasDescription
-      ? '本次的资产资料来自**资产描述**（后端没有按项目装配结构化资料与剧本片段：这些资料补上后提示词会更准）。'
-      : '本次没有可用的资产资料（资产描述是空的，后端也没有装配到结构化资料）：难怪会出现「外观信息不足」。',
+      ? '本次的资产资料来自「资产描述」（没有按项目装配结构化资料与剧本片段：这些资料补上后提示词会更准）。'
+      : '本次没有可用的资产资料（资产描述是空的，也没有装配到结构化资料）：难怪会出现「外观信息不足」。',
     requestBody: body,
   }
 }

@@ -207,7 +207,7 @@ test('道具：后端槽位表补上后，槽位名与「能一键生成」按�
   assert.equal(scene.category, 'scene_image_front')
   assert.equal(scene.generateSupported, false)
   const hint = describePromptRowGenerateHint(scene)
-  assert.match(hint, /后端槽位表里还没有/)
+  assert.match(hint, /这一类暂时还不能一键生成/)
   assert.match(hint, /手工填写/)
   assert.ok(!hint.includes(ASSET_PROMPT_UNSUPPORTED_SLOT_TEXT))
   // 提示里带上类型名（人话），并且四类都不出现「不支持」

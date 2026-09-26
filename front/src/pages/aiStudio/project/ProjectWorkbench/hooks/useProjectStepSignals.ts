@@ -209,7 +209,7 @@ export function useProjectStepSignals(args: {
           scope: 'episodes',
         }),
       )
-      if (!deliveryRes) failedSources.push('交付清单接口（镜头与视频提示词）')
+      if (!deliveryRes) failedSources.push('交付清单（镜头与视频提示词）')
 
       const deliveryRows = (deliveryRes?.data?.rows ?? []) as { shot_id?: string; chapter_id?: string; video_prompt?: string }[]
       const projectShotCount = deliveryRows.length
@@ -230,7 +230,7 @@ export function useProjectStepSignals(args: {
       // （待确认候选 / 提示词 / 图片 / 定版），不再按资产逐个查详情与图片表，
       // 也不再看关联行是否**偶然**带了 `image_prompts`。
       const readinessRes = await safeRequest(fetchProjectAssetReadiness(projectId))
-      if (!readinessRes) failedSources.push('项目资产准备接口（资产 / 提示词 / 图片 / 定版状态）')
+      if (!readinessRes) failedSources.push('项目资产准备（资产 / 提示词 / 图片 / 定版状态）')
 
       const nextAssets: ProjectSignalAsset[] = collectPrimaryLookupTargets(
         (readinessRes?.items ?? []).map((item) => ({
@@ -252,7 +252,7 @@ export function useProjectStepSignals(args: {
       const linkResults = await Promise.all(
         LINK_ENTITY_TYPES.map(async (entityType) => {
           const rows = await safeRequest(fetchProjectLinkRows(entityType, projectId))
-          if (!rows) failedSources.push(`${ASSET_TYPE_LABEL[entityType]}关联接口`)
+          if (!rows) failedSources.push(`${ASSET_TYPE_LABEL[entityType]}关联状态`)
           return rows ?? []
         }),
       )
@@ -299,7 +299,7 @@ export function useProjectStepSignals(args: {
             ),
           ),
         )
-        if (prepStates.some((state) => state === null)) failedSources.push('镜头准备聚合状态接口')
+        if (prepStates.some((state) => state === null)) failedSources.push('镜头准备情况')
         prepStates.forEach((state) => {
           const shotId = toText(state?.data?.shot?.id)
           const linkedCount = state?.data?.assets_overview?.summary?.linked_count ?? 0

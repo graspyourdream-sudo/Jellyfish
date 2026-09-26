@@ -380,7 +380,7 @@ export function canRegenerateWithExistingReference(asset: Pick<ProductionAsset, 
 
 /** 端点还没上线时的如实说明（前端必须优雅降级，不能假装可用）。 */
 export const REFERENCE_REWORK_UNAVAILABLE_HINT =
-  '该能力正在接入（后端端点还没上线），暂时不能使用；现在可以先用「重新生成参考图」。'
+  '这个能力还在接入中，暂时不能用；可以先点「重新生成参考图」。'
 
 /** 默认生成设置：16:9（出图方式固定为"按提示词直接生成参考图"）。 */
 export function defaultGenerationSettings(): GenerationSettings {
@@ -428,7 +428,7 @@ export function existingImageActionLabel(assetType: ProductionAssetType): string
  * 端点还没上线时的如实说明（**按类型取词**：场景/道具不说「参考图」）。
  */
 export function referenceReworkUnavailableHint(assetType: ProductionAssetType = 'character'): string {
-  return `该能力正在接入（后端端点还没上线），暂时不能使用；现在可以先用「${resultArtifactCopy(assetType).regenerateAction}」。`
+  return `这个能力还在接入中，暂时不能用；可以先点「${resultArtifactCopy(assetType).regenerateAction}」。`
 }
 
 /** 「按定版图片批量出图」对该类型的如实说明（只有人物开放）。 */
@@ -543,7 +543,7 @@ export function buildBatchConfirmation(input: BatchConfirmationInput): Confirmat
     `本次可出图 ${scope.submittableCount} 项，预计生成图片 ${scope.estimatedImages} 张`,
   ]
   if (groups.length > 1) {
-    lines.push('本次混选了多个类型，会「按类型分组」分别提交（出图接口一次只接受一个类型）')
+    lines.push('本次混选了多个类型，会「按类型分组」分几批提交')
   }
   groups.forEach((group) => {
     lines.push(
@@ -962,7 +962,9 @@ export function summarizeTaskProgress(tasks: readonly ProductionTask[]): TaskPro
         break
       case 'failed':
         counts.failed += 1
-        if (task.errorMessage) reasons.push(task.errorMessage)
+        // 审计 §4.2 模式 6：**收集时就脱敏**（与同文件 describeFailureReason 同一口径），
+        // 否则 `failureReasons` 会在生产区顶部与结果卡片里直渲后端原文。
+        if (task.errorMessage) reasons.push(toUserFacingText(task.errorMessage, FALLBACK_FAILURE_TEXT))
         break
       case 'generating':
       case 'submitting':
@@ -1021,7 +1023,7 @@ export function applyStopToQueue(tasks: readonly ProductionTask[]): ProductionTa
 /** 停止时给用户的一句话（写清"停的是什么、什么跑完"）。 */
 export function describeStopEffect(summary: TaskProgressSummary): string {
   const parts = [`已停止后续：还没提交的 ${summary.queued} 项不会开始`]
-  if (summary.generating > 0) parts.push(`正在生成的 ${summary.generating} 项会跑完（出图服务没有取消接口）`)
+  if (summary.generating > 0) parts.push(`正在生成的 ${summary.generating} 项会跑完，不能中途取消`)
   parts.push(`已完成的 ${summary.done} 项结果会保留`)
   return parts.join('；')
 }
@@ -1335,7 +1337,7 @@ export function planAdoption(args: {
     }
   }
   if (args.emptySlotId !== null) {
-    return { mode: 'adopt', imageId: args.emptySlotId, reason: '该资产已有图片，会存入一个空的图片槽位，不动现有图片。' }
+    return { mode: 'adopt', imageId: args.emptySlotId, reason: '该资产已有图片，新图会单独存一份，不动现有图片。' }
   }
   const isPublic = isPubliclyReachableUrl(url)
   if (!isPublic) {
@@ -1391,7 +1393,7 @@ export function resolveProductionHeadline(input: ProductionHeadlineInput): Produ
     return {
       label: '可以开始提取',
       tone: 'gold',
-      detail: '项目里还没有人物 / 场景 / 道具 / 服装资产：先在上面提取候选并确认写入，再回来准备图片。',
+      detail: '项目里还没有人物 / 场景 / 道具 / 服装资产：先在上面把剧本里的角色/场景/道具/服装确认下来，再回来准备图片。',
     }
   }
   if (progress.generating > 0 || progress.queued > 0) {

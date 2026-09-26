@@ -107,7 +107,7 @@ export const USER_STAGE_TEXT: Record<UserStageKey, UserStageText> = {
     tone: 'error',
   },
   pending_confirm: {
-    label: '有候选等待确认',
+    label: '有待确认的内容',
     detail: '勾选后点「确认选中项」一次确认多条，也可以逐条确认。',
     tone: 'warning',
   },
@@ -184,7 +184,7 @@ export function describeUserStage(input: StageInput): UserStageView {
     return { key, ...USER_STAGE_TEXT[key] }
   }
   if (input.loading) {
-    return { key: 'extracting', ...USER_STAGE_TEXT.extracting, label: '正在读取…', detail: '正在读取本集的候选与资产状态。' }
+    return { key: 'extracting', ...USER_STAGE_TEXT.extracting, label: '正在读取…', detail: '正在读取本集的待确认内容与资产状态。' }
   }
   if (input.shotCount === 0) {
     return { key: 'cannot_extract', ...USER_STAGE_TEXT.cannot_extract }
@@ -197,7 +197,7 @@ export function describeUserStage(input: StageInput): UserStageView {
     return {
       key: 'pending_confirm',
       ...base,
-      label: `有 ${input.pendingCandidateCount} 组候选等待确认`,
+      label: `有 ${input.pendingCandidateCount} 项待你确认`,
     }
   }
   const imagePrep = input.imagePrep
@@ -329,4 +329,4 @@ export function describeGenerationReadiness(input: GenerationReadinessInput): Ge
 }
 
 /** 面板上「技术详情」入口的说明（用户不需要看，但需要知道去哪看）。 */
-export const TECHNICAL_DETAIL_HINT = '模型、供应商、任务编号等内部信息统一放在页面顶部默认收起的「技术详情」里。'
+export const TECHNICAL_DETAIL_HINT = '模型、生成服务、内部编号等排查用的信息统一放在页面顶部默认收起的「技术详情」里。'

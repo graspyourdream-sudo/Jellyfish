@@ -52,8 +52,8 @@ export const ASSET_PROMPT_CATEGORY_LABEL: Record<string, string> = {
   costume_image_front: '服装正面图片',
 }
 
-export const ASSET_PROMPT_UNSUPPORTED_SLOT_TEXT = '不支持（无槽位）'
-export const ASSET_PROMPT_UNSUPPORTED_STATE_TEXT = '该资产类型没有大模型槽位'
+export const ASSET_PROMPT_UNSUPPORTED_SLOT_TEXT = '暂时不能一键生成'
+export const ASSET_PROMPT_UNSUPPORTED_STATE_TEXT = '这一类资产暂时不能一键生成'
 export const ASSET_PROMPT_EMPTY_EXISTING_TEXT = '—'
 
 /** 资产类型的中文名（与 `assetProduction.ASSET_TYPE_LABEL` 同口径）。 */
@@ -199,7 +199,7 @@ export function resolveAssetPromptSlot(
       supported: false,
       generateSupported: false,
       fromServer: false,
-      generateBlockedReason: '这一类资产还没有提示词槽位，无法生成或保存。',
+      generateBlockedReason: '这一类暂时不能一键生成：先手工填写并保存。',
     }
   }
   return {
@@ -209,8 +209,8 @@ export function resolveAssetPromptSlot(
     generateSupported: false,
     fromServer: false,
     generateBlockedReason:
-      `后端槽位表里还没有「${ASSET_PROMPT_TYPE_LABEL[assetType]}」的槽位（正在补）：` +
-      '可以先用「填提示词」手工填写并保存，保存后出图会直接读它；槽位补上后这里就能一键生成。',
+      '这一类暂时还不能一键生成：' +
+      '可以先用「填提示词」手工填写并保存，保存后出图会直接读它；以后这里就能一键生成。',
   }
 }
 
@@ -257,7 +257,7 @@ export function describePromptRowGenerateHint(
 ): string {
   if (!row.supported) return ''
   if (row.generateSupported === true) return ''
-  return String(row.generateBlockedReason ?? '').trim() || '后端槽位表里还没有这一项，暂时只能手工填写并保存。'
+  return String(row.generateBlockedReason ?? '').trim() || '这一项暂时不能一键生成，只能手工填写并保存。'
 }
 
 export type UnsupportedSlotAlert = {
@@ -286,8 +286,8 @@ export function buildUnsupportedSlotAlert(
     .join('、')
   return {
     count,
-    message: `有 ${count} 项资产没有可用的图片提示词槽位`,
-    description: `后端槽位表里没有这些类型的槽位：${typeText}。这类资产请直接在资产编辑页手工维护图片。`,
+    message: `有 ${count} 项资产还没有可用的图片提示词`,
+    description: `这些类型暂时不能一键生成：${typeText}。这类资产请直接在资产编辑页手工维护图片。`,
   }
 }
 
@@ -307,7 +307,7 @@ export function describeServerSlotPendingNote(
     ),
   )
   if (pending.length === 0) return ''
-  return `后端槽位表里还没有这些类型的槽位（正在补）：${pending.join('、')}；可以手工填写并保存到资产，保存后出图会直接读它。`
+  return `这些类型暂时不能一键生成：${pending.join('、')}；可以手工填写并保存到资产，保存后出图会直接读它。`
 }
 
 /**

@@ -116,10 +116,12 @@ test('llm_draft 来源：不带 script_id，但保留既有的单数 draft_token
 })
 
 test('巨日禄自检：一组都没有 / 某条没组 / 某条是别的组 → 全部拦下不发', () => {
-  assert.match(String(juriluScriptScopeError(juriluRows(), '')), /没有可用的脚本组/)
+  /* 阶段 B 第 2 批（审计 §4.2）：主区文案里不许再出现 `script_id` / `scriptId`
+     这类字段名与内部组编号，所以期望值同批改成用户语言（需求文档授权）。 */
+  assert.match(String(juriluScriptScopeError(juriluRows(), '')), /没有可用的组/)
   assert.match(
     String(juriluScriptScopeError([{ shotId: 'shot-1', prompt: 'x' }], SCRIPT_A)),
-    /第 1 条没有脚本组/,
+    /第 1 条没有所属组/,
   )
   const mismatch = juriluScriptScopeError(
     [
@@ -129,8 +131,10 @@ test('巨日禄自检：一组都没有 / 某条没组 / 某条是别的组 → 
     SCRIPT_A,
   )
   assert.match(String(mismatch), /第 2 条/)
-  assert.match(String(mismatch), new RegExp(SCRIPT_B))
-  assert.match(String(mismatch), new RegExp(SCRIPT_A))
+  assert.match(String(mismatch), /属于另一组/)
+  // 内部组编号既不上屏也不进拦截文案（审计 §4.2 模式 1）
+  assert.doesNotMatch(String(mismatch), new RegExp(SCRIPT_B))
+  assert.doesNotMatch(String(mismatch), new RegExp(SCRIPT_A))
 })
 
 test('巨日禄自检：每组一致（含空批）→ 放行', () => {

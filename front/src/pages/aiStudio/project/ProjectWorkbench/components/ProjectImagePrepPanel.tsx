@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Modal, Space, Spin, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Card, Modal, Space, Spin, Table, Tag, Tooltip, message } from 'antd'
 import type { TableColumnsType } from 'antd'
 import { ArrowRightOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -23,6 +23,8 @@ import {
   summarizeAssetPrep,
 } from '../assetPrepStatus'
 import { AssetProductionArea } from './AssetProductionArea'
+import { TechnicalDetailSection } from './workbench/TechnicalDetailCollapse'
+import { toUserFacingText } from '../../../components/userFacingMessage'
 import { OUTPUT_MODE_STATEMENT } from './assetProduction'
 import {
   CHARACTER_REFERENCE_RATIO,
@@ -211,7 +213,8 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
           await applyPrimary(false)
         } catch (error) {
           if ((error as { status?: number } | null)?.status !== 409) throw error
-          const detail = error instanceof Error ? error.message : '该资产已有定版图，需要你确认后才能替换。'
+          /* 审计 §4.2 模式 6：409 的后端原文里可能带内部字段名，先过统一管道再上屏 */
+          const detail = toUserFacingText(error, '该资产已有定版图，需要你确认后才能替换。')
           await new Promise<void>((resolve, reject) => {
             Modal.confirm({
               title: `「${asset.name}」已有定版图，确认替换吗？`,
@@ -250,8 +253,9 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
           <Tag color={TYPE_COLOR[record.type]} className="mr-0">
             {getProjectSignalAssetTypeLabel(record.type)}
           </Tag>
+          {/* 审计 §4.2 模式 1：资产名取不到时不许回退成内部编号 */}
           <span className="truncate" title={record.name}>
-            {record.name || record.id}
+            {record.name || '未命名资产'}
           </span>
         </span>
       ),
@@ -383,15 +387,19 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
         />
       </Spin>
 
-      {/* 技术详情：出图计划、原始字段、资产明细（默认收起） */}
-      <div className="mt-4 border-t border-slate-200 pt-3">
-        <Typography.Text type="secondary" className="text-[11px]">
-          技术详情（默认收起）：出图计划、资产明细与其它内部字段。日常操作不需要看这里。
-        </Typography.Text>
-        <div className="mt-2">
-          <details>
-            <summary className="cursor-pointer text-xs text-gray-500">展开技术详情</summary>
-            <div className="mt-3 space-y-3">
+      {/*
+        技术详情：出图计划、原始字段、资产明细（默认收起）。
+
+        审计 §9 第 2 项 / §4.2（模式 2）：这里原来是**第二套自建折叠区**
+        （自己写 `<details>` + 自己的「技术详情」标签），而源码级禁词测试
+        只能给**一个文件**开口子 —— 多一套实现等于豁免范围失控。
+        本批把它换成统一的 `TechnicalDetailSection`（内容与布局一个字节都没动）。
+      */}
+      <TechnicalDetailSection
+        testId="image-prep-technical"
+        className="mt-4"
+        hint="这里放的是出图计划、资产明细与其它内部字段；日常操作不需要看，默认收起。"
+      >
               {/* 生成配置与演练开关的原始状态（模型名 / 演练开关原文）只在这里出现 */}
               <div>
                 <div className="mb-1 text-[11px] text-gray-500">生成配置与演练开关（原始状态）</div>
@@ -491,10 +499,7 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
                 dataSource={assets}
                 pagination={assets.length > 10 ? { pageSize: 10 } : false}
               />
-            </div>
-          </details>
-        </div>
-      </div>
+      </TechnicalDetailSection>
     </Card>
   )
 }

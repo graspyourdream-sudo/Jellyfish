@@ -51,6 +51,7 @@ import {
   sanitizeUserText,
   TECHNICAL_DETAIL_HINT,
 } from './userFacingStatus'
+import { toUserFacingText } from '../../../components/userFacingMessage.ts'
 
 type ProjectExtractPanelProps = {
   projectId: string | null
@@ -158,7 +159,7 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
       )
       setRows(candidateLists.flat())
     } catch (error) {
-      setLoadError((error as Error)?.message || '提取候选加载失败')
+      setLoadError((error as Error)?.message || '读取这一集的待确认词条失败')
       setRows([])
     } finally {
       setLoading(false)
@@ -377,7 +378,7 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
         } as never,
       })
       message.destroy(EXTRACT_LOADING_KEY)
-      message.success('提取完成，候选已刷新；请在下方确认后再加入项目资产')
+      message.success('提取完成，词条已刷新；请在下方确认后再加入项目资产')
       await load()
       onReload?.()
     } catch (error) {
@@ -437,7 +438,7 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
         if (group.kind === 'character' && item.actorId) payload.actor_id = item.actorId
         const created = await StudioEntitiesApi.create(group.kind, payload)
         linkedEntityId = String((created.data as { id?: string } | undefined)?.id ?? '')
-        if (!linkedEntityId) throw new Error('新建资产失败：接口没有返回资产编号')
+        if (!linkedEntityId) throw new Error('新建资产失败：服务没有返回资产编号')
       }
 
       if (!linkedEntityId) throw new Error('确认失败：没有拿到要关联的资产')
@@ -467,7 +468,7 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
     async (plan: ConfirmPlan, options?: { closeModal?: boolean }) => {
       if (!effectiveProjectId || !chapterId) return
       if (plan.items.length === 0) {
-        message.warning(plan.blocked[0] ? `${plan.blocked[0].name}：${plan.blocked[0].reason}` : '请先勾选要确认的候选')
+        message.warning(plan.blocked[0] ? `${plan.blocked[0].name}：${plan.blocked[0].reason}` : '请先勾选要确认的词条')
         return
       }
       setExecuting(true)
@@ -516,7 +517,8 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
       }
       if (plan.blocked.length > 0) {
         message.warning(
-          `有 ${plan.blocked.length} 项还不能确认：${plan.blocked.map((item) => `${item.name}（${item.reason}）`).join('；')}`,
+          `有 ${plan.blocked.length} 项还不能确认：` +
+            plan.blocked.map((item) => `${item.name}（${item.reason}）`).join('；'),
         )
       }
 
@@ -574,7 +576,7 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
 
   const columns: TableColumnsType<ExtractGroup> = [
     {
-      title: '候选',
+      title: '从剧本里读出的词条',
       key: 'name',
       render: (_: unknown, group) => (
         <Space size={6} wrap>
@@ -599,14 +601,14 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
       width: 200,
       render: (_: unknown, group) => {
         const item = existence[group.key]
-        if (!item) return <Tag bordered={false}>检查中…</Tag>
+        if (!item) return <Tag bordered={false}>正在核对…</Tag>
         if (item.exists && item.linked_to_project) return <Tag color="green" bordered={false}>项目内已有同名资产</Tag>
         if (item.exists) return <Tag color="blue" bordered={false}>资产库已有，可关联</Tag>
         return <Tag color="gold" bordered={false}>暂无同名资产（将新建）</Tag>
       },
     },
     {
-      title: '候选状态',
+      title: '确认进度',
       key: 'status',
       width: 160,
       render: (_: unknown, group) => (
@@ -679,7 +681,7 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
       <Card size="small" className="mb-2">
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description={<span className="text-xs text-gray-500">请先选择一集，再确认提取候选</span>}
+          description={<span className="text-xs text-gray-500">请先选择一集，再确认提取出的词条</span>}
         />
       </Card>
     )
@@ -694,10 +696,9 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
       styles={{ body: { paddingTop: 10, paddingBottom: 10 } }}
       title={
         <Space size={8} wrap>
-          <span className="text-sm font-medium">第 2 步 · 资产准备（先确认提取候选）</span>
+          <span className="text-sm font-medium">第 2 步 · 资产准备（先确认提取出的词条）</span>
           <Tag bordered={false}>{`本集 ${shotCount} 镜`}</Tag>
-          {rows.length > 0 ? <Tag color="blue" bordered={false}>{`候选 ${rows.length} 条`}</Tag> : null}
-          {rows.length > 0 ? <Tag bordered={false}>{`聚合 ${groups.length} 组`}</Tag> : null}
+          {rows.length > 0 ? <Tag color="blue" bordered={false}>{`待你确认的词条 ${rows.length} 条`}</Tag> : null}
           {(summary.pending ?? 0) > 0 ? (
             <Tag color="gold" bordered={false}>{`待确认 ${summary.pending}`}</Tag>
           ) : rows.length > 0 ? (
@@ -708,7 +709,7 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
       extra={
         <Space size={6}>
           <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()}>
-            刷新候选
+            重新读取
           </Button>
           <Button
             size="small"
@@ -759,7 +760,13 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
       ) : null}
 
       {loadError ? (
-        <Alert type="error" showIcon message="候选加载失败" description={sanitizeUserText(loadError)} style={{ marginBottom: 8 }} />
+        <Alert
+          type="error"
+          showIcon
+          message="读取待确认的词条失败"
+          description={toUserFacingText(loadError, '读取失败：请稍后重试，或展开「技术详情」查看原始信息。')}
+          style={{ marginBottom: 8 }}
+        />
       ) : null}
 
       {shotCount === 0 ? (
@@ -772,19 +779,19 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
           image={Empty.PRESENTED_IMAGE_SIMPLE}
           description={
             <span className="text-xs text-gray-500">
-              {chapterLabel ?? '本集'} 还没有提取候选：点右上角「开始提取」，按剧本提取角色、场景、道具与服装。
+              {chapterLabel ?? '本集'} 还没有可确认的词条：点右上角「开始提取」，按剧本提取角色、场景、道具与服装。
             </span>
           }
         />
       ) : loading && rows.length === 0 ? (
         <div className="py-6 text-center">
           <Spin />
-          <div className="mt-2 text-xs text-gray-500">正在读取提取候选…</div>
+          <div className="mt-2 text-xs text-gray-500">正在读取待确认的词条…</div>
         </div>
       ) : (
         <>
           <Typography.Text type="secondary" className="text-[11px]">
-            「确认」= 关联已有资产或新建资产，并把这批候选项标为已加入项目；确认后资产会立刻出现在下面的「资产生产区」。
+            「确认」= 关联已有资产或新建资产，并把这批词条标为已加入项目；确认后资产会立刻出现在下面的「资产生产区」。
           </Typography.Text>
 
           <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -842,11 +849,11 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
 
           {pendingGroups.length > 0 ? (
             <div className="mt-2 text-[11px] text-gray-500">
-              {`还有 ${pendingGroups.length} 组候选没确认；确认完它们，这一步就算完成。`}
+              {`还有 ${pendingGroups.length} 项还没确认；确认完它们，这一步就算完成。`}
             </div>
           ) : (
             <div className="mt-2 text-[11px] text-emerald-600">
-              {`本集候选已全部处理。${nextStep.title}：${nextStep.detail}`}
+              {`本集词条已全部处理。${nextStep.title}：${nextStep.detail}`}
             </div>
           )}
 
@@ -870,7 +877,7 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
             勾选的每一行都可以选确认方式：关联已有资产，或在项目里新建。确认后资产会立刻出现在下面的「资产生产区」。
           </div>
           {previewPlan.items.length === 0 && previewPlan.blocked.length === 0 ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span className="text-xs">还没有勾选候选</span>} />
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span className="text-xs">还没有勾选任何一项</span>} />
           ) : null}
           <div className="space-y-2">
             {selectedConfirmable.map((group) => {
@@ -890,7 +897,7 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
                     </Tag>
                     <span className="font-medium">{group.name}</span>
                     <Tag bordered={false}>{`${group.shotIds.length} 镜`}</Tag>
-                    <Tag bordered={false}>{`${group.candidateIds.length} 条候选`}</Tag>
+                    <Tag bordered={false}>{`${group.candidateIds.length} 条记录`}</Tag>
                   </div>
 
                   <Radio.Group
@@ -956,7 +963,7 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
                         {resolution.reuseProjectAsset
                           ? `项目里已经有同名资产，确认后直接关联到它。`
                           : resolution.action === 'link_existing'
-                            ? '确认后把这条候选关联到资产库里的那份资产。'
+                            ? '确认后把这一项关联到资产库里的那份资产。'
                             : group.kind === 'character' && resolution.actorId
                               ? '确认后新建项目角色，并绑定所选演员的人物形象。'
                               : '确认后在项目里新建这份资产。'}

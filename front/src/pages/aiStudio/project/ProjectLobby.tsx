@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
+import { formatUserFacingTime } from '../components/userFacingTime'
 import {
   Card,
   Input,
@@ -73,14 +74,13 @@ type ProjectView = Project & {
  *
  * 只显示后端下发的真实创建时间（`created_at`）；拿不到就显示「—」，
  * 绝不用 `new Date()` 兜底——那正是「每个项目的时间都等于打开页面那一刻」的来源。
+ *
+ * 阶段 B 第 2 批把实现搬到共享模块 `components/userFacingTime.ts`：
+ * 工作台步骤 1 的「更新时间」列原来直接渲 ISO 串（审计 §4.2 模式 3），
+ * 修法要求「复用这份既有实现」，所以这里改成从**唯一**实现取，
+ * 全仓不再有第二份 `YYYY-MM-DD HH:mm` 拼装。
  */
-function formatProjectTime(value?: string): string {
-  if (!value) return '—'
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) return value
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
-}
+const formatProjectTime = formatUserFacingTime
 
 /**
  * 「孤立项目 <内部编号>（迁移）」形态的项目名。

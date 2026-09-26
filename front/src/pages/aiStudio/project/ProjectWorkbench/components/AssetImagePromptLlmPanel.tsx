@@ -28,6 +28,8 @@ import { StudioEntitiesApi } from '../../../../../services/studioEntities'
 import { StudioProjectsService } from '../../../../../services/generated'
 // 阶段 B ①：技术详情折叠壳全仓唯一实现（三处自建折叠区已合并到它）
 import { TechnicalDetailSection } from './workbench/TechnicalDetailCollapse'
+// 阶段 B ①：模式 6 出口统一走三级管道（去 ID → 去内部术语 → 业务化改写 + 中文兜底）
+import { toUserFacingText } from '../../../components/userFacingMessage.ts'
 import {
   fetchImagePromptSlots,
   getAssetImagePrompts,
@@ -466,9 +468,7 @@ export function AssetImagePromptLlmPanel({
               basisPayload: preview.basisPayload,
               qualityPayload: preview.qualityPayload,
               requestStructure: buildRequestStructureText(preview.requestBody),
-              error: preview.slotMissing
-                ? '后端这次没有返回这个类型的槽位（槽位表可能还在补）：可以手工填写后保存到资产。'
-                : '',
+              error: preview.slotMissing ? '这一类暂时不能一键生成：可以手工填写后保存到资产。' : '',
               // 这一行是刚生成的新版本，之前恢复来的草稿不再是"当前正文"
               restoredFromDraft: false,
               restoredPrompt: '',
@@ -572,7 +572,11 @@ export function AssetImagePromptLlmPanel({
         setRows((prev) =>
           prev.map((item) =>
             item.key === target.key
-              ? { ...item, status: 'failed', error: error instanceof Error ? error.message : '生成失败' }
+              ? /**
+                 * 模式 6：后端原文**不入 state**（主区这一列只放中文结论）；
+                 * 原文已掩码 + 业务化，兜底句见 `toUserFacingText`。
+                 */
+                { ...item, status: 'failed', error: toUserFacingText(error, '这一项没生成成功') }
               : item,
           ),
         )
@@ -612,13 +616,18 @@ export function AssetImagePromptLlmPanel({
       return false
     }
     if (!row.llmCalled) {
-      message.error('这次后端没有真正调用大模型（演练/模板），不能按大模型结果保存为正式产物。')
+      message.error('这次没有真正调用大模型（演练/模板），不能按大模型结果保存为正式产物。')
       return false
     }
     // 质量不可用的提示词**不许原样存进资产**（否则它会被后面的出图当成可用提示词）
     const verdict = describePromptPanelRowQuality(row, { serverQuality: row.qualityPayload, serverWarnings: row.warnings })
     if (!canSavePromptToAsset(verdict, text)) {
-      message.error(`这一行不能保存：${verdict.reason}${verdict.fixes[0] ? `；怎么修：${verdict.fixes[0]}` : ''}`)
+      // 质量原因归这一行下面的「质量原因」块（与资产生产区同一口径），主区只留「怎么修」
+      message.error(
+        verdict.fixes[0]
+          ? `这一行不能保存。怎么修：${verdict.fixes[0]}`
+          : '这一行不能保存：请按这一行下面给出的原因补充外观信息后再试。',
+      )
       return false
     }
     /**
@@ -629,7 +638,13 @@ export function AssetImagePromptLlmPanel({
      */
     const restoredGuard = resolveRestoredDraftSaveGuard(row)
     if (restoredGuard.blocked) {
-      message.error(`这条本机草稿在生成时就判为不可用：${restoredGuard.reason}；按原因改好正文即可保存。`)
+      // 模式 6：原因先过三级管道（去 ID → 去内部术语 → 业务化改写），再拼进这句中文
+      message.error(
+        `这条本机草稿在生成时就判为不可用：${toUserFacingText(
+          restoredGuard.reason,
+          '正文不符合要求',
+        )}；按原因改好正文即可保存。`,
+      )
       return false
     }
     // 合并写回：只改这一行那一个槽位，该资产其它槽位原样保留（保存接口是整列替换）
@@ -688,9 +703,13 @@ export function AssetImagePromptLlmPanel({
         onSaved?.()
         return true
       } catch (error) {
-        // 后端的结构化中文错误（409 质量冲突 / 422 质量拦截）优先原样展示
+        /**
+         * 模式 6：`failure.message` 来自后端结构化错误（已掩码但仍是后端措辞），
+         * 所以再走一遍三级管道，主区只出中文结论。
+         */
         const failure = describePromptSaveFailure(error)
-        message.error(failure.fix ? `${failure.message}（${failure.fix}）` : failure.message)
+        const detail = failure.fix ? `${failure.message}（${failure.fix}）` : failure.message
+        message.error(toUserFacingText(detail, '保存提示词失败：请稍后重试'))
         return false
       } finally {
         setSavingKey('')
@@ -809,8 +828,10 @@ export function AssetImagePromptLlmPanel({
           onSaved?.()
           message.success(`已保存 ${saveable.length} 个资产的图片提示词（生图会立刻读它们）`)
         } catch (error) {
+          // 模式 6：与单条保存同一口径 —— 后端原文不入主区，只出中文结论
           const failure = describePromptSaveFailure(error)
-          message.error(failure.fix ? `${failure.message}（${failure.fix}）` : failure.message)
+          const detail = failure.fix ? `${failure.message}（${failure.fix}）` : failure.message
+          message.error(toUserFacingText(detail, '保存提示词失败：请稍后重试'))
         } finally {
           setSavingKey('')
         }
@@ -952,7 +973,6 @@ export function AssetImagePromptLlmPanel({
           <div>提示词由后台的大模型生成，每项资产一次调用、一次计费。</div>
           <div>保存后「生图计划预览」会把提示词来源标成「已保存提示词」—— 用它可当场验证保存内容真的被生图使用。</div>
           <div>失败即停、不自动重试；被质量拦截的提示词不会保存。</div>
-          <div className="text-gray-400">调用走的是提示词生成服务：POST /studio/llm/image-prompt/preview。</div>
         </div>
       </TechnicalDetailSection>
 
@@ -1107,9 +1127,7 @@ export function AssetImagePromptLlmPanel({
         {`已选 ${plannedRows.length} 个资产待生成`}
         {onlyMissing && !includeExisting ? '（已有提示词的会被跳过）' : ''}
         {checkedWithoutSlot.length > 0
-          ? `；另有 ${checkedWithoutSlot.length} 项（${checkedWithoutSlot
-              .map((row) => row.name)
-              .join('、')}）后端槽位表里还没有槽位，本次不会生成，可以手工填写并保存`
+          ? `；另有 ${checkedWithoutSlot.length} 项这一类暂时不能一键生成，可以手工填写并保存`
           : ''}
       </div>
 
@@ -1159,8 +1177,8 @@ export function AssetImagePromptLlmPanel({
         <Alert
           type="warning"
           showIcon
-          message={`有 ${dryRunRows.length} 个资产拿到的是演练结果（后端未调用大模型），不能保存`}
-          description="演练模式（DRY_RUN）下后端不会真的调用大模型、也不花钱；要拿到可保存的结果需要先确认真实调用。"
+          message={`有 ${dryRunRows.length} 个资产拿到的是演练结果（没有真的调用大模型），不能保存`}
+          description="演练模式下不会真的调用大模型、也不花钱；要拿到可保存的结果需要先确认真实调用。"
         />
       ) : null}
 
@@ -1185,20 +1203,20 @@ export function AssetImagePromptLlmPanel({
                 {isGlobalAssetType(row.type) ? (
                   <Tooltip title={describeAssetScopeCopy(row.type).statement}>
                     <Tag color="geekblue" bordered={false} className="mr-0">
-                      全局资产
+                      所有项目共用
                     </Tag>
                   </Tooltip>
                 ) : (
                   <Tooltip title={describeAssetScopeCopy(row.type).statement}>
                     <Tag bordered={false} className="mr-0 text-gray-400">
-                      项目内资产
+                      仅本项目
                     </Tag>
                   </Tooltip>
                 )}
               </span>
             ),
           },
-          { title: '槽位', dataIndex: 'category', width: 130, render: (_: unknown, row) => describePromptRowSlot(row) },
+          { title: '提示词位置', dataIndex: 'category', width: 130, render: (_: unknown, row) => describePromptRowSlot(row) },
           { title: '已有提示词', dataIndex: 'existing', width: 120, render: (_: unknown, row) => describePromptRowExisting(row) },
           {
             title: '质量 / 生成结果（可编辑）',
@@ -1302,7 +1320,10 @@ export function AssetImagePromptLlmPanel({
                     {/* 恢复来的草稿：生成当时就不许保存的那种（改好正文后可保存） */}
                     {restoredGuard.blocked && canSavePromptToAsset(verdict, row.draft) ? (
                       <span className="text-[11px] text-red-500">
-                        {`恢复的草稿在生成时就判为不可用：${restoredGuard.reason}（改好正文后即可保存）`}
+                        {`恢复的草稿在生成时就判为不可用：${toUserFacingText(
+                          restoredGuard.reason,
+                          '正文不符合要求',
+                        )}（改好正文后即可保存）`}
                       </span>
                     ) : null}
                     {row.latencyMs ? <span className="text-[11px] text-gray-400">{`${row.latencyMs} ms`}</span> : null}

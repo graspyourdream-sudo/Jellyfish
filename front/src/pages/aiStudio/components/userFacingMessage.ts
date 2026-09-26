@@ -132,6 +132,12 @@ const SENTENCE_RULES: ReadonlyArray<{ readonly pattern: RegExp; readonly replace
     pattern: /声音绑定解析失败[（(][^）)]*[）)][，,]?\s*本次生成不携带音频。?/g,
     replace: '这段声音这次送不出去：没有解析成功，本次生成不会带上它',
   },
+  // ── 交付预览的后端补充说明（`prompt_delivery.py:67-68`，运行时实测上主区的那一句）──
+  {
+    pattern:
+      /[「"“]?完整任务（含资产）[」"”]?模式的\s*(?:imported_size|imported_resolution|recommended_duration)(?:\s*[、/·]\s*(?:imported_size|imported_resolution|recommended_duration))*\s*(?:等)?\s*(?:元信息)?\s*在[^。]*?没有(?:等价列|对应字段)[，,]?\s*因此(?:未提供|没有提供)。?/g,
+    replace: '「完整任务（含资产）」模式里还有几项信息本项目暂时用不到，因此没有提供',
+  },
 ]
 
 /** 词级改写规则（句级没命中时兜底，纯防残留禁词）。 */

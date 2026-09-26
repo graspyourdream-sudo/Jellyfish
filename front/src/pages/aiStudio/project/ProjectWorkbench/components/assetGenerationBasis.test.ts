@@ -48,14 +48,14 @@ test('无字段：契约还没上线时如实显示「本次未提供生成依�
   assert.equal(summarizeGenerationBasis(basis), NO_BASIS_TEXT)
   assert.equal(buildBasisPlaceholderText(basis), NO_BASIS_TEXT)
   assert.equal(describeBasisAvailability(basis), BASIS_ABSENT_TEXT)
-  assert.equal(describeBasisFieldNames(basis), '本次回包里没有生成依据字段')
+  assert.equal(describeBasisFieldNames(basis), '本次回包里没有资料清单')
   // 五个验收项的标签都在（渲染位置保留，且标签里带 ①~⑤ 便于逐项核对）
   const labels = items.map((item) => item.label)
   ;['①', '②', '③-a', '③-b', '④', '⑤'].forEach((mark) => {
     assert.ok(labels.some((label) => label.includes(mark)), `缺少 ${mark} 那一行`)
   })
-  assert.equal(BASIS_ITEM_LABEL.requestStructure, '④ 图片提示词接口的脱敏请求结构')
-  assert.ok(GLOBAL_ASSET_SCOPE_NOTE.includes('全局资产'))
+  assert.equal(BASIS_ITEM_LABEL.requestStructure, '④ 图片提示词服务的脱敏请求结构')
+  assert.ok(GLOBAL_ASSET_SCOPE_NOTE.includes('所有项目共用'))
 })
 
 test('无字段：null / 空对象 / 字符串都不编造；④⑤ 只认调用方真的给了的内容', () => {
@@ -197,10 +197,10 @@ test('⑤ 最终提示词与差异：本资产的那条 + 与同批其它资产�
   })
   const item = itemsByKey(basis).get('finalPrompts')
   assert.equal(item?.provided, true)
-  assert.match(item?.lines[0] ?? '', /最终提示词：韩虹/)
+  assert.match(item?.lines[0] ?? '', /本次真正会用的提示词：韩虹/)
   assert.match(item?.lines.join('\n') ?? '', /与「陆行舟」相似度 8%/)
   assert.equal(item?.summary, '差异 2 条')
-  assert.equal(summarizeGenerationBasis(basis), '本次用到：最终提示词')
+  assert.equal(summarizeGenerationBasis(basis), '本次用到：本次采用的提示词')
 })
 
 test('后端这一轮的正式字段：structured_source / profile_source 也要如实显示（含"没有任何资料"）', () => {
@@ -226,7 +226,7 @@ test('后端这一轮的正式字段：structured_source / profile_source 也要
 
   // 富化后的组合来源要能说清"全局 + 本章"
   const enriched = readGenerationBasis({ structured_source: 'asset_description+candidate_profile' })
-  assert.ok(summarizeGenerationBasis(enriched).includes('资产描述（全局）+ 候选结构化资料（本章，含剧本片段与出场镜头）'))
+  assert.ok(summarizeGenerationBasis(enriched).includes('资产描述（全局）+ 结构化资料（本章，含剧本片段与出场镜头）'))
 })
 
 test('字段名容错：camelCase / 常见容器名 / 候选 payload 的真实键名都能认出', () => {
@@ -284,7 +284,7 @@ test('来源码翻译：后端新增的 chapter_record 系列必须说人话，�
   // 旧结构（历史数据）也要能说清楚，而不是把码直接摊给用户
   assert.match(describeStructuredSource('chapter_overlay'), /章节隔离/)
   assert.match(describeStructuredSource('asset_description+chapter_overlay+candidate_profile'), /资产描述/)
-  assert.match(describeStructuredSource('candidate_profile'), /候选结构化资料/)
+  assert.match(describeStructuredSource('candidate_profile'), /结构化资料/)
   assert.match(describeStructuredSource('script_window'), /剧本/)
   // 未登记的**内部标识**：给中文兜底，不能把 `some_new_code` 原样显示
   const unknown = describeStructuredSource('some_new_code')

@@ -86,7 +86,9 @@ test('勾选多条的计数：新建 / 关联已有 / 覆盖候选数与镜头�
     candidateCount: 4, // 2 + 1 + 1
     shotCount: 3, // shot-1 / shot-2 / shot-3
   })
-  assert.equal(summarizeConfirmPlan(plan), '已确认 3 项资产（关联已有 1、新建 2），覆盖 4 条候选')
+  /* 阶段 B 第 2 批（审计 §4.2「基准禁词命中」）：去掉「覆盖 N 条候选」，
+     但「关联已有 / 新建」这类用户要看的确认结果**保留**（不做过度的信息削减）。 */
+  assert.equal(summarizeConfirmPlan(plan), '已确认 3 项资产（关联已有 1、新建 2）')
   assert.equal(planCounts(plan.items).total, 3)
 })
 

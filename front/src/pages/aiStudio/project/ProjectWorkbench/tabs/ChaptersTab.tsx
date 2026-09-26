@@ -27,6 +27,8 @@ import { parseScriptDocument } from '../../../../../services/llmPipelineApi'
 import { classifyGenerationFailure, failureText } from '../../../components/generationGate'
 import { useTaskPageContext } from '../../../components/taskPageContext'
 import { useTaskUiStore } from '../../../components/taskUiStore'
+import { formatUserFacingTime } from '../../../components/userFacingTime'
+import { showUserError, showUserWarning } from '../../../components/userFacingMessage'
 import {
   createRelationTaskState,
   upsertRelationTaskStateInMap,
@@ -203,10 +205,18 @@ export function ChaptersTab() {
       message.success(
         `已导入 ${parsed.filename}（${parsed.format.toUpperCase()}，${parsed.char_count} 字），确认无误后点「创建」`,
       )
-      for (const warning of parsed.warnings ?? []) message.warning(warning)
+      /**
+       * 审计 §4.2 模式 6：`parsed.warnings` / `failureText(failure)` 都是**后端原文**，
+       * 原先直插 `message.*` 等于把第三层内容摆到主区。统一走
+       * `showUserWarning` / `showUserError`（内部固定顺序：掩码 → 去术语 → 业务化 → 中文兜底），
+       * 原文只进默认收起的「技术详情」。
+       */
+      for (const warning of parsed.warnings ?? []) {
+        void showUserWarning(warning, '导入时有一条提示被跳过，不影响本次创建')
+      }
     } catch (error) {
       const failure = classifyGenerationFailure(error, 'llm')
-      message.error(failureText(failure))
+      void showUserError(failureText(failure), '剧本导入失败：请稍后重试')
     } finally {
       setImportingDoc(false)
     }
@@ -338,7 +348,10 @@ export function ChaptersTab() {
       await refresh()
     } catch (error) {
       message.destroy(SYNC_DIVIDE_MESSAGE_KEY)
-      message.error(describeEnvelopeError(error, '分镜提取失败'))
+      /* 审计 §4.2 模式 6：`describeEnvelopeError` 会依次返回信封里的
+         `meta.error.message` / `message` / `detail` 原文，属于第三层内容，
+         出口处必须过统一管道（主区只出中文结论，原文进「技术详情」）。 */
+      void showUserError(describeEnvelopeError(error, '分镜提取失败'), '分镜提取失败：请稍后重试')
     } finally {
       setChapterDivisionActionId(null)
     }
@@ -534,7 +547,18 @@ export function ChaptersTab() {
         <Tag color={chapterStatusMap[status].color}>{chapterStatusMap[status].text}</Tag>
       ),
     },
-    { title: '更新时间', dataIndex: 'updatedAt', key: 'updatedAt', width: 160 },
+    {
+      title: '更新时间',
+      dataIndex: 'updatedAt',
+      key: 'updatedAt',
+      width: 160,
+      /**
+       * 审计 §4.2 模式 3：这一列原先**没有 `render`**，后端给的 ISO 串
+       * （`2026-09-26T04:02:58.135Z`）于是原样上了屏。时间口径统一走
+       * `formatUserFacingTime`（全仓唯一实现），不在渲染点直渲后端值。
+       */
+      render: (value: string) => formatUserFacingTime(value),
+    },
     {
       title: '操作',
       key: 'action',

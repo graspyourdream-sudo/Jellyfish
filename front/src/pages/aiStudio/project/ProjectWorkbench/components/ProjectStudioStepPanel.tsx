@@ -19,6 +19,8 @@ import {
   PROJECT_STEPS,
   type ProjectStepKey,
 } from '../projectSteps'
+import { buildUserFacingMessage, showUserError, toUserFacingText } from '../../../components/userFacingMessage'
+import { TechnicalDetailSection } from './workbench/TechnicalDetailCollapse'
 
 type ProjectStudioStepPanelProps = {
   step: ProjectStepKey
@@ -34,18 +36,59 @@ type ProjectStudioStepPanelProps = {
 
 const SOURCE_LABELS: Record<string, string> = {
   llm: '大模型生成',
-  jurilu: '巨日禄导入',
+  jurilu: '巨量导入',
   manual: '人工编辑',
   skill: '一键技能生成',
   manual_workspace: '工作室手工维护（历史值）',
   internal: '中控台内部导入（历史值）',
   shot_description: '由镜头描述生成（历史值）',
-  '': '未设定来源',
+  '': '来源未记录',
 }
 
+/**
+ * 来源码 → 主区中文。
+ *
+ * ⚠️ 审计 §4.2 模式 3 点名：原实现是 `SOURCE_LABELS[key] ?? (key || '未设定来源')`
+ * —— **未登记时回显后端原值**（`external_import` 之类就会这样上屏，
+ * 运行时实测「可交付来源：… / external_import / …」就是这么来的）。
+ * 未登记一律给中文兜底，**绝不回显原值**。
+ */
 function sourceLabel(source: string): string {
   const key = (source ?? '').trim()
-  return SOURCE_LABELS[key] ?? (key || '未设定来源')
+  return SOURCE_LABELS[key] ?? '来源未记录'
+}
+
+/**
+ * 交付预览的后端补充说明。
+ *
+ * 审计 §4.2 模式 2 点名：`delivery.note` 是**后端动态原文**，原先是
+ * `{delivery.note}` 直渲在主区，运行时实测上屏的是
+ * 「imported_size / imported_resolution / recommended_duration 元信息在 Jellyfish 侧
+ * 没有等价列，因此未提供」—— 字段名 + 「元信息 / 等价列」全是开发说法。
+ *
+ * 口径（§7.1-6 三级顺序）：主区只出**中文结论**（走统一管道，
+ * 已知的那句后端原文由 `humanizeBackendMessage` 改写），
+ * 原始说明收进默认收起的「技术详情」。
+ */
+function DeliveryNoteBlock({ note }: { note: string }) {
+  const message = buildUserFacingMessage(note, '本次交付有一条补充说明')
+  return (
+    <div className="space-y-1">
+      <Typography.Text type="secondary" className="text-[11px]">
+        {message.title}
+      </Typography.Text>
+      {message.detail ? (
+        <TechnicalDetailSection
+          testId="delivery-note-technical"
+          hint="这里放的是交付预览返回的原始说明（排查问题时才需要看）。"
+        >
+          <Typography.Text type="secondary" className="text-[11px]">
+            {message.detail}
+          </Typography.Text>
+        </TechnicalDetailSection>
+      ) : null}
+    </div>
+  )
 }
 
 function bindingCount(row: PromptDeliveryRow): number {
@@ -93,7 +136,14 @@ export function ProjectStudioStepPanel({
     try {
       setDelivery(await previewPromptDelivery(projectId, chapterId ?? null, 'episode'))
     } catch (e) {
-      setDeliveryError((e as Error)?.message || '交付预览加载失败')
+      /**
+       * 审计 §4.2 模式 6：`error.message` 是后端原文，原先直渲在 Alert 的 `description` 上。
+       * 入 state 前先过统一管道（掩码 → 去术语 → 业务化 → 中文兜底），
+       * 主区只留中文结论；原文进默认收起的「技术详情」。
+       */
+      const raw = (e as Error)?.message || ''
+      void showUserError(raw, '交付预览加载失败：请稍后重试', '交付预览')
+      setDeliveryError(toUserFacingText(raw, '交付预览加载失败：请稍后重试'))
     } finally {
       setDeliveryLoading(false)
     }
@@ -353,11 +403,7 @@ export function ProjectStudioStepPanel({
                       {delivery.include_bindings ? '带出绑定素材' : '不带绑定素材'}
                     </Tag>
                   </Space>
-                  {delivery.note ? (
-                    <Typography.Text type="secondary" className="text-[11px]">
-                      {delivery.note}
-                    </Typography.Text>
-                  ) : null}
+                  {delivery.note ? <DeliveryNoteBlock note={delivery.note} /> : null}
                   <Table<PromptDeliveryRow>
                     rowKey="shot_id"
                     size="small"

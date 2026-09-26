@@ -108,6 +108,7 @@ import {
   type ShotDraftStatus,
 } from './promptBoardDrafts'
 import { buildPromptBoardSaveBody, juriluScriptScopeError } from './promptBoardSaveBody'
+import { showUserError, toUserFacingText } from '../../../components/userFacingMessage'
 
 type RowStatus = 'ok' | 'draft' | 'dry_run' | 'failed' | 'interrupted' | 'busy' | 'skipped' | 'unmatched' | 'duplicate'
 
@@ -1292,14 +1293,15 @@ export function EpisodeVideoPromptBoard({
           })
           created += 1
         } catch (error) {
-          // 单个失败不中断其余：SQLite 唯一约束下更可能是序号冲突，跳过继续
-          failures.push(`第 ${index} 个：${(error as Error)?.message ?? '创建失败'}`)
+          /* 单个失败不中断其余：SQLite 唯一约束下更可能是序号冲突，跳过继续。
+             审计 §7.1-6：后端原文在**收集时**就过管道，主区只说这一镜没成功。 */
+          failures.push(`第 ${index} 个：${toUserFacingText(error, '创建失败')}`)
         }
       }
       if (created > 0) {
         message.success(`已创建 ${created} 个镜头${failures.length ? `（${failures.length} 个失败，可再次点击补齐）` : ''}`)
       } else {
-        message.error(`镜头创建失败：${failures[0] ?? '未知原因'}`)
+        void showUserError(failures[0] ?? '', '镜头创建失败：请稍后重试')
       }
       // 关键：立刻刷新镜头列表再重新匹配，预览表马上显示正确的编号/内容/状态
       await loadBoard()
@@ -1408,13 +1410,15 @@ export function EpisodeVideoPromptBoard({
         cleared += result.cleared_draft_count ?? 0
         for (const item of result.results ?? []) {
           // 审计 §4.5 模式 1：回退成镜头编号原值属模式 1；取不到业务名就只说这一镜没写入
-          if (!item.applied) failures.push(`有一镜未写入：${item.reason}`)
+          if (!item.applied) failures.push(`有一镜未写入：${toUserFacingText(item.reason, '原因未提供')}`)
         }
-        if (result.error) failures.push(result.error)
+        if (result.error) failures.push(toUserFacingText(result.error, '这一批没有全部写入'))
       }
       if (applied) {
         message.success(
-          `已保存 ${applied} 条到镜头（正式提示词${matchedScriptId ? `，来源 jurilu，脚本组 ${matchedScriptId}` : ''}）${cleared ? `；服务端已清掉 ${cleared} 份对应草稿` : ''}`,
+          /* 审计 §4.2 模式 5：「来源 jurilu / 脚本组 <内部编号>」是供应商名 + 内部标识，
+             一律不上主区；用户只需要知道存了多少条。 */
+          `已保存 ${applied} 条到镜头（正式提示词）${cleared ? `；服务端已清掉 ${cleared} 份对应草稿` : ''}`,
           8,
         )
       }
@@ -1826,7 +1830,7 @@ export function EpisodeVideoPromptBoard({
         }}
         columns={[
           {
-            title: '脚本组（script_id）',
+            title: '所属剧本组',
             dataIndex: 'scriptId',
             width: 130,
             render: (_value, row) =>

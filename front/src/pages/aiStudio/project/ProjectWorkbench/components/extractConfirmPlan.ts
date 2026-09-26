@@ -342,15 +342,22 @@ export function buildConfirmPlan(args: {
   return { items, blocked, counts: planCounts(items, blocked.length) }
 }
 
-/** 确认完成后的用户语言小结。 */
+/**
+ * 确认完成后的用户语言小结。
+ *
+ * 审计 §4.2「基准禁词命中」要求去掉「覆盖 N 条候选」这半句（不许出现「候选」），
+ * 但「关联已有 / 绑定共用演员 / 新建」是用户真正要看的确认结果，**必须保留** ——
+ * 为了让扫描器干净而把这类信息删掉属于过度整改。
+ */
 export function summarizeConfirmPlan(plan: ConfirmPlan): string {
   const { counts } = plan
   if (counts.total === 0) return '还没有可确认的资产'
   const parts: string[] = []
   if (counts.linkExisting > 0) parts.push(`关联已有 ${counts.linkExisting}`)
-  if (counts.linkActor > 0) parts.push(`绑定全局演员 ${counts.linkActor}`)
+  if (counts.linkActor > 0) parts.push(`绑定共用演员 ${counts.linkActor}`)
   if (counts.createNew > 0) parts.push(`新建 ${counts.createNew}`)
-  return `已确认 ${counts.total} 项资产（${parts.join('、')}），覆盖 ${counts.candidateCount} 条候选`
+  if (parts.length === 0) return `已确认 ${counts.total} 项资产`
+  return `已确认 ${counts.total} 项资产（${parts.join('、')}）`
 }
 
 /** 选中行里还有多少行没被处理（用于按钮文案与提示）。 */

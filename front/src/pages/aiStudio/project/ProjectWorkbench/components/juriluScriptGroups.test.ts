@@ -202,7 +202,7 @@ test('组覆盖率不一致时如实提示（少了几条 / 多了别的组）',
   assert.match(less, /只返回了 31 条/)
   assert.match(less, /记录数是 41 条/)
   const more = groupCoverageNotice(31, 41)
-  assert.match(more, /混入了别的 scriptId/)
+  assert.match(more, /混入了别的剧本组/)
 })
 
 test('换组：旧组 rows 先被清空，才允许发新请求', () => {
@@ -211,7 +211,9 @@ test('换组：旧组 rows 先被清空，才允许发新请求', () => {
   assert.deepEqual(plan.scriptIds, ['2933351'])
   assert.equal(plan.clearBefore, true, '必须先清空旧组结果')
   assert.equal(plan.clearCount, 41)
-  assert.match(plan.notice, /已切换到脚本组 2933351/)
+  /* 阶段 B 第 2 批（审计 §4.2 模式 1 / §6.1）：内部组编号不上主区，只说「新的一组」。 */
+  assert.match(plan.notice, /已切换到新的一组/)
+  assert.ok(!plan.notice.includes('2933351'), `组编号不许上屏：${plan.notice}`)
 
   const oldRows = Array.from({ length: 41 }, (_, index) => `row-${index}`)
   assert.deepEqual(clearRowsBeforeMatch(oldRows, plan), [])
@@ -254,7 +256,7 @@ test('没有时间戳证据时不出现「最新版本」字样（U2 升级要�
   assert.equal(info.label, '')
   assert.equal(info.disclaimer, '')
   assert.equal(info.hint, '', '没有时间戳证据时不展示可能含"最可能是最新版"的后端提示语')
-  assert.equal(info.factsTitle, '后端给出的客观事实')
+  assert.equal(info.factsTitle, '判断依据')
   assert.deepEqual(info.facts, ['与 2933351/2933350 标题相同', '内容重合度 82%'])
   assert.equal(info.noEvidenceNotice, NO_TIMESTAMP_EVIDENCE)
   assert.match(info.noEvidenceNotice, /不做版本新旧判断/)
@@ -301,8 +303,8 @@ test('缺标题 / 缺时间：显示「未提供」，不编造', () => {
   assert.equal(texts.createdAtText, '创建时间：2026-09-19 10:00:00')
   assert.equal(texts.updatedAtText, `更新时间：${MISSING_TIME_TEXT}`)
   assert.equal(texts.recordCountText, '41 条分镜')
-  assert.equal(texts.seqRangeText, '分镜序号 1–41（序号来自字段 seqNum）')
-  assert.match(texts.missingMetaNotice, /后端未提供这些字段（更新时间）/)
+  assert.equal(texts.seqRangeText, '分镜序号 1–41')
+  assert.equal(texts.missingMetaNotice, '这一组缺少标题/时间信息，不影响选组')
 
   const empty = groupFieldTexts(group({ script_id: '1' }))
   assert.equal(empty.titleText, MISSING_TITLE_TEXT)
@@ -311,11 +313,11 @@ test('缺标题 / 缺时间：显示「未提供」，不编造', () => {
   assert.match(empty.updatedAtText, new RegExp(MISSING_TIME_TEXT))
   assert.equal(empty.recordCountText, '0 条分镜')
   assert.equal(empty.seqRangeText, '未提供分镜序号范围')
-  assert.match(empty.missingMetaNotice, /标题 \/ 创建时间 \/ 更新时间/)
+  assert.equal(empty.missingMetaNotice, '这一组缺少标题/时间信息，不影响选组')
 
   const noField = groupFieldTexts(group({ script_id: '2', seq_min: '1', seq_max: '5' }))
-  assert.equal(noField.seqRangeText, '分镜序号 1–5（未提供序号字段名）')
-  assert.match(rawKeysText(group({ script_id: '3' })), /后端未返回 raw_keys/)
+  assert.equal(noField.seqRangeText, '分镜序号 1–5')
+  assert.match(rawKeysText(group({ script_id: '3' })), /这次没有读到可用信息项/)
 })
 
 test('解析自检：前几条样例 + 正文截断 + 字数如实显示', () => {
@@ -419,9 +421,9 @@ test('镜头不足：明确写出缺少数量，并给出三个选项', () => {
 })
 
 test('预览表抬头必须写出当前是哪一组（防止看错表）', () => {
-  assert.equal(activeGroupLabel(GROUPS, '2936083'), '当前脚本组：2936083（第1集） · 41 条分镜')
+  assert.equal(activeGroupLabel(GROUPS, '2936083'), '当前脚本组（第1集） · 41 条分镜')
   assert.match(activeGroupLabel(GROUPS, ''), /尚未选择脚本组/)
-  assert.match(activeGroupLabel(GROUPS, '888'), /不在本次脚本组清单里/)
+  assert.match(activeGroupLabel(GROUPS, '888'), /不在本次返回的清单里/)
 })
 
 test('保存按钮只显示当前勾选条数，不再出现「最多 3 条」（U2 升级要求）', () => {
@@ -432,15 +434,17 @@ test('保存按钮只显示当前勾选条数，不再出现「最多 3 条」�
   assert.ok(!saveButtonText(41).includes('临时章节'))
 
   const notice = wholeGroupSaveNotice(31, '2933350', 31)
-  assert.match(notice, /脚本组 2933350/)
+  // 组编号是内部标识：这行文案只允许出现"这一组 / 本组"，不许回显 script_id
+  assert.ok(!notice.includes('2933350'), '整组保存说明不许上屏脚本组编号')
+  assert.match(notice, /本组共 31 条记录/)
   assert.match(notice, /31 条/)
-  assert.match(notice, /来源 jurilu/)
-  assert.match(notice, /不与其他 scriptId 混合/)
+  assert.match(notice, /本次只保存这一组/)
+  assert.match(notice, /不与其他剧本组混合/)
 
   const whole = wholeGroupNotice(G2)
   assert.match(whole, /31 条记录会全部进入统一预览与匹配/)
   assert.match(whole, /不截断/)
-  assert.match(whole, /不与其他 scriptId 混合/)
+  assert.match(whole, /不与其他剧本组混合/)
   assert.match(wholeGroupNotice(null), /还没选择脚本组/)
 })
 
@@ -525,7 +529,8 @@ test('已选组但没点匹配：缺口面板仍不可见、无创建入口（�
   assert.equal(flow.shortage, null)
   assert.equal(flow.matchedScriptId, '')
   assert.equal(flow.targetCount, 0)
-  assert.match(flow.statusText, /已选脚本组 2933350/)
+  assert.match(flow.statusText, /已经选好一组了/)
+  assert.ok(!flow.statusText.includes('2933350'), `组编号不许上屏：${flow.statusText}`)
   assert.match(flow.statusText, /还没点「用这一组匹配镜头」/)
   assert.ok(!flow.statusText.includes('缺少'), `只是选组时不该提缺口：${flow.statusText}`)
   // 状态文案与"尚未选择"必须互斥：同一时刻只能出现一个
@@ -540,8 +545,9 @@ test('正在匹配（后端预览还没返回）：缺口面板与创建入口�
   assert.equal(flow.canShowShortage, false)
   assert.equal(flow.shortage, null)
   assert.equal(flow.showBottomCreateButton, false)
-  assert.match(flow.statusText, /正在用脚本组 2933350 匹配镜头/)
-  assert.match(flow.statusText, /后端返回之前不显示镜头数与缺口/)
+  assert.match(flow.statusText, /正在用这一组匹配镜头/)
+  assert.ok(!flow.statusText.includes('2933350'), `组编号不许上屏：${flow.statusText}`)
+  assert.match(flow.statusText, /拿到结果之前不显示镜头数与缺口/)
 })
 
 test('已匹配：缺口可见，且**只给一个**创建按钮；镜头数用后端真实值', () => {
@@ -606,13 +612,14 @@ test('目标章节文案包含：名称 + ID 末段 + 真实镜头数（匹配�
   const before = targetChapterText({ label: ACC_LABEL, chapterId: ACC_CHAPTER, shotCount: 0, matched: false })
   assert.match(before.text, /当前目标章节：第100集 · 验收·巨日禄整组导入（临时）/)
   assert.match(before.text, /ID …204035/)
-  assert.match(before.text, /点「用这一组匹配镜头」后按后端真实值显示/)
+  assert.match(before.text, /点「用这一组匹配镜头」后显示/)
+  assert.ok(!before.text.includes('后端真实值'), `主区不写「后端真实值」这种开发说法：${before.text}`)
   assert.ok(!before.text.includes('本集镜头 0 个'), '匹配前不许把镜头数当真实值展示')
 
   const after = targetChapterText({ label: ACC_LABEL, chapterId: ACC_CHAPTER, shotCount: 3, matched: true })
   assert.match(after.text, /第100集 · 验收·巨日禄整组导入（临时）/)
   assert.match(after.text, /ID …204035/)
-  assert.match(after.text, /本集镜头 3 个（后端真实值）/)
+  assert.match(after.text, /本集镜头 3 个/)
 
   // 页面用的 flow.chapterText 与它是同一份（不会出现"页面上写 0、面板里写 3"）
   const flow = resolveJuriluFlow(

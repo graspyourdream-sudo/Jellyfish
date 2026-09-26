@@ -19,6 +19,10 @@
 import { useState } from 'react'
 import { Alert, Button, Card, Input, Modal, Radio, Select, Space, Table, Tag, Typography } from 'antd'
 import type { JuriluScriptGroup } from '../../../../../services/llmPipelineApi'
+// 阶段 B ①：后端原文不直渲（三级管道 + 中文兜底）
+import { toUserFacingText } from '../../../components/userFacingMessage.ts'
+// 阶段 B ①：内部标识只允许出现在默认收起的「技术详情」折叠区（全仓唯一实现）
+import { TechnicalDetailSection } from './workbench/TechnicalDetailCollapse'
 import {
   activeGroupLabel,
   groupFieldTexts,
@@ -126,7 +130,7 @@ export default function JuriluScriptGroupPicker({
         className="mb-2"
         data-testid="jurilu-script-summary"
         message={summary.notice}
-        description="每个 scriptId 是一个独立的脚本组：本页默认不合并，也不会替你选中任何一组。选中一组后，该组全部记录会一起进入下面的统一预览表（不截断、不与其他组混合）。"
+        description="每次抓取拿到的每一组剧本都是独立的：本页默认不合并，也不会替你选中任何一组。选中一组后，该组全部记录会一起进入下面的统一预览表（不截断、不与其他组混合）。"
       />
 
       {notices.length ? (
@@ -191,7 +195,7 @@ export default function JuriluScriptGroupPicker({
       </Card>
 
       <Space direction="vertical" className="w-full" size="small" data-testid="jurilu-script-groups">
-        {groups.map((group) => {
+        {groups.map((group, groupIndex) => {
           const texts = groupFieldTexts(group)
           const version = versionInfo(group)
           const checked = selectedId === group.script_id
@@ -210,7 +214,7 @@ export default function JuriluScriptGroupPicker({
                     onChange={() => onSelect(group.script_id)}
                     disabled={matching}
                   >
-                    {`脚本组 ${group.script_id}`}
+                    {`脚本组 ${groupIndex + 1}（${texts.recordCountText}）`}
                   </Radio>
                   <Tag color={texts.titleMissing ? 'default' : 'geekblue'} data-testid={`jurilu-script-title-${group.script_id}`}>
                     {texts.titleText}
@@ -257,7 +261,7 @@ export default function JuriluScriptGroupPicker({
                     </>
                   ) : null}
                   {version.hint ? (
-                    <Typography.Text type="secondary" className="text-[11px] block">{`后端提示：${version.hint}`}</Typography.Text>
+                    <Typography.Text type="secondary" className="text-[11px] block">{`提示：${toUserFacingText(version.hint, '（这条提示暂时无法显示）')}`}</Typography.Text>
                   ) : null}
                   {version.disclaimer ? (
                     <Typography.Text type="warning" className="text-[11px] block">{version.disclaimer}</Typography.Text>
@@ -269,8 +273,16 @@ export default function JuriluScriptGroupPicker({
               ) : null}
 
               <Typography.Text type="secondary" className="text-[11px] block mt-1" data-testid={`jurilu-script-raw-keys-${group.script_id}`}>
-                {`第一步记录的可用字段名（raw_keys）：${rawKeysText(group)}`}
+                {`这一步读到的可用信息项：${(group.raw_keys ?? []).length} 项`}
               </Typography.Text>
+              {/* 内部字段名（raw_keys）是第三层内容：只放在默认收起的「技术详情」里 */}
+              <TechnicalDetailSection
+                className="mt-1"
+                testId={`jurilu-script-info-items-${group.script_id}`}
+                hint="这一步读到的可用信息项（名称明细）"
+              >
+                <Typography.Text type="secondary" className="text-[11px]">{rawKeysText(group)}</Typography.Text>
+              </TechnicalDetailSection>
 
               {checked ? (
                 <>
@@ -283,10 +295,10 @@ export default function JuriluScriptGroupPicker({
                     pagination={false}
                     dataSource={sampleRows(group)}
                     data-testid={`jurilu-script-samples-${group.script_id}`}
-                    locale={{ emptyText: '后端没有返回 sample_records：无法在此自检解析结果，请核对 raw_keys 后按实际分镜判断' }}
+                    locale={{ emptyText: '这次没有返回样例记录，无法在此核对解析结果，请按实际分镜判断' }}
                     columns={[
                       { title: '序号', dataIndex: 'seqText', width: 80 },
-                      { title: 'sbid', dataIndex: 'sbidText', width: 100 },
+                      { title: '剧本编号', dataIndex: 'sbidText', width: 100 },
                       { title: '提示词正文（前 60 字）', dataIndex: 'promptHeadText', ellipsis: true },
                       { title: '字数', dataIndex: 'promptLengthText', width: 70 },
                       { title: '摘要（前 40 字）', dataIndex: 'summaryHeadText', ellipsis: true },
@@ -303,7 +315,7 @@ export default function JuriluScriptGroupPicker({
 
         {!groups.length ? (
           <Typography.Text type="secondary" className="text-[11px]">
-            后端没有返回任何脚本组：请核对 URL / Cookie 后重新抓取（抓取失败时这里会显示脱敏诊断）。
+            这次没有返回任何脚本组：请核对抓取地址 / Cookie 后重新抓取（抓取失败时这里会显示脱敏诊断）。
           </Typography.Text>
         ) : null}
       </Space>
@@ -316,7 +328,7 @@ export default function JuriluScriptGroupPicker({
           data-testid="jurilu-script-match"
           onClick={onMatch}
         >
-          {selected ? `用这一组匹配镜头（整组 ${selected.record_count} 条 · ${selected.script_id}）` : '用这一组匹配镜头（请先选一组）'}
+          {selected ? `用这一组匹配镜头（整组 ${selected.record_count} 条）` : '用这一组匹配镜头（请先选一组）'}
         </Button>
         <Typography.Text type="secondary" className="text-[11px]" data-testid="jurilu-script-active">
           {activeGroupLabel(groups, matchedId)}
@@ -335,7 +347,7 @@ export default function JuriluScriptGroupPicker({
       >
         <Space direction="vertical" className="w-full" size="small">
           <Typography.Text type="secondary" className="text-[11px]">
-            这里走的是项目里既有的建章节接口（与「章节列表」里新建章节同一套），只建章节、不建镜头、不写提示词。
+            这里走的是项目里既有的新建章节能力（与「章节列表」里新建章节同一套），只建章节、不建镜头、不写提示词。
           </Typography.Text>
           <Input
             placeholder="章节标题（必填）"

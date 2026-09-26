@@ -63,17 +63,17 @@ export function describeAssetScopeCopy(assetType: unknown): AssetScopeCopy {
   if (!globalAsset) {
     return {
       globalAsset: false,
-      statement: `${typeLabel}是**项目内资产**：它的资料与图片提示词只属于当前项目。`,
+      statement: `${typeLabel}只属于当前项目：改了不影响别的项目。`,
       writeStatement: `保存影响范围：只有当前项目用到的这个${typeLabel}。`,
     }
   }
   return {
     globalAsset: true,
     statement:
-      `${typeLabel}是**全局资产**：通用资料在全局资产库里（所有用到它的项目都会看到）；` +
-      `「本章依据 / 本章补充」按 **项目 + 章节** 隔离保存，不会写回全局。`,
+      `${typeLabel}是所有项目共用：通用资料放在共用资产库里（所有用到它的项目都会看到）；` +
+      `「本章依据 / 本章补充」按 项目 + 章节 隔离保存，不会影响别的项目。`,
     writeStatement:
-      `保存影响范围：图片提示词会写进**全局资产库**的这个${typeLabel}（不是只影响本章）。` +
+      `保存影响范围：图片提示词会写进所有项目共用的资产库里的这个${typeLabel}（不是只影响本章）。` +
       `已有的提示词不会被自动覆盖：需要你确认后才会替换。`,
   }
 }
@@ -176,13 +176,13 @@ export function buildGlobalAssetWriteConfirmation(args: {
   const lines: string[] = [copy.writeStatement]
   diff.forEach((item) => {
     if (item.kind === '替换') {
-      lines.push(`替换 ${item.slot}：${item.before} → ${item.after}（旧的不会留副本）`)
+      lines.push(`替换原有提示词：${item.before} → ${item.after}（旧的不会留副本）`)
     } else {
-      lines.push(`新增 ${item.slot}：${item.after}`)
+      lines.push(`新增提示词：${item.after}`)
     }
   })
   if (replacedSlots.length > 0) {
-    lines.push(`本次会替换已有的 ${replacedSlots.length} 个槽位内容。`)
+    lines.push(`本次会替换 ${replacedSlots.length} 处已有内容（旧内容不留副本）。`)
   }
   // 三件"不许自动覆盖"的事，写回前一律说清（验收会专门核对这三项保持不变）
   lines.push(PRESERVATION_POLICY.uploadedImage)
@@ -198,7 +198,7 @@ export function buildGlobalAssetWriteConfirmation(args: {
       ? `把图片提示词写回全局${typeLabel}「${name}」？`
       : `覆盖「${name}」已有的图片提示词？`,
     lines,
-    okText: globalAsset ? '确认写回全局资产' : '确认覆盖',
+    okText: globalAsset ? '确认保存（含共用资产）' : '确认覆盖',
     cancelText: '取消',
     replacedSlots,
     addedSlots,
@@ -247,21 +247,21 @@ export function buildBatchWriteScopeConfirmation(
   const lines: string[] = []
   if (globalItems.length > 0) {
     lines.push(
-      `其中 ${globalItems.length} 项是**全局资产**（场景 / 道具 / 服装）：保存会把图片提示词写进全局资产库，` +
+      `其中 ${globalItems.length} 项是所有项目共用的资产（场景 / 道具 / 服装）：保存会把图片提示词写进共用资产库，` +
         `所有用到它的项目都会看到；本章依据/补充仍按 项目 + 章节 隔离。`,
     )
     globalItems.forEach((entry) => {
       const detail = entry.diff
-        .map((d) => (d.kind === '替换' ? `替换 ${d.slot}：${d.before} → ${d.after}` : `新增 ${d.slot}：${d.after}`))
+        .map((d) => (d.kind === '替换' ? `替换原有提示词：${d.before} → ${d.after}` : `新增提示词：${d.after}`))
         .join('；')
       lines.push(`· ${assetScopeTypeLabel(entry.item.assetType)}「${entry.item.assetName}」：${detail}`)
     })
   }
   if (projectItems.length > 0) {
-    lines.push(`另外 ${projectItems.length} 项是项目内资产（角色），只影响当前项目。`)
+    lines.push(`另外 ${projectItems.length} 项只属于当前项目（角色）：改了不影响别的项目。`)
   }
   if (replaced > 0) {
-    lines.push(`本次会替换已有内容的槽位共 ${replaced} 个（旧内容不留副本）。`)
+    lines.push(`本次会替换 ${replaced} 处已有内容（旧内容不留副本）。`)
   }
   lines.push(PRESERVATION_POLICY.uploadedImage)
   lines.push(PRESERVATION_POLICY.primaryImage)
@@ -270,10 +270,10 @@ export function buildBatchWriteScopeConfirmation(
     required: diffs.length > 0,
     title:
       globalItems.length > 0
-        ? `确认保存？其中 ${globalItems.length} 项会写回全局资产库`
+        ? `确认保存？其中 ${globalItems.length} 项会写进所有项目共用的资产库`
         : '确认保存这些资产图片提示词？',
     lines: lines.join('\n'),
-    okText: globalItems.length > 0 ? '确认写回（含全局资产）' : '确认保存',
+    okText: globalItems.length > 0 ? '确认保存（含共用资产）' : '确认保存',
     cancelText: '取消',
     globalCount: globalItems.length,
     projectCount: projectItems.length,

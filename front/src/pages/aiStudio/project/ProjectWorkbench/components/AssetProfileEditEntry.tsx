@@ -23,10 +23,11 @@ import {
   fetchChapterAssetProfileRecords,
   updateChapterAssetProfileRecord,
 } from '../../../../../services/llmPipelineApi'
+// 阶段 B ①：后端原文不直渲 —— 三级管道（去 ID → 去内部术语 → 业务化改写 + 中文兜底）
+import { toUserFacingText } from '../../../components/userFacingMessage.ts'
 import {
   findRecordForAsset,
   profileFieldSpecs,
-  type AssetProfileFieldType,
 } from './assetProfileFields'
 
 type AssetProfileEditEntryProps = {
@@ -53,7 +54,6 @@ export function AssetProfileEditEntry(props: AssetProfileEditEntryProps) {
   const [form] = Form.useForm<FormValues>()
 
   const specs = useMemo(() => profileFieldSpecs(asset.type), [asset.type])
-  const fieldType = asset.type as AssetProfileFieldType
 
   const load = useCallback(async () => {
     if (!chapterId) return
@@ -64,7 +64,8 @@ export function AssetProfileEditEntry(props: AssetProfileEditEntryProps) {
       const hit = findRecordForAsset(data.items ?? [], asset)
       setRecord(hit ?? null)
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e))
+      // 模式 6：后端原文不直渲 —— 主区只放中文结论（原文已掩码并收进「技术详情」）
+      setError(toUserFacingText(e, '资料读取失败：请稍后重试'))
     } finally {
       setLoaded(true)
       setLoading(false)
@@ -111,7 +112,8 @@ export function AssetProfileEditEntry(props: AssetProfileEditEntryProps) {
       }
       onSaved?.()
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e))
+      // 模式 6：同上 —— 主区只放中文结论
+      setError(toUserFacingText(e, '资料保存失败：请稍后重试'))
     } finally {
       setSaving(false)
     }
@@ -156,8 +158,8 @@ export function AssetProfileEditEntry(props: AssetProfileEditEntryProps) {
             <Alert
               type="info"
               showIcon
-              message="这里保存的是**人工资料**"
-              description="保存后立即生效到「生成依据」与后续出图；重新分析（重新提取）不会覆盖它。本操作不调用模型、不生成图片、不改动已有提示词。"
+              message="这里保存的是人工资料"
+              description="保存后立即生效到「这次用了哪些资料」与后续出图；重新分析（重新提取）不会覆盖它。本操作不调用模型、不生成图片、不改动已有提示词。"
             />
             {hasImagePrompt ? (
               <Alert
@@ -204,7 +206,7 @@ export function AssetProfileEditEntry(props: AssetProfileEditEntryProps) {
             </Form>
 
             <Typography.Text type="secondary" className="text-[11px]">
-              字段名与后端 `{fieldType}` 的资料表一致；留空表示"这一项没有信息"，不会写成空话。
+              这里填的内容和这份资产的资料一一对应；留空表示「这一项没有信息」，不会写成空话。
             </Typography.Text>
           </div>
         </Spin>
