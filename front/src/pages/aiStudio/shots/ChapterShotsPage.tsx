@@ -38,6 +38,9 @@ import { useRelationTaskNotification } from '../components/taskNotificationHelpe
 import { useTaskPageContext } from '../components/taskPageContext'
 import { createTaskSettledReloader } from '../components/taskResultHelpers'
 import { TASK_COPY } from '../components/taskCopy'
+import { showUserError } from '../components/userFacingMessage'
+/* 镜头状态的中文口径（本区域临时表，见文件头「需追加」说明） */
+import { shotStatusLabel } from './shotStudioCopy'
 
 const { Header, Content } = Layout
 type ShotListFilter = 'all' | 'pending' | 'generating' | 'ready'
@@ -80,10 +83,12 @@ function getErrorMessage(e: unknown) {
   return '请求失败'
 }
 
+/* 审计 §4.6 模式 3：原来直接渲 `{status}`（`pending` / `generating` / `ready` 英文原值）。
+   中文口径与列表页筛选器逐字一致；未登记状态给中文兜底，不回显原值。 */
 function statusTag(status?: ShotStatus) {
   if (!status) return <span className="text-gray-400">—</span>
   const color = status === 'ready' ? 'success' : 'default'
-  return <Tag color={color}>{status}</Tag>
+  return <Tag color={color}>{shotStatusLabel(status)}</Tag>
 }
 
 type ShotPreparationState = {
@@ -327,7 +332,10 @@ export function ChapterShotsPage() {
       await refresh()
     } catch (error) {
       message.destroy(SYNC_EXTRACT_MESSAGE_KEY)
-      message.error(getErrorMessage(error))
+      /* 审计 §4.6 模式 6：`getErrorMessage` 会依次返回 `body.detail` / `body.message` /
+         `meta.error.message` 的**原文**，所以出口必须过统一管道（showUserError 的契约是
+         「主区只出中文结论 + 原文经掩码进技术详情」），不能直接 `message.error(原文)`。 */
+      void showUserError(getErrorMessage(error), '分镜提取失败，请稍后重试', '分镜提取')
     } finally {
       setExtracting(false)
     }

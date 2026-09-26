@@ -41,6 +41,8 @@ import {
 } from '../project/ProjectWorkbench/chapterDivisionTasks'
 import { StudioEntitiesApi } from '../../../services/studioEntities'
 import { resolveAssetUrl } from '../assets/utils'
+import { readRawErrorMessage } from '../components/taskActionHelpers'
+import { showUserConclusion } from '../components/userFacingMessage'
 
 const { Header, Content } = Layout
 const extractTaskCopy = TASK_COPY.scriptExtract
@@ -853,7 +855,13 @@ export function ChapterShotEditPage() {
       message.success('提取完成，候选已刷新')
       await loadPreparationState({ silent: true })
     } catch (error) {
-      message.error(defaultTaskActionErrorMessage(error, '提取失败'))
+      /* 审计 §4.6 模式 6：主区走统一管道的中文结论，后端原文经掩码进「技术详情」 */
+      void showUserConclusion(
+        'error',
+        defaultTaskActionErrorMessage(error, '提取失败'),
+        readRawErrorMessage(error),
+        '提取资产',
+      )
     } finally {
       hideLoading()
       setExtractingAssets(false)
@@ -909,7 +917,13 @@ export function ChapterShotEditPage() {
       message.success(`已完成 ${actionableShots.length} 条镜头的提取，候选已刷新`)
       await loadPage()
     } catch (error) {
-      message.error(defaultTaskActionErrorMessage(error, '批量提取失败'))
+      /* 同上（审计 §4.6 模式 6） */
+      void showUserConclusion(
+        'error',
+        defaultTaskActionErrorMessage(error, '批量提取失败'),
+        readRawErrorMessage(error),
+        '批量提取资产',
+      )
     } finally {
       hideLoading()
       setBatchExtractingAssets(false)
@@ -1053,7 +1067,8 @@ export function ChapterShotEditPage() {
                 : data?.characters
         const item = (bucket?.[0] as EntityNameExistenceItem | undefined) ?? null
         if (!item) {
-          message.error('existence-check 返回为空')
+          /* 审计 §4.6 模式 4：接口名（`existence-check`）原来直接给用户看 → 换用户语言 */
+          message.error('没有查到该资产是否已存在，请重试')
           return
         }
 
@@ -1089,7 +1104,7 @@ export function ChapterShotEditPage() {
               })
               const createdId = String((created.data as { id?: string } | undefined)?.id ?? '')
               if (!createdId) {
-                message.error('新建资产失败：接口没有返回 id')
+                message.error('新建资产失败，请刷新后重试')
                 return
               }
               message.success(`已新建「${name}」并关联到本镜`)
@@ -1110,7 +1125,7 @@ export function ChapterShotEditPage() {
 
         message.info('该资产已关联到当前镜头')
       } catch {
-        message.error('existence-check 调用失败')
+        message.error('查询资产失败，请重试')
       }
     },
     [openLinkingModal, chapterId, projectId, projectStyle, projectVisualStyle, shotId],

@@ -17,6 +17,9 @@ import { StudioShotCharacterLinksService, StudioShotLinksService } from '../../.
 import { previewAssetBinding } from '../../../../services/llmPipelineApi'
 import type { AssetBindingPreviewResult, AssetBindingShot, BindingSuggestion } from '../../../../services/llmPipelineApi'
 import { defaultTaskActionErrorMessage } from '../../components/taskActionHelpers'
+import { maskInternalIds } from '../../components/maskInternalIds'
+/* 「技术详情」折叠壳**全仓只有一份**（审计 §9 第 2 项）：内部的开关原文 / 调用与模型口径一律走它。 */
+import { TechnicalDetailSection } from '../../project/ProjectWorkbench/components/workbench/TechnicalDetailCollapse'
 import {
   autoConfirmableRows,
   describeRecommendationReason,
@@ -58,12 +61,13 @@ const ASSET_TYPE_LABELS: Record<string, string> = {
   costume: '服装',
 }
 
+/* 兜底一律给中文（审计 §7.4：`MAP[k] ?? k` 是模式 3 的兜底坑，未登记不许回显原值）。 */
 function slotLabel(slot: string): string {
-  return SLOT_LABELS[slot] ?? slot
+  return SLOT_LABELS[slot] ?? '其它关联'
 }
 
 function assetTypeLabel(assetType: string): string {
-  return ASSET_TYPE_LABELS[assetType] ?? assetType
+  return ASSET_TYPE_LABELS[assetType] ?? '其它资产'
 }
 
 /**
@@ -264,6 +268,7 @@ export function ChapterShotAssetBindingSection({
         // 逐条容错：单条失败不中断整批，最后统一给出明细。
         failures.push({
           label: `${slotLabel(row.slot)} · ${assetLabel(row, catalogNames)}`,
+          // 审计 §4.6 模式 6：写 state 时就走统一管道（掩码 + 去内部术语），不留未脱敏原文
           reason: defaultTaskActionErrorMessage(error, '保存失败'),
         })
       }
@@ -313,7 +318,9 @@ export function ChapterShotAssetBindingSection({
 
   const columns: TableColumnsType<BindingSuggestion> = [
     {
-      title: '槽位',
+      /* 审计 §4.6 模式 2 + §7.3：「槽位」是主区禁词。这里的槽位指**挂到哪一类资产**
+         （角色 / 场景 / 道具 / 服装），不是图片角度，所以按业务含义叫「关联类别」。 */
+      title: '关联类别',
       dataIndex: 'slot',
       width: 76,
       render: (slot: string) => <Tag>{slotLabel(slot)}</Tag>,
@@ -354,12 +361,13 @@ export function ChapterShotAssetBindingSection({
         alreadyBound ? <Tag color="blue">已绑定</Tag> : <span className="text-slate-400">未绑定</span>,
     },
     {
-      title: '理由',
+      /* 审计 §4.6 模式 6：列名「理由」改「建议依据」；后端逐条 reason 先掩内部标识再上屏 */
+      title: '建议依据',
       dataIndex: 'reason',
       render: (reason: string, row: BindingSuggestion) => (
         <div className="min-w-0">
           <div className="text-xs text-slate-600">{requiresUserChoice(row) ? describeRecommendationReason(row) : '明确匹配'}</div>
-          {reason?.trim() ? <div className="text-[11px] text-slate-400">{reason}</div> : null}
+          {reason?.trim() ? <div className="text-[11px] text-slate-400">{maskInternalIds(reason)}</div> : null}
         </div>
       ),
     },
@@ -382,7 +390,7 @@ export function ChapterShotAssetBindingSection({
         <div className="min-w-0">
           <div className="text-sm font-medium text-slate-900">AI 推荐资产关联</div>
           <Typography.Text type="secondary" className="text-[11px]">
-            系统按当前项目已有资产给出「角色 / 场景 / 道具 / 服装」四类槽位的建议：
+            系统按当前项目已有资产给出「角色 / 场景 / 道具 / 服装」四类关联建议：
             明确匹配的默认勾选，多候选或与现有绑定冲突的留给你逐条判断；
             点「确认全部推荐」即可一次写入，保存后本镜状态立即刷新。推荐接口只读不写库。
           </Typography.Text>
@@ -442,20 +450,27 @@ export function ChapterShotAssetBindingSection({
         />
       ) : null}
 
+      {/* 审计 §4.6 模式 6：原来主区直接写 `DRY_RUN 守卫状态` / `JELLYFISH_DRY_RUN` /
+          `llm_called=… 目标模型=…`。现在主区只给产品自己的中文结论，
+          开关原文、是否真的调用过模型、目标模型名一律收进默认收起的「技术详情」。 */}
       {meta?.dry_run ? (
         <Alert
           type="warning"
           showIcon
-          message="当前处于 DRY_RUN 守卫状态：本次没有真实调用大模型"
+          message="当前是演练模式：本次没有真实调用模型，也没有产生费用"
           description={
             <div className="space-y-1">
-              <div>
-                {meta.dry_run_reason || 'JELLYFISH_DRY_RUN 未关闭或缺少真实付费确认。'}
-                下方建议来自确定性启发式规则的占位结果，不是模型判断，请谨慎勾选。
-              </div>
-              <div className="text-[11px] text-slate-500">
-                {`llm_called=${String(meta.llm_called)}；目标模型=${meta.target?.model_name ?? '未解析'}`}
-              </div>
+              <div>下方建议来自固定规则的占位结果，不是模型判断，请谨慎勾选。</div>
+              <TechnicalDetailSection
+                testId="binding-preview-dry-run-technical-detail"
+                hint="演练开关的原始状态与本次调用的内部信息，只用于排查问题。"
+              >
+                <div className="space-y-0.5">
+                  <div>演练原始说明：{meta.dry_run_reason || '未提供'}</div>
+                  <div>是否调用过模型：{String(meta.llm_called)}</div>
+                  <div>目标模型：{meta.target?.model_name ?? '未解析'}</div>
+                </div>
+              </TechnicalDetailSection>
             </div>
           }
         />
@@ -465,11 +480,13 @@ export function ChapterShotAssetBindingSection({
         <Alert
           type="info"
           showIcon
-          message="后端提示"
+          /* 审计 §4.6 模式 6：标题「后端提示」本身就是模式 2 → 改「需要注意的地方」；
+             列表项过 `maskInternalIds`（后端 warnings 可能内嵌内部编号）。 */
+          message="需要注意的地方"
           description={
             <ul className="list-disc pl-4 space-y-0.5 text-xs">
               {warningList.map((item) => (
-                <li key={item}>{item}</li>
+                <li key={item}>{maskInternalIds(item)}</li>
               ))}
             </ul>
           }
@@ -505,13 +522,23 @@ export function ChapterShotAssetBindingSection({
       {preview ? (
         <div className="space-y-3">
           <Space size={[6, 6]} wrap>
-            <Tag>{`候选资产数 ${preview.catalog.length}`}</Tag>
-            <Tag>{`批次 ${preview.batch_count}`}</Tag>
+            {/* 审计 §9 第 5 项（用户拍板：「候选条数 / 聚合 N 组」属后端概念）：
+                主区只留用户要判断的几个数（本次建议 / 预选 / 需复核 / 已丢弃），
+                「资产池条数」「分批份数」收进下面的技术详情。 */}
             <Tag>{`本次建议 ${suggestions.length}`}</Tag>
             <Tag color="green">{`预选 ${tierSummary.auto ?? 0}`}</Tag>
             <Tag color="gold">{`需复核 ${tierSummary.review ?? 0}`}</Tag>
             <Tag>{`已丢弃 ${tierSummary.discard ?? 0}`}</Tag>
           </Space>
+          <TechnicalDetailSection
+            testId="binding-preview-count-technical-detail"
+            hint="本次推荐的内部分批与资产池口径，只用于排查问题。"
+          >
+            <div className="space-y-0.5">
+              <div>资产池条数：{preview.catalog.length}</div>
+              <div>分批份数：{preview.batch_count}</div>
+            </div>
+          </TechnicalDetailSection>
           {preview.cost_note ? (
             <div className="text-[11px] text-slate-500">{preview.cost_note}</div>
           ) : null}
@@ -522,7 +549,7 @@ export function ChapterShotAssetBindingSection({
             message="默认勾选规则"
             description={
               <div className="text-xs">
-                {'只自动勾选「层级 = 预选（auto）」且「已绑定 = 否」的候选；'}
+                {'只自动勾选「预选」且还没有绑定过的建议；'}
                 「需复核」「已丢弃」以及已经绑定过的候选一律默认不勾选，需要你人工判断后再勾。
                 点「确认全部推荐」会把这些预选项一次性写入；「需复核」「与现有绑定冲突」的请逐条勾选后点「只保存勾选项」。
               </div>
