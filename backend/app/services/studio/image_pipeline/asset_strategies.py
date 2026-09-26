@@ -4,10 +4,14 @@
 
 | 类型 | 生成结果 | 结果类型标签（机器可读 / 中文） | 画幅 | 出图通道 |
 |---|---|---|---|---|
-| ``character`` | 人物参考图 / 设定图（进「人物参考图库」，用户选一张定版） | ``characterReference`` / 「人物参考图」 | **固定 16:9** | 上游出图服务 |
-| ``scene`` | 场景资产图 | ``sceneAssetImage`` / 「场景资产图」 | 自己的既有口径 | 上游出图服务 |
-| ``prop`` | 道具资产图 | ``propAssetImage`` / 「道具资产图」 | 自己的既有口径 | 上游出图服务 |
+| ``character`` | 人物参考图 / 角色设定图（左面部大特写 + 右全身三视图；进「人物参考图库」，用户选一张定版） | ``characterReference`` / 「人物参考图」 | **固定 16:9** | 上游出图服务 |
+| ``scene`` | 场景资产图 | ``sceneAssetImage`` / 「场景资产图」 | 默认 **16:9** | 上游出图服务 |
+| ``prop`` | 道具资产图 | ``propAssetImage`` / 「道具资产图」 | 默认 **1:1** | 上游出图服务 |
 | ``costume`` | 服装设定图 | ``costumeDesignImage`` / 「服装设定图」 | 自己的既有口径 | **Jellyfish APIMart 图片通道** |
+
+画幅为什么按类型分开（需求清单第 2 条）：此前所有资产共用一个比例，
+道具也被渲染成 16:9 横图。现在人物 / 场景 / 道具各有自己的口径，
+**唯一事实来源**是 :data:`ASSET_TYPE_ASPECT_RATIOS`。
 
 **通道为什么必须分流**（不是可选项）：上游出图服务（人物及场景生产项目）的契约只接受
 ``character`` / ``scene`` / ``prop``（见 :data:`external_image_client.SERVICE_ASSET_TYPES`），
@@ -67,6 +71,40 @@ TEMPLATE_COSTUME_DESIGN_IMAGE = "costume_design_image"
 RATIO_SOURCE_CHARACTER_FIXED = "character_reference_fixed"
 RATIO_SOURCE_REQUEST = "request"
 RATIO_SOURCE_DEFAULT = "default"
+#: 画幅来自**类型映射**（需求清单第 2 条：人物 16:9 / 场景 16:9 / 道具 1:1）
+RATIO_SOURCE_ASSET_TYPE_DEFAULT = "asset_type_default"
+
+#: **类型 → 画幅**的权威映射（唯一事实来源，别处不许再写第二份）。
+#:
+#: 需求清单第 2 条的原始问题：「画面比例被统一成一个值，所有资产共用一个比例」。
+#: 这里的口径：
+#:
+#: | 类型 | 画幅 | 说明 |
+#: |---|---|---|
+#: | ``character`` | 16:9 | 人物参考图 / 角色设定图，**写死**（见 :data:`CHARACTER_REFERENCE_RATIO`） |
+#: | ``scene`` | 16:9 | 场景资产图，横版建立镜头口径 |
+#: | ``prop`` | 1:1 | 道具资产图，方图单体展示口径 |
+#:
+#: ``costume`` 不在表内：服装**没有**本清单给出的画幅口径，沿用管线既有默认
+#: （不替用户拍板）。
+#:
+#: 「放在表里」的含义是**该类型的默认画幅**：调用方没显式给比例时用它，
+#: 显式给了仍然以调用方为准（人物的写死口径除外 —— 它连显式传入也不采纳）。
+ASSET_TYPE_ASPECT_RATIOS: dict[str, str] = {
+    "character": "16:9",
+    "scene": "16:9",
+    "prop": "1:1",
+}
+
+#: 场景画幅的说明（进响应，供页面标注「本次会用什么画幅、为什么」）
+SCENE_RATIO_NOTE = "16:9 是场景资产图的横版建立镜头口径（空间结构看得全）"
+#: 道具画幅的说明
+PROP_RATIO_NOTE = "1:1 是道具资产图的方图口径（单体完整入画、干净背景）"
+
+
+def aspect_ratio_for(asset_type: str) -> str | None:
+    """该资产类型的**默认画幅**；表里没有该类型时返回 ``None``（不替用户拍板）。"""
+    return ASSET_TYPE_ASPECT_RATIOS.get(str(asset_type or "").strip().lower())
 
 # ---------------------------------------------------------------------------
 # 出图通道（机器可读 + 中文说明）
@@ -107,8 +145,11 @@ class AssetImageStrategy:
     prompt_template: str
     result_kind: str
     result_label: str
-    #: 写死的画幅（人物 = 16:9）；为 None 时按调用方口径 → 兜底默认
+    #: 写死的画幅（人物 = 16:9）；为 None 时按调用方口径 → 类型映射 → 兜底默认
     fixed_aspect_ratio: str | None = None
+    #: 该类型的**默认画幅**（来自 :data:`ASSET_TYPE_ASPECT_RATIOS`）；调用方没给比例时用它。
+    #: 与 ``fixed_aspect_ratio`` 的区别：这个**允许**调用方显式覆盖，那个不允许。
+    default_aspect_ratio: str | None = None
     #: 注册表里没有该类型的槽位规格时的动作姿态兜底。
     #: 道具的正式槽位（``prop_image_front`` / ``prop_image_other``）已补进
     #: ``llm_orchestration.registry``，这条只在注册表异常时才用得上（保留以防 import 环/降级）。
@@ -117,7 +158,7 @@ class AssetImageStrategy:
     batch_reference_allowed: bool = False
     #: 上游服务契约里的 generation_type（服装不在其契约内 → 空串）
     generation_type: str = ""
-    #: 画幅说明（人物专用文案；其它类型为空）
+    #: 画幅说明（人物 / 场景 / 道具各自的口径说明；服装为空）
     ratio_note: str = ""
     #: 出图通道（:data:`CHANNEL_VENDOR_SERVICE` / :data:`CHANNEL_APIMART`）—— 必填口径，
     #: 调用方按它决定"这一项发给谁"，不许自己按类型再写一套 if。
@@ -135,8 +176,8 @@ class AssetImageStrategy:
 
     @property
     def aspect_ratio(self) -> str:
-        """该类型不传画幅时使用的值（人物 = 固定 16:9；其余 = 管线默认）。"""
-        return self.fixed_aspect_ratio or DEFAULT_ASPECT_RATIO
+        """该类型**不传画幅**时使用的值：写死口径 → 类型映射 → 管线默认。"""
+        return self.fixed_aspect_ratio or self.default_aspect_ratio or DEFAULT_ASPECT_RATIO
 
     def to_read(self) -> dict[str, Any]:
         """给接口用的只读口径（新增字段，供前端标注「本次会生成什么」。）"""
@@ -183,6 +224,9 @@ STRATEGIES: dict[str, AssetImageStrategy] = {
         prompt_template=TEMPLATE_SCENE_ASSET_IMAGE,
         result_kind=KIND_SCENE_ASSET_IMAGE,
         result_label="场景资产图",
+        # 场景默认 16:9（需求清单第 2 条）；调用方显式给了比例仍然以调用方为准
+        default_aspect_ratio=ASSET_TYPE_ASPECT_RATIOS["scene"],
+        ratio_note=SCENE_RATIO_NOTE,
         generation_type=client.DEFAULT_GENERATION_TYPE.get("scene", ""),
     ),
     "prop": AssetImageStrategy(
@@ -192,6 +236,10 @@ STRATEGIES: dict[str, AssetImageStrategy] = {
         prompt_template=TEMPLATE_PROP_ASSET_IMAGE,
         result_kind=KIND_PROP_ASSET_IMAGE,
         result_label="道具资产图",
+        # 道具默认 **1:1 方图**（需求清单第 2 条）——此前它跟场景/人物一起落到 16:9，
+        # 正是"所有资产共用一个比例"这条问题在道具上的具体表现。
+        default_aspect_ratio=ASSET_TYPE_ASPECT_RATIOS["prop"],
+        ratio_note=PROP_RATIO_NOTE,
         # 道具的**正式槽位**已在注册表里（prompt_slot 指到的就是它）；
         # default_view_hint 只是注册表异常时的降级兜底，正常路径不会用到。
         default_view_hint="道具正面展示，干净背景",
@@ -306,8 +354,12 @@ def resolve_aspect_ratio(asset_type: str, requested: str) -> AspectRatioResoluti
 
     - **人物**：固定 :data:`CHARACTER_REFERENCE_RATIO`（16:9，写死）。调用方传了别的值
       也**不会被采用**，而是给出一条中文警告如实说明被忽略的原值；
-    - **场景 / 道具 / 服装**：按各自既有口径 —— 调用方传了就用它的，没传就用管线默认
-      （**不会**被顺手改成 16:9，也不会去读项目/镜头的视频比例）。
+    - **场景 / 道具**：调用方传了就用它的（``request``）；没传就用**该类型的**默认画幅
+      （``asset_type_default``：场景 16:9、道具 1:1），**不读**项目/镜头的视频比例；
+    - **服装**：没有本清单给出的画幅口径 → 调用方传了用它，没传用管线默认（``default``）。
+
+    ``aspect_ratio_source`` 如实回报本次画幅是从哪来的 —— 页面据此说清
+    "为什么会是这个比例"，避免"所有资产共用一个比例"这种问题再次静默发生。
     """
     strategy = strategy_for(asset_type)
     clean = str(requested or "").strip()
@@ -328,6 +380,8 @@ def resolve_aspect_ratio(asset_type: str, requested: str) -> AspectRatioResoluti
 
     if clean:
         return AspectRatioResolution(ratio=clean, source=RATIO_SOURCE_REQUEST)
+    if strategy.default_aspect_ratio:
+        return AspectRatioResolution(ratio=strategy.default_aspect_ratio, source=RATIO_SOURCE_ASSET_TYPE_DEFAULT)
     return AspectRatioResolution(ratio=strategy.aspect_ratio, source=RATIO_SOURCE_DEFAULT)
 
 
@@ -342,6 +396,7 @@ def describe_batch_reference_refusal(asset_type: str) -> str:
 
 
 __all__ = [
+    "ASSET_TYPE_ASPECT_RATIOS",
     "CHANNEL_APIMART",
     "CHANNEL_LABELS",
     "CHANNEL_MIXED",
@@ -355,15 +410,19 @@ __all__ = [
     "KIND_COSTUME_DESIGN_IMAGE",
     "KIND_PROP_ASSET_IMAGE",
     "KIND_SCENE_ASSET_IMAGE",
+    "PROP_RATIO_NOTE",
+    "RATIO_SOURCE_ASSET_TYPE_DEFAULT",
     "RATIO_SOURCE_CHARACTER_FIXED",
     "RATIO_SOURCE_DEFAULT",
     "RATIO_SOURCE_REQUEST",
     "REAL_CHANNELS",
+    "SCENE_RATIO_NOTE",
     "SLOT_BY_ASSET_TYPE",
     "STRATEGIES",
     "SUPPORTED_ASSET_TYPES",
     "AssetImageStrategy",
     "AspectRatioResolution",
+    "aspect_ratio_for",
     "channel_for",
     "channel_label",
     "describe_batch_reference_refusal",

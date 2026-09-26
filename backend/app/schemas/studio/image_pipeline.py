@@ -76,7 +76,8 @@ class SubmissionTargetRead(BaseModel):
         "",
         description=(
             "本类型画幅的来源（新）：character_reference_fixed（人物参考图写死 16:9）/ "
-            "request（调用方传入）/ default（类型默认）"
+            "request（调用方传入）/ asset_type_default（类型映射：场景 16:9、道具 1:1）/ "
+            "default（管线默认）"
         ),
     )
     prompt_template: str = Field("", description="本类型使用的提示词模板名（新，审计用）")
@@ -142,10 +143,17 @@ class ImageTaskResultRead(BaseModel):
     )
     result_label: str = Field("", description="结果类型的中文标签（新）：人物参考图 / 场景资产图 / 道具资产图 / 服装设定图")
     aspect_ratio: str = Field(
-        "", description="本次结果使用的画幅（新）：人物参考图固定 16:9（不是项目最终视频画幅）"
+        "",
+        description=(
+            "本次结果使用的画幅（新）：人物 / 场景 16:9、道具 1:1"
+            "（人物参考图固定 16:9，不是项目最终视频画幅）"
+        ),
     )
     aspect_ratio_source: str = Field(
-        "", description="画幅来源（新）：character_reference_fixed / request / default"
+        "",
+        description=(
+            "画幅来源（新）：character_reference_fixed / request / asset_type_default / default"
+        ),
     )
     channel: str = Field(
         "",
@@ -534,8 +542,15 @@ class ReferenceRegenerateRead(BaseModel):
         ),
     )
     result_label: str = Field("", description="本次结果类型的中文标签（新）：人物参考图 / 场景资产图 / 道具资产图 / 服装设定图")
-    aspect_ratio: str = Field("", description="本次使用的画幅（新）：人物参考图固定 16:9（不是项目最终视频画幅）")
-    aspect_ratio_source: str = Field("", description="画幅来源（新）：character_reference_fixed / request / default")
+    aspect_ratio: str = Field(
+        "", description="本次使用的画幅（新）：人物/场景 16:9、道具 1:1（人物参考图固定 16:9，不是项目最终视频画幅）"
+    )
+    aspect_ratio_source: str = Field(
+        "",
+        description=(
+            "画幅来源（新）：character_reference_fixed / request / asset_type_default / default"
+        ),
+    )
     prompt_template: str = Field("", description="本次使用的提示词模板名（新，审计用）")
     results: list[ImageTaskResultRead] = Field(default_factory=list, description="与默认主流程同形的单条出图结果")
     summary: dict[str, Any] = Field(default_factory=dict)

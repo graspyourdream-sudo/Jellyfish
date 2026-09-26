@@ -274,7 +274,11 @@ def test_character_ratio_is_written_as_a_constant_not_from_project() -> None:
 
 
 def test_resolve_aspect_ratio_per_type() -> None:
-    """人物：一律 16:9（传入别的值被忽略 + 如实回报）；其余类型：按自己的口径。"""
+    """人物：一律 16:9（传入别的值被忽略 + 如实回报）；道具/场景：按**类型映射**取默认画幅。
+
+    需求清单第 2 条把画幅改成按类型分开（人物 16:9 / 场景 16:9 / 道具 1:1），
+    所以"没传比例"时的来源从管线默认（``default``）变成类型映射（``asset_type_default``）。
+    """
     fixed = strategies.resolve_aspect_ratio("character", "")
     assert (fixed.ratio, fixed.source, fixed.warning) == ("16:9", "character_reference_fixed", "")
 
@@ -283,9 +287,14 @@ def test_resolve_aspect_ratio_per_type() -> None:
     assert overridden.source == "character_reference_fixed"
     assert "9:16" in overridden.warning and "16:9" in overridden.warning
 
+    # 场景：类型映射里就是 16:9（与管线默认同值，但来源要如实说成"类型映射"）
     default_scene = strategies.resolve_aspect_ratio("scene", "")
     assert default_scene.ratio == strategies.DEFAULT_ASPECT_RATIO
-    assert default_scene.source == "default"
+    assert default_scene.source == "asset_type_default"
+
+    # 道具：需求清单第 2 条要求 **1:1 方图**（此前它跟场景一起落到 16:9）
+    default_prop = strategies.resolve_aspect_ratio("prop", "")
+    assert (default_prop.ratio, default_prop.source) == ("1:1", "asset_type_default")
 
     requested_scene = strategies.resolve_aspect_ratio("scene", "4:3")
     assert (requested_scene.ratio, requested_scene.source) == ("4:3", "request")
@@ -371,7 +380,7 @@ async def test_submit_plan_dispatches_template_and_kind_per_type(
     if asset_type == "character":
         assert (target.aspect_ratio, target.aspect_ratio_source) == ("16:9", "character_reference_fixed")
     else:
-        assert target.aspect_ratio_source in {"default", "request"}
+        assert target.aspect_ratio_source in {"default", "request", "asset_type_default"}
     assert warnings  # 图片模型提示等既有信息仍在（只增不删）
 
     # 场景/道具的 generation_type 也不是人物那一档
@@ -494,7 +503,7 @@ async def test_regenerate_exposes_kind_and_ratio_per_type(
     if asset_type == "character":
         assert (data.aspect_ratio, data.aspect_ratio_source) == ("16:9", "character_reference_fixed")
     else:
-        assert data.aspect_ratio_source in {"default", "request"}
+        assert data.aspect_ratio_source in {"default", "request", "asset_type_default"}
         assert data.aspect_ratio != "" and data.aspect_ratio == bodies[0]["size"]
 
     assert len(bodies) == 1
