@@ -5,7 +5,7 @@
  * 于是整个列表到处都是含义不清的「待确认」——用户看不出下一件事是什么。
  * 现在每个镜头只给**一个主状态**，文案就是下一步动作：
  *
- *   待确认资产候选 → 待保存视频提示词 → 待绑定素材 → 缺少首帧/关键帧/尾帧
+ *   待确认提取到的资产 → 待保存视频提示词 → 待绑定素材 → 缺少首帧/关键帧/尾帧
  *   → 已具备生成条件 → 已生成
  *
  * 两条硬约束：
@@ -90,7 +90,11 @@ export function resolveShotStatus(input: ShotStatusInput): ShotStatusText {
     return { key: 'generating', label: '生成中', nextAction: '等本次生成结束，或去任务中心查看进度', tone: 'blue', ...base }
   }
   if (input.extractionPending) {
-    return { key: 'pending_candidate', label: '待确认提取到的资产', nextAction: '去确认待提取到的资产（关联已有资产或新建）', tone: 'gold', ...base }
+    /* 第 3 批收尾（运行时复核发现的文案回归）：`472a2d3` 把 `去确认提取候选（…）` 机械替换成
+       `去确认待提取到的资产（…）` 时多带了一个「待」——读起来像「还没提取」，而且与
+       `label: '待确认提取到的资产'`（等待用户确认）语义打架。这里去掉多余的「待」，
+       并把来源写清楚（这些资产是从**剧本**里提取出来的）。 */
+    return { key: 'pending_candidate', label: '待确认提取到的资产', nextAction: '去确认剧本里提取到的资产（关联已有资产或新建）', tone: 'gold', ...base }
   }
   if (!readiness.hasPrompt) {
     return { key: 'prompt_todo', label: '待保存视频提示词', nextAction: '写/重新生成提示词并保存到本镜', tone: 'gold', ...base }

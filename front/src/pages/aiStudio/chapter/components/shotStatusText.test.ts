@@ -23,7 +23,13 @@ test('提取候选没确认 → 「待确认提取到的资产」（而不是笼
   const status = resolveShotStatus({ readiness: { ...ready, hasPrompt: false, canGenerate: false, canExport: false }, extractionPending: true })
   assert.equal(status.key, 'pending_candidate')
   assert.equal(status.label, '待确认提取到的资产')
-  assert.match(status.nextAction, /确认待提取到的资产/)
+  /* 第 3 批收尾（运行时复核发现的文案回归）：旧期望 `/确认待提取到的资产/` 是
+     `472a2d3` 机械替换后的产物，多了一个「待」（读起来像"还没提取"，与 label 打架）。
+     改成**更强**的一对：正确说法必须出现 + 读不通的那种必须消失 + 可操作尾巴留着。 */
+  assert.match(status.nextAction, /去确认剧本里提取到的资产（关联已有资产或新建）/)
+  assert.doesNotMatch(status.nextAction, /待提取/)
+  assert.doesNotMatch(status.nextAction, /待确认待/)
+  assert.ok(status.nextAction.trim().length > 0)
 })
 
 test('没有提示词 → 待保存视频提示词', () => {
