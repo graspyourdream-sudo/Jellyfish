@@ -59,6 +59,8 @@ import {
   scannerNegativeSelfCheck,
   scannerSelfCheck,
 } from '../components/mainScreenCopyGuard.ts'
+import { maskInternalIds } from '../components/maskInternalIds.ts'
+import { toUserFacingText } from '../components/userFacingMessage.ts'
 import { frameTypeLabel } from './components/shotStatusText.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -549,6 +551,22 @@ test('同一字段同口径：已保存提示词来源在「① 工作区」与�
   assert.ok(CJK_RE.test(unknownSource), `未登记来源码的兜底必须含中文：${unknownSource}`)
   assert.ok(!unknownSource.includes('brand_new_source'), `未登记来源码被原样回显：${unknownSource}`)
   assert.equal(videoPromptSourceLabel(''), '', '空来源返回空串，调用方用自己的「未标记」兜底')
+})
+
+test('R13：掩码后不许残留「槽位」「接口」这类中文内部词汇（§4.3 模式 2 第 5 条）', () => {
+  // 后端原句（运行时实测形态）
+  const raw = '该帧槽位没有 file_id：请先上传或生成该帧。四类槽位的建议…推荐接口只读不写库。'
+  const masked = maskInternalIds(raw)
+  assert.equal(masked.includes('槽位'), false, '掩码后仍残留「槽位」—— 审计 R13 的原样复现')
+  assert.equal(masked.includes('接口'), false, '掩码后仍残留「接口」—— 审计 R13 的原样复现')
+  // 完整管道（掩码 → 洗句 → 业务化改写）之后必须是中文结论，且不含内部 ID
+  const facing = toUserFacingText(raw, '这一帧还没有文件：请先上传或生成该帧')
+  assert.equal(facing.includes('槽位'), false, `管道出口仍含「槽位」：${facing}`)
+  assert.equal(facing.includes('接口'), false, `管道出口仍含「接口」：${facing}`)
+  assert.equal(facing.includes('file_id'), false, `管道出口仍含 file_id：${facing}`)
+  assert.ok(CJK_RE.test(facing), `管道出口不是中文：${facing}`)
+  // 反向断言：干净的文案不许被改动（防过度屏蔽）
+  assert.equal(maskInternalIds('本镜已具备生成条件：提示词与参考帧齐全'), '本镜已具备生成条件：提示词与参考帧齐全')
 })
 
 test('模式 1 回落：参考图 / 场景 / 角色名称读取失败时一律给中文兜底（§4.3 模式 1 第 2-4 条）', () => {
