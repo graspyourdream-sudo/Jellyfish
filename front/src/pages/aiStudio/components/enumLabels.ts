@@ -391,6 +391,21 @@ export const DELIVERY_EXPORT_SOURCE = enumSpec(
 )
 
 /**
+ * 剧本一致性检查的问题类型（`issue_type`）。
+ *
+ * 后端是 `Literal["character_confusion"]`（`schemas/skills/script_processing.py:202`）。
+ * 运行时泄漏形态是主区直接打 `[character_confusion] Issue 1`（审计 §4.3 模式 2）。
+ */
+export const SCRIPT_ISSUE_TYPE = enumSpec(
+  'scriptIssueType',
+  ['character_confusion'],
+  {
+    character_confusion: '角色混淆',
+  },
+  '其它问题',
+)
+
+/**
  * 后台任务类型（`task_kind`）。
  *
  * 键来自 `taskCopy.ts` 的既有映射表，并补上运行时实测会漏出英文的三个
@@ -512,6 +527,82 @@ export function imageModelBusinessName(modelName: string | null | undefined): st
   return modelBusinessName('image', modelName)
 }
 
+/* ------------------------------- §4.3 ChapterStudio：几个带兜底的出口（单一定义） */
+
+/** 中文字符判定（用于「已经是中文就别再套映射」的场景）。 */
+const CJK_RE = /[\u4e00-\u9fff]/
+
+/**
+ * 视频提示词来源 → 主区中文（审计 §4.3 模式 3）。
+ *
+ * 与 `labelFor` 的唯一区别：**空值返回空串**，让调用方可以用
+ * `` `来源：${videoPromptSourceLabel(src) || '未标记'}` `` 这种写法保留自己的兜底口径
+ * （审计 §4.3 给的就是这个口径）。未登记原值仍然**绝不回显**。
+ */
+export function videoPromptSourceLabel(source: string | null | undefined): string {
+  const key = String(source ?? '').trim()
+  if (!key) return ''
+  return labelFor(VIDEO_PROMPT_SOURCE, key)
+}
+
+/** 关键帧出图的提示词来源 → 主区中文（空值返回空串，口径同上）。 */
+export function framePromptSourceLabel(source: string | null | undefined): string {
+  const key = String(source ?? '').trim()
+  if (!key) return ''
+  return labelFor(FRAME_PROMPT_SOURCE, key)
+}
+
+/**
+ * 视频准备度检查项 code → 主区中文；**未登记返回 `null`**。
+ *
+ * 返回 `null` 而不是中文兜底，是因为审计 §4.3 的口径是
+ * 「未登记项**隐藏整行**，而不是回显原值」（运行时形态：整排 `未通过 · extraction_ready`）。
+ * 调用方拿到 `null` 时必须跳过这一行，不许把 `key` 打出来。
+ */
+export function videoReadinessCheckLabel(raw: string | null | undefined): string | null {
+  return lookupLabel(VIDEO_READINESS_CHECK, raw)
+}
+
+/**
+ * 生成任务状态 → 主区中文。
+ *
+ * 与 `labelFor(TASK_STATUS, …)` 的区别：页面里有的状态是**前端自己写的中文**
+ * （例如生成成功后 `setVideoTaskStatus('已生成')`），这些要原样保留而不是变成
+ * 「状态未识别」；只有「不是中文、又不是已登记原值」才走中文兜底。
+ */
+export function taskStatusLabel(status: string | null | undefined): string {
+  const key = String(status ?? '').trim()
+  if (!key) return ''
+  const known = lookupLabel(TASK_STATUS, key)
+  if (known) return known
+  return CJK_RE.test(key) ? key : TASK_STATUS.unknown
+}
+
+/**
+ * 是否允许真实付费：后端 `guard_status` → 中文结论（审计 §4.3 模式 3 / §6 边界项）。
+ *
+ * `guard_status` 来自后端 `dry_run.short_status()`，是**自由文本**（可能是
+ * `DRY_RUN=开（JELLYFISH_DRY_RUN，未发起真实调用）` 这种带环境变量名的原话），
+ * 所以这里按语义归类成中文结论；原话只留在默认收起的「技术详情」里。
+ *
+ * ⚠️ 旧实现（`ChapterStudio.tsx` 内的 `describeGuardStatus`）用的是
+ * `/DRY_RUN\s*=\s*开|dry_run/i` —— 因为 `i` 标志，`dry_run` 会命中任何含
+ * `DRY_RUN` 的句子，于是**「DRY_RUN=关且已确认（真实付费链路）」也会被判成
+ * 「不允许（当前是演练模式）」**（真实模式下主区出现错误结论）。这里按
+ * 「先判开、再判未确认、最后判已确认」重写，并去掉那条过宽的 `dry_run` 分支。
+ */
+export function guardStatusLabel(raw: string | null | undefined): string {
+  const text = String(raw ?? '').trim()
+  if (!text) return '待确认'
+  if (/DRY_RUN\s*[=:：]?\s*开/.test(text) || /演练/.test(text)) return '不允许（当前是演练模式）'
+  if (/未确认|not_confirmed|unconfirmed/i.test(text) || /DRY_RUN\s*[=:：]?\s*关但/.test(text)) {
+    return '不允许（真实调用还没有确认）'
+  }
+  if (/已确认|真实付费|DRY_RUN\s*[=:：]?\s*关/.test(text)) return '允许'
+  if (/真实|real/i.test(text)) return '允许'
+  return '待确认（原始状态见「技术详情」）'
+}
+
 /* ---------------------------------------------------------- 扫描词源 / 自检 */
 
 /** 本文件里全部枚举类（顺序固定，便于测试报错定位）。 */
@@ -536,6 +627,7 @@ export const ALL_ENUM_SPECS: readonly EnumSpec[] = [
   PROMPT_QUALITY_STATUS,
   DELIVERY_EXPORT_SOURCE,
   TASK_KIND,
+  SCRIPT_ISSUE_TYPE,
 ]
 
 /**
