@@ -36,7 +36,10 @@ type ProjectStudioStepPanelProps = {
 
 const SOURCE_LABELS: Record<string, string> = {
   llm: '大模型生成',
-  jurilu: '巨量导入',
+  /* 「巨日禄」是本项目导入剧本的外部工具名，全站统一用它（`EpisodeVideoPromptBoard` 的来源标签、
+     `PromptFlowPage` 的页签、工作台的抓取面板都叫「巨日禄导入」），审计 §4.5 给的也是这个名字
+     （只要求把枚举原名 `jurilu` 换掉，不是把工具名换掉）。**不要在这里另起别名。** */
+  jurilu: '巨日禄导入',
   manual: '人工编辑',
   skill: '一键技能生成',
   manual_workspace: '工作室手工维护（历史值）',
@@ -66,16 +69,30 @@ function sourceLabel(source: string): string {
  * 「imported_size / imported_resolution / recommended_duration 元信息在 Jellyfish 侧
  * 没有等价列，因此未提供」—— 字段名 + 「元信息 / 等价列」全是开发说法。
  *
- * 口径（§7.1-6 三级顺序）：主区只出**中文结论**（走统一管道，
- * 已知的那句后端原文由 `humanizeBackendMessage` 改写），
- * 原始说明收进默认收起的「技术详情」。
+ * ## 为什么不是「把 note 过一遍管道再放主区」（2026-09-26 复核修正）
+ *
+ * 上一版做法是 `buildUserFacingMessage(note).title` 上主区，指望管道把它改成中文结论。
+ * **运行时复测证明这个指望不成立**：`note` 是一段**多句后端长文本**，
+ * 管道只对「已知的那一句」做了整句改写，其余部分**原样留下**，于是主区实测上屏的是
+ * 「本端点只做「仅提示词」出口：导出**来源在白名单内且有正文**的提示词（大模型生成 /
+ * 巨日禄导入 / …）」—— 里面同时命中模式 2（`端点`/`白名单`）、渲染缺陷（字面 `**` 星号）,
+ * 而且和同一屏的来源列口径打架（来源列已显示中文，「巨日禄导入」又出现一次）。
+ *
+ * 口径修正（对齐 §7.1-6 的第三层收敛原则）：**主区一律不渲后端长文本**，
+ * 只出「本出口固定行为」的中文结论（下面这句是产品固定说法，不随后端措辞漂移）；
+ * 后端原文的**唯一落点**是默认收起的「技术详情」。
+ *
+ * ⚠️ 同类写法（把后端长文本过一遍管道就当主区文案）在别处也可能踩同一个坑；
+ * 判断依据是「主区文案必须是产品自己写的句子，而不是后端句子的改写结果」。
  */
+const DELIVERY_NOTE_MAIN = '导出只带「有正文」的提示词：模板拼装只是预览，不算来源，也不进交付；默认会带出这些提示词绑定的素材。'
+
 function DeliveryNoteBlock({ note }: { note: string }) {
   const message = buildUserFacingMessage(note, '本次交付有一条补充说明')
   return (
     <div className="space-y-1">
       <Typography.Text type="secondary" className="text-[11px]">
-        {message.title}
+        {DELIVERY_NOTE_MAIN}
       </Typography.Text>
       {message.detail ? (
         <TechnicalDetailSection

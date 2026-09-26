@@ -469,6 +469,31 @@ test('步骤 5：可交付来源未登记时不许回显后端原值（§4.2 模
   )
 })
 
+test('步骤 5：交付预览的主区文案必须是产品自己写的句子，不许把后端长原文「改写」后当主区（运行时复核）', () => {
+  /**
+   * 为什么会有这条（2026-09-26 运行时复核发现的真缺陷）：
+   *
+   * 上一版把 `buildUserFacingMessage(note).title` 放在主区，靠管道把后端原文改成中文结论。
+   * 上面那条用例只断言了「代码里有 `TechnicalDetailSection`」，于是**看着是过的**；
+   * 但运行时实测主区上屏的是整段后端原文（`本端点只做「仅提示词」出口：导出**来源在白名单内
+   * 且有正文**的提示词（…）`）—— 因为管道只改写了已知的那一句，其余原样留下。
+   * 教训：**「原文进了折叠区」不等于「主区干净了」**，两者各自要有断言。
+   */
+  const code = stripComments(readWorkbench('components/ProjectStudioStepPanel.tsx'))
+  assert.ok(
+    !/\{message\.title\}/.test(code),
+    '主区又去渲 `buildUserFacingMessage(后端原文).title` 了 —— 后端长文本改一遍仍然是后端文本，'
+      + '主区文案必须是产品自己写死的句子（见 DELIVERY_NOTE_MAIN 的注释）',
+  )
+  const constant = code.match(/const DELIVERY_NOTE_MAIN = '([^']+)'/)
+  assert.ok(constant, '交付说明的主区文案必须是一个写死的中文常量，不许从后端值派生')
+  const mainCopy = constant[1]
+  assert.ok(/[\u4e00-\u9fff]/.test(mainCopy), `主区文案必须是中文：${mainCopy}`)
+  const devTerms = ['端点', '白名单', '字段名', '元信息', '等价列', '接口', '后端', 'file_id', 'storage_key']
+  const leaked = devTerms.filter((term) => mainCopy.includes(term))
+  assert.deepEqual(leaked, [], `交付说明的主区文案里还有开发术语：${leaked.join(' / ')}`)
+})
+
 test('§6.1 任务号 / UUID 口径：含中文的主区文案里不许插值任务号或内部编号（工作台五步）', () => {
   const offenders: string[] = []
   workbenchSources().forEach((file) => {
