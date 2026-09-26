@@ -42,6 +42,10 @@ from app.services.studio.llm_orchestration.context import (
     render_project_context,
     resolve_project_id,
 )
+from app.services.studio.llm_orchestration.differentiation import (
+    apply_design_anchors,
+    render_differentiation_rules,
+)
 from app.services.studio.llm_orchestration.json_utils import (
     JSONParseError,
     coerce_str,
@@ -551,6 +555,10 @@ async def preview_image_prompts(
             chapter_id=body.chapter_id or (shot_context.chapter_id if shot_context else None),
         )
         profile_source = "project"
+    # 收窄之前的**全量**画像卡：只用于「同身份多角色」分组，不参与"资料够不够"的判定。
+    # （与下面 ``resolve_profile_scope`` 的 ``scope_cards`` 是两回事：那个是"本次要的"，
+    #   这个是"同一装载范围里的全部"，差异化分组必须看全量。）
+    all_scope_cards = build_profile_cards(profiles, source=profile_source)
     if body.entity_names:
         # 逐资产生成：把画像卡收窄到指定名称（不改自动装载，也不绕过章节资料加载）
         wanted = {normalize_name(name) for name in body.entity_names if str(name).strip()}
@@ -564,6 +572,11 @@ async def preview_image_prompts(
                 ),
             )
     cards = build_profile_cards(profiles, source=profile_source)
+
+    # 同身份多角色差异化（需求清单第 4 条）：分组必须看**收窄之前**的全量画像卡 ——
+    # 资产准备页一次只点名一个资产，若只看收窄后的那一张，就永远看不到同批的另一个丫鬟，
+    # 也就没有任何依据把两人的形象区分开（后果是两条提示词重复、被查重门禁拦在生图之前）。
+    cards, differentiation_notes = apply_design_anchors(cards, all_cards=all_scope_cards)
 
     categories = resolve_requested_categories(body.categories)
     if asset_only and not body.categories:
@@ -590,6 +603,8 @@ async def preview_image_prompts(
     warnings: list[str] = []
     if asset_only_note:
         warnings.append(asset_only_note)
+    # 同身份多角色被怎么区分开了（用户语言，页面直接展示；不含内部 ID 与接口名）
+    warnings.extend(differentiation_notes)
     if not cards:
         warnings.append("本次没有可用的实体画像卡，图片提示词只依据镜头文本生成，实体一致性可能较弱。")
     # 资料可用性预检：**只对本次请求涉及的资产**做（见 resolve_profile_scope）。
@@ -626,6 +641,7 @@ async def preview_image_prompts(
             body=body,
             target=target,
             warnings=warnings,
+            all_cards=all_scope_cards,
         )
 
     if dry_run.dry_run_enabled():
@@ -662,6 +678,7 @@ async def preview_image_prompts(
         shot_text=shot_text,
         project_context=project_context,
         body=body,
+        all_cards=all_scope_cards,
     )
     try:
         completion = await call_text_llm(prompt, target=target)
@@ -700,11 +717,14 @@ def _build_prompt(
     shot_text: str,
     project_context: str,
     body: ImagePromptPreviewRequest,
+    all_cards: list[EntityProfileCardRead] | None = None,
 ) -> str:
     extra = str(body.extra_instructions or "").strip()
     return IMAGE_PROMPT_TEMPLATE.safe_substitute(
         slot_list=build_slot_list_text(categories),
         entity_profiles=render_profile_cards(cards),
+        # 同身份多角色：把"必须逐个独立设计"的硬规则与具体名单写进提示词
+        differentiation_rules=render_differentiation_rules(all_cards or cards),
         shot_text=shot_text or ASSET_ONLY_SHOT_TEXT,
         project_context=project_context,
         style_hint=str(body.style_hint or "").strip() or "（未指定，按项目风格）",
@@ -762,6 +782,7 @@ async def _run_with_caller(
     body: ImagePromptPreviewRequest,
     target: TextLLMTarget | None,
     warnings: list[str],
+    all_cards: list[EntityProfileCardRead] | None = None,
 ) -> ImagePromptPreviewRead:
     prompt = _build_prompt(
         categories=categories,
@@ -769,6 +790,7 @@ async def _run_with_caller(
         shot_text=shot_text,
         project_context=project_context,
         body=body,
+        all_cards=all_cards,
     )
     raw_text = await llm_caller(prompt)
     slots, slot_warnings = _parse_and_build_slots(

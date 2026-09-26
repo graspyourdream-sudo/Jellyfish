@@ -174,6 +174,41 @@ def normalize_for_compare(text: Any) -> str:
     return _PUNCT_RE.sub("", str(text or "").strip().lower())
 
 
+def shared_boilerplate_phrases() -> tuple[str, ...]:
+    """由后端**确定性逐字补齐**的共享版式 / 风格 / 画质 / 负面词。
+
+    这些词来自 ``llm_orchestration.registry`` 的几张表，同一个槽位下
+    **每个资产拿到的都完全一样**，因此它们携带**零资产身份信息**。
+
+    为什么要单独列出来：角色设定图的版式词很长（左右分栏 + 三视图那一套），
+    它们参与整段相似度计算时，会把"本来就该完全相同"的部分算成"重复"——
+    后果是两个**真的被区分开**的角色也判成高度重复，卡在生图之前
+    （需求清单第 4 条的卡点形态之一）。
+    """
+    from app.services.studio.llm_orchestration import registry  # 延迟导入，避免导入环
+
+    phrases: list[str] = []
+    for rules in registry.SLOT_STYLE_RULES.values():
+        phrases.extend(rules)
+    for extra in registry.SLOT_NEGATIVE_EXTRA.values():
+        phrases.extend(extra)
+    phrases.extend(registry.STYLE_WORDS_BY_ASSET_TYPE.values())
+    phrases.append(registry.DEFAULT_STYLE_WORDS)
+    phrases.append(registry.DEFAULT_QUALITY_WORDS)
+    phrases.append(registry.DEFAULT_NEGATIVE_PROMPT)
+    return tuple(dict.fromkeys(str(item).strip() for item in phrases if str(item).strip()))
+
+
+def strip_shared_boilerplate(text: Any) -> str:
+    """去掉共享版式 / 风格 / 画质 / 负面词，只留**资产特有内容**（查重比较用）。"""
+    residue = normalize_for_compare(text)
+    for phrase in sorted(shared_boilerplate_phrases(), key=len, reverse=True):
+        key = normalize_for_compare(phrase)
+        if key:
+            residue = residue.replace(key, "")
+    return residue
+
+
 def strip_generic_words(text: Any, *, given_names: Iterable[str] = ()) -> str:
     """去掉资产名与通用摄影词，返回"剩下多少该资产特有的内容"。"""
     residue = normalize_for_compare(text)
@@ -308,14 +343,19 @@ def check_cross_asset_duplicates(
 
     **不同资产**拿到逐字相同/高度重复的内容 → 一条 409 冲突（同资产多槽位不算）。
     只与"不同 asset_key"比较，避免把同一资产的正面/侧面（本来就该一致）误判成冲突。
+
+    相似度比的是**剔掉共享版式词之后**的资产特有内容（见 :func:`strip_shared_boilerplate`）：
+    版式 / 画质 / 负面词由后端逐字补齐，人人相同，拿它们算相似度只会制造假冲突。
+    真正该拦的"内容没区分开"依然会拦（两个资产的资产特有内容一样时相似度仍是 100%）。
+    长度门槛 ``NEAR_DUPLICATE_MIN_CHARS`` 仍然按**原文**判定，
+    避免剔词之后文本变短、把本该查的资产整体跳过。
     """
     issues: list[PromptQualityIssue] = []
     normalized: list[tuple[str, str, str]] = []
     for asset_key, asset_name, text in items:
-        key = normalize_for_compare(text)
-        if len(key) < NEAR_DUPLICATE_MIN_CHARS:
+        if len(normalize_for_compare(text)) < NEAR_DUPLICATE_MIN_CHARS:
             continue
-        normalized.append((str(asset_key), str(asset_name), key))
+        normalized.append((str(asset_key), str(asset_name), strip_shared_boilerplate(text)))
 
     reported: set[tuple[str, str]] = set()
     for index, (left_key, left_name, left_text) in enumerate(normalized):
