@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.api.v1.routes.studio import (
     documents,
     chapters,
+    drama_plan,
     entities,
     files,
     image_pipeline,
@@ -45,4 +46,9 @@ router.include_router(jurilu_import.router, prefix="/jurilu-import", tags=["stud
 router.include_router(quick_skill.router, prefix="/quick-skill", tags=["studio/quick-skill"])
 router.include_router(llm_orchestration.router, prefix="/llm", tags=["studio/llm"])
 router.include_router(image_pipeline.router, prefix="/image-pipeline", tags=["studio/image-pipeline"])
+
+# 广告剧情流程：四个章节级端点 + 一个项目级"取可用空章节"入口（两条路由共用同一个模块，
+# 因此拆成两个 router 分别挂到 /chapters 与 /projects 前缀下）。
+router.include_router(drama_plan.router, prefix="/chapters", tags=["studio/drama-plan"])
+router.include_router(drama_plan.project_router, prefix="/projects", tags=["studio/drama-plan"])
 
