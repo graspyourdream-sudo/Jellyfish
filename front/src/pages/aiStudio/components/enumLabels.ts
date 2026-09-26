@@ -131,6 +131,28 @@ export const TASK_STATUS = enumSpec(
   '状态未识别',
 )
 
+/**
+ * 镜头生产状态（`ShotStatus` = `pending | generating | ready`）。
+ *
+ * 为什么不复用 `TASK_STATUS`：它的 `pending` 是「排队中」，而镜头这里是「待确认」——
+ * **同一串原值在不同业务对象上语义不同**，借用会把两处口径搅在一起。
+ *
+ * 标签与分镜列表页筛选器上的中文**逐字一致**（「待确认 / 生成中 / 已就绪」）：
+ * 同一份数据在全仓只允许一个名字（§9.1-19）。区域 6b 曾在本文件只读期间
+ * 于 `shots/shotStudioCopy.ts` 放了一张同型临时表并登记「需追加」——现按登记收敛到本文件，
+ * 那边改为 import（**枚举映射一处定义、全仓引用**，§7.1-4）。
+ */
+export const SHOT_STATUS = enumSpec(
+  'shotStatus',
+  ['pending', 'generating', 'ready'],
+  {
+    pending: '待确认',
+    generating: '生成中',
+    ready: '已就绪',
+  },
+  '状态待确认',
+)
+
 /** 资产类型（`asset_type` 原值）。 */
 export const ASSET_TYPE = enumSpec(
   'assetType',
@@ -619,6 +641,7 @@ export function guardStatusLabel(raw: string | null | undefined): string {
 export const ALL_ENUM_SPECS: readonly EnumSpec[] = [
   ASSET_OUTCOME,
   TASK_STATUS,
+  SHOT_STATUS,
   ASSET_TYPE,
   FRAME_TYPE,
   REFERENCE_MODE,

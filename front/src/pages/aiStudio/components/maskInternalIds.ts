@@ -26,7 +26,7 @@ const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
 const KEY_VALUE_RE = /\b(?:file_id|storage_key|asset_id|shot_id|chapter_id|service_task_id|source_task_id|video_task_id|provider_id)=\S+/gi
 const BARE_STORAGE_KEY_RE = /\bkey=[^\s）)]+/gi
 /** 后端提示里常直接写字段名（例如「该帧槽位没有 file_id」）——换成业务说法。 */
-const FIELD_NAME_RE = /\b(?:file_id|storage_key|video_prompt_source|shot_details)\b/gi
+const FIELD_NAME_RE = /\b(?:file_id|storage_key|video_prompt_source|shot_details|image_prompts|quality_verdict)\b/gi
 /**
  * 中文内部词汇（ASCII 的 `\b` 对中文字符不成立，所以必须单独一条正则）。
  * 顺序固定：长的在前（`推荐接口` 必须先于 `接口` 命中）。
@@ -37,6 +37,10 @@ const FIELD_NAME_LABELS: Record<string, string> = {
   storage_key: '存储位置',
   video_prompt_source: '提示词来源',
   shot_details: '镜头记录',
+  /* 审计 §7.3 的扩展项（区域 6 登记「需追加」）：这两个字段名会在后端提示语里出现，
+     不换掉就等于把字段名端上主区。 */
+  image_prompts: '图片提示词',
+  quality_verdict: '质量判定',
   推荐接口: '推荐结果',
   接口: '服务',
   槽位: '图片角度',
