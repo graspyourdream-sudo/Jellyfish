@@ -71,9 +71,14 @@ import { buildRequestStructureText } from '../../project/ProjectWorkbench/compon
 import {
   ASSET_OUTCOME_LABEL,
   ASSET_OUTCOME_TAG_COLOR,
+  buildResultRowTechnicalFields,
+  describeResultRowAddress,
   normalizeAssetResultRow,
   summarizeAssetResults,
 } from '../assetResultSummary'
+/* 「技术详情」折叠壳**全仓只有一份**（审计 §9 第 2 项）：第三层内容一律走它，
+   不许在 assets/** 里自建第二套 <details> 或「技术详情」标签。 */
+import { TechnicalDetailSection } from '../../project/ProjectWorkbench/components/workbench/TechnicalDetailCollapse'
 import { DisplayImageCard } from './DisplayImageCard'
 import { ProjectVisualStyleAndStyleFields } from '../../project/ProjectVisualStyleAndStyleFields'
 import { useProjectStyleOptions } from '../../project/useProjectStyleOptions'
@@ -779,7 +784,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       // P3 端点同进程内联执行：这里**直接拿到结果**（不再靠轮询一个永远不会被执行的任务行）
       const submitted = await promptDraft.submitNow()
       if (submitted?.dryRun) {
-        message.info('演练模式：未真实出图（DRY_RUN 开着），因此没有可采纳的图片。')
+        message.info('演练模式：没有真实出图，因此没有可采纳的图片。')
         return
       }
       const url = String(submitted?.url ?? '').trim()
@@ -890,7 +895,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       message.success(
         asPrimary
           ? '已采纳并设为定版（刷新后仍在，后续出图会以这张定版图片为准）'
-          : '已采纳到该槽位（刷新后仍在）',
+          : '已采纳到该角度（刷新后仍在）',
       )
       setSingleGenResult(null)
       await loadData()
@@ -1053,7 +1058,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
     if (Object.keys(edited).length === 0) {
       message.warning(
         blocked.length > 0
-          ? `没有可保存的提示词：有 ${blocked.length} 个槽位判定不可用，先按提示补好再保存。`
+          ? `没有可保存的提示词：有 ${blocked.length} 个角度判定不可用，先按提示补好再保存。`
           : '没有可保存的提示词',
       )
       return
@@ -1093,8 +1098,8 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         setImagePromptOpen(false)
         message.success(
           blocked.length > 0
-            ? `已保存 ${Object.keys(edited).length} 个槽位提示词；另有 ${blocked.length} 个槽位判定不可用，未保存`
-            : `已保存 ${Object.keys(edited).length} 个槽位提示词`,
+            ? `已保存 ${Object.keys(edited).length} 个角度提示词；另有 ${blocked.length} 个角度判定不可用，未保存`
+            : `已保存 ${Object.keys(edited).length} 个角度提示词`,
         )
         if (blocked.length > 0) {
           // 说清被拦下的是哪些、为什么（不静默丢弃）
@@ -1207,7 +1212,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         return
       }
       await updateImage(assetId, target.id, { file_id: fileId, format: 'png' })
-      message.success('已上传并写入槽位')
+      message.success('已上传并写入该角度')
       await loadData()
     } catch (error) {
       message.error(error instanceof Error ? error.message : '图片上传失败')
@@ -1444,12 +1449,26 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   )
 
   /**
+   * 单张结果的**第三层**字段（内部编号 / 完整图片地址 / 原始状态值）。
+   *
+   * 审计 §5.5-C 同一口径：主区不给地址（原来这一格是 `break-all` 直渲完整地址），
+   * 地址与内部编号只进默认收起的「技术详情」。
+   */
+  const singleGenTechnicalFields = useMemo(
+    () =>
+      singleGenResult?.row
+        ? buildResultRowTechnicalFields(normalizeAssetResultRow(singleGenResult.row))
+        : [],
+    [singleGenResult],
+  )
+
+  /**
    * 单张结果弹窗的行文案：除计数 / 原因 / 下一步之外，成功时补一句「采纳会做什么」，
    * 免得用户在成功场景下看不到采纳说明。
    */
   const singleGenAlertLines = useMemo(() => {
     const adoptHint =
-      '采纳会把图片下载入库并写进资产图片槽位（刷新后仍在）；设为定版后，后续出图会以这张定版图片为准，镜头也会读到它。'
+      '采纳会把图片下载入库并写进该资产的图片（刷新后仍在）；设为定版后，后续出图会以这张定版图片为准，镜头也会读到它。'
     if (singleGenSummary.detailLines.length === 0) return [adoptHint]
     return singleGenSummary.allSucceeded ? [...singleGenSummary.detailLines, adoptHint] : singleGenSummary.detailLines
   }, [singleGenSummary])
@@ -1483,9 +1502,9 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   const assetCopy = resultArtifactCopy((assetNavigateRelationType ?? 'character') as ImageAssetType)
   const hasPrimaryImage = images.some((img) => img.is_primary === true)
   const referenceBatchTooltip = referenceBatchAllowed
-    ? `用该资产已设为定版的图片提交批量出图，生成${assetCopy.label}（受 DRY_RUN 守卫）`
+    ? `用该资产已设为定版的图片提交批量出图，生成${assetCopy.label}（演练模式下不会真的提交）`
     : assetNavigateRelationType === 'costume'
-      ? `出图服务 V0 不支持服装（costume）；${BATCH_REFERENCE_FLOW_LABEL}也只对人物开放，服装设定图请手工上传或生成`
+      ? `当前版本的出图服务不支持服装；${BATCH_REFERENCE_FLOW_LABEL}也只对人物开放，服装设定图请手工上传或生成`
       : `${BATCH_REFERENCE_FLOW_LABEL}只对人物开放：${assetCopy.noun}会按提示词直接生成，不会带上已有图片${referenceBatchSupported ? '（本页的常规出图入口仍可用）' : ''}`
 
   if (!assetId) {
@@ -1612,7 +1631,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
               <div className="space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <Space wrap>
-                    <Tooltip title="调用大模型生成九类槽位的图片提示词；真实调用可能需要 10~120 秒，期间请勿关闭页面">
+                    <Tooltip title="调用大模型生成九个角度的图片提示词；真实调用可能需要 10~120 秒，期间请勿关闭页面">
                       <Button
                         size="small"
                         icon={<RobotOutlined />}
@@ -1652,11 +1671,10 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                     type="warning"
                     showIcon
                     style={{ marginBottom: 12 }}
-                    message="缺少项目作用域：出图已禁用"
+                    message="还不知道这个资产属于哪个项目，暂时不能出图"
                     description={
                       <span className="text-xs">
-                        从全局资产库直接打开时拿不到资产所属项目，出图无法定位资产。
-                        请先从「项目工作台 → 第 2 步 资产准备」进入本页，或
+                        请从「项目工作台 → 第 2 步 资产准备」进入本页，或
                         <Button
                           type="link"
                           size="small"
@@ -1674,7 +1692,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                   />
                 ) : null}
                 <div className="text-xs text-gray-400">
-                  图片提示词按槽位类别合并保存在该资产上；批量出图结果本页不落库，
+                  图片提示词按角度类别合并保存在该资产上；批量出图结果本页不落库，
                   请在对应角度卡片点「编辑」→ 选择历史生成图片 →「选中并更新当前角度」采纳。
                 </div>
                 <Row gutter={[16, 16]}>
@@ -1725,7 +1743,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                               编辑
                             </Button>
                             {slot.image ? (
-                              <Tooltip title="上传手头已有的图片文件，直接写入该角度槽位（不触发生图、不消耗额度）">
+                              <Tooltip title="上传手头已有的图片文件，直接写入该角度（不触发生图、不消耗额度）">
                                 <Upload
                                   showUploadList={false}
                                   accept=".jpg,.jpeg,.png,.webp,.gif,image/*"
@@ -1949,7 +1967,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       </Modal>
 
       <Modal
-        title="AI 生成图片提示词（九槽位）"
+        title="AI 生成图片提示词（九个角度）"
         open={imagePromptOpen}
         onCancel={() => setImagePromptOpen(false)}
         footer={
@@ -1985,11 +2003,11 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
               <Alert
                 type="warning"
                 showIcon
-                message="当前处于 DRY_RUN 守卫：以下提示词由占位逻辑拼装，并未真实调用大模型"
+                message="当前是演练模式：以下提示词由占位逻辑拼装，没有真实调用大模型"
                 description={
                   imagePromptDryRunReason
                     ? `拦截原因：${imagePromptDryRunReason}`
-                    : '守卫关闭后这里才是模型真实输出，请勿把占位内容当作最终提示词。'
+                    : '演练关闭后这里显示的才是模型真实生成的内容，请勿把占位内容当作最终结果使用。'
                 }
               />
             ) : null}
@@ -2038,7 +2056,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
               </div>
             ) : null}
             {imagePromptSlots.length === 0 ? (
-              <Empty description="没有返回任何槽位" />
+              <Empty description="没有返回任何角度" />
             ) : (
               imagePromptSlots.map((slot) => (
                 <div key={slot.category} className="rounded-md border border-gray-200 p-3 space-y-2">
@@ -2112,7 +2130,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             <Tooltip
               title={
                 singleGenResult?.url
-                  ? '把这张图下载入库并写进资产图片槽位'
+                  ? '把这张图下载入库并写进该资产的图片'
                   : '这条结果没有可采纳的图片地址，无法采纳入库'
               }
             >
@@ -2121,7 +2139,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                 loading={singleGenAdopting === 'slot'}
                 onClick={() => void adoptSingleGenResult(false)}
               >
-                采纳到该槽位
+                采纳到该角度
               </Button>
             </Tooltip>
             <Tooltip
@@ -2176,7 +2194,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                 ))}
                 {singleGenSummary.hasFailure && singleGenResult?.url ? (
                   <div className="text-red-600">
-                    注意：这条结果带地址但状态不是成功，采纳前请先确认该地址是否为 OSS 长期地址。
+                    注意：这条结果有图片地址、但没有成功记录，采纳前请先确认这张图是不是已经长期保存的那张。
                   </div>
                 ) : null}
               </div>
@@ -2186,8 +2204,8 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             <Alert
               type="warning"
               showIcon
-              message="上游没有给出失败原因"
-              description="接口只返回了失败状态，没有附带 message / detail.error_message；可让后端补充错误详情，或直接查出图服务日志。"
+              message="服务端没有给出失败原因"
+              description="可稍后重试这一项；若持续失败，请联系管理员。"
             />
           ) : null}
           {singleGenResult?.url ? (
@@ -2200,7 +2218,20 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
               description="没有拿到可以采纳的图片地址。如果图其实已经生成、只是没保存成功，按上面的提示稍后重试即可；持续失败请联系管理员。"
             />
           )}
-          <div className="text-[11px] text-gray-500 break-all">{singleGenResult?.url}</div>
+          {/* 审计 §4.6 模式 4：原来这里 `break-all` 直渲完整图片地址。
+              图片已经在上面的 <img> 里给用户看了，地址本身只留「技术详情」。 */}
+          <TechnicalDetailSection testId="single-gen-technical-detail">
+            <div>
+              <span className="text-slate-500">图片地址：</span>
+              <span className="font-mono break-all">{singleGenResult?.url || '未返回'}</span>
+            </div>
+            {singleGenTechnicalFields.map((field) => (
+              <div key={field.label}>
+                <span className="text-slate-500">{field.label}：</span>
+                <span className="font-mono break-all">{field.value}</span>
+              </div>
+            ))}
+          </TechnicalDetailSection>
           <div className="rounded bg-slate-50 px-3 py-2 text-[11px] leading-5 text-gray-600">
             <div className="font-medium">本次使用的提示词</div>
             <div className="whitespace-pre-wrap">{singleGenResult?.prompt}</div>
@@ -2217,14 +2248,19 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         width={880}
       >
         <div className="space-y-4">
-          <div className="text-xs text-gray-500">
-            <span>阶段：reference_batch</span>
-            <span className="ml-3">资产：{assetId ?? '-'}</span>
-            {referenceBatchResult?.project_id ? (
-              <span className="ml-3">项目：{referenceBatchResult.project_id}</span>
-            ) : null}
-            <span className="ml-3">守卫状态：{referenceBatchResult?.guard_status || '未知'}</span>
-          </div>
+          {/* 审计 §6.1（任务号一律进技术详情）+ §5.5-C：原来主区这一行直接打着
+              `阶段：reference_batch` / `资产：{UUID}` / `项目：{UUID}` / `守卫状态：{后端原值}`，
+              四个都是第三层内容（内部编码 / 内部 ID / 后端原始状态值）。
+              现在整行收进默认收起的「技术详情」——**信息一条都没删**，只是不再摆在主区。 */}
+          <TechnicalDetailSection testId="reference-batch-technical-detail">
+            <div className="space-y-0.5">
+              <div>提交类型代码：reference_batch</div>
+              <div>资产编号：{assetId ?? '未提供'}</div>
+              <div>项目编号：{referenceBatchResult?.project_id ?? '未提供'}</div>
+              <div>演练开关原始状态：{referenceBatchResult?.guard_status || '未提供'}</div>
+              <div>汇总计数来源：{referenceBatchSummary.countSource}</div>
+            </div>
+          </TechnicalDetailSection>
           {/*
             结果汇总：以前只显示「共 N 个提交结果」，既看不出成功几条 / 失败几条，
             也把 `partial_failed`（上游图片已生成、OSS 上传失败）混在列表里当正常状态。
@@ -2262,8 +2298,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
               <span className="mx-2 text-gray-300">/</span>
               <span className="font-medium">失败 {referenceBatchSummary.failedCount} 条</span>
               <span className="ml-3 text-xs text-gray-500">
-                （共 {referenceBatchSummary.total} 条，OSS 长期地址就绪 {referenceBatchSummary.ossReadyCount} 条，
-                计数来源：{referenceBatchSummary.countSource}）
+                （共 {referenceBatchSummary.total} 条，其中 {referenceBatchSummary.ossReadyCount} 条已保存为长期图片）
               </span>
               {referenceBatchSummary.mismatchNote ? (
                 <div className="text-xs text-orange-600">{referenceBatchSummary.mismatchNote}</div>
@@ -2274,8 +2309,8 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             <Alert
               type="warning"
               showIcon
-              message="DRY_RUN 守卫为 ON：没有真的调用出图服务"
-              description="下面的 service_task_id 是占位值，oss_url 为空（DRY_RUN 不会调用出图服务、也不会上传 OSS）。"
+              message="当前是演练模式：没有真的提交出图"
+              description="所以下面的结果只是占位内容，不会产生真实图片，也没有上传长期存储。关闭演练模式后才会真正出图。"
             />
           ) : null}
           {referenceBatchWarnings.length > 0 ? (
@@ -2304,17 +2339,20 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                 // 逐行也走同一套归一化：partial_failed 在这里同样不是绿色，
                 // 而且会尽量把 detail.error_message 里的真实原因显示出来。
                 const normalized = normalizeAssetResultRow(row as unknown)
+                /* 审计 §5.5-C：这一行原来把四种泄漏挤在一起 ——
+                   模式 1 `{row.source_asset_id}`、模式 2 字面标签 `oss_url：`、
+                   模式 3 `DRY_RUN 下为空，未上传 OSS`、模式 4 完整 OSS 地址同时作
+                   链接文本与 href。现在：主区只留**中文结论 + 动作**（「查看图片」），
+                   地址与内部编号全部交给下面默认收起的「技术详情」（第三层）。 */
+                const addressView = describeResultRowAddress(normalized)
+                const technicalFields = buildResultRowTechnicalFields(normalized)
                 return (
                   <div
                     key={`${row.source_asset_id}_${row.service_task_id}`}
                     className="rounded-md border border-gray-200 p-3 space-y-1 text-sm"
                   >
                     <div>
-                      service_task_id：
-                      <span className="font-mono">{row.service_task_id || '（空）'}</span>
-                    </div>
-                    <div>
-                      status：
+                      本次结果：
                       {/* 审计 §6.3 / §5.5-B5：原来直渲 `normalized.rawStatus`（succeeded / partial_failed
                           / dry_run 原值）。主区一律用 ASSET_OUTCOME_LABEL 的中文口径；
                           原始 status 与任务号一起挪到下面默认收起的「技术详情」里。 */}
@@ -2326,25 +2364,20 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                           部分失败：图片已生成，但没能保存成长期图片，暂时不能采纳
                         </span>
                       ) : null}
-                      <span className="text-xs text-gray-400">{row.source_asset_id}</span>
                     </div>
                     <div>
-                      oss_url：
-                      {row.oss_url ? (
-                        <a href={row.oss_url} target="_blank" rel="noreferrer">
-                          {row.oss_url}
+                      图片长期地址：
+                      <span className="text-gray-600">{addressView.text}</span>
+                      {addressView.link ? (
+                        <a
+                          className="ml-2"
+                          href={addressView.link.href}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {addressView.link.text}
                         </a>
-                      ) : (
-                        <span className="text-gray-400">
-                          （
-                          {row.dry_run
-                            ? 'DRY_RUN 下为空，未上传 OSS'
-                            : normalized.url
-                              ? `未上传 OSS；上游图片地址：${normalized.url}`
-                              : '未返回'}
-                          ）
-                        </span>
-                      )}
+                      ) : null}
                     </div>
                     {normalized.errorText ? (
                       <div className={normalized.isFailure ? 'text-xs text-red-500' : 'text-xs text-gray-500'}>
@@ -2355,10 +2388,10 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                       <Tooltip
                         title={
                           adoptableUrl(row)
-                            ? '下载入库并写入资产图片槽位（同时设为定版）'
+                            ? '下载入库并写入该资产的图片（同时设为定版）'
                             : normalized.isFailure
-                              ? '这条结果没有可采纳的图片地址（未成功上传 OSS），无法采纳入库'
-                              : 'DRY_RUN 下没有真实图片地址，无法采纳'
+                              ? '这条结果没有可采纳的图片地址（没有成功保存到长期存储），无法采纳入库'
+                              : '演练模式下没有真实图片地址，无法采纳'
                         }
                       >
                         <Button
@@ -2372,6 +2405,20 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                         </Button>
                       </Tooltip>
                     </div>
+                    {technicalFields.length > 0 ? (
+                      <TechnicalDetailSection
+                        className="mt-2"
+                        testId="reference-batch-row-technical-detail"
+                        hint="这一条的原始编号与图片地址（含存储位置），只用于排查问题时对照。"
+                      >
+                        {technicalFields.map((field) => (
+                          <div key={field.label}>
+                            <span className="text-slate-500">{field.label}：</span>
+                            <span className="font-mono break-all">{field.value}</span>
+                          </div>
+                        ))}
+                      </TechnicalDetailSection>
+                    ) : null}
                   </div>
                 )
               })}
@@ -2381,13 +2428,13 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             type="info"
             showIcon
             message="出图结果需要人工采纳才落库"
-            description="点上面的「采纳到资产」会下载入库、写入资产图片槽位并设为定版（刷新后仍在）。也可以对目标角度点「编辑」→ 选择历史生成图片 →「选中并更新当前角度」。"
+            description="点上面的「采纳到资产」会下载入库、写入该资产的图片并设为定版（刷新后仍在）。也可以对目标角度点「编辑」→ 选择历史生成图片 →「选中并更新当前角度」。"
           />
         </div>
       </Modal>
 
       <Modal
-        title="出图需要项目作用域：请选择项目"
+        title="出图前需要先选一个项目"
         open={projectIdModalOpen}
         onCancel={() => {
           pendingProjectActionRef.current = null
@@ -2401,9 +2448,9 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       >
         <div className="space-y-3">
           <div className="text-sm text-gray-600">
-            当前页面拿不到该资产所属的项目（场景 / 道具 / 服装 / 演员的资产读模型不含 project_id，
-            直接从资产库打开时 URL 里也没有项目线索）。出图必须知道项目才能定位资产。
-            推荐做法是从「项目工作台 → 第 2 步 资产准备」进入本页；也可以在这里直接选一个项目。
+            这一页还不知道这个资产属于哪个项目，所以暂时不能出图。出图必须先知道项目，
+            才能定位到要生成的那张图。推荐做法是从「项目工作台 → 第 2 步 资产准备」进入本页；
+            也可以在这里直接选一个项目。
           </div>
           <Select
             showSearch
@@ -2419,7 +2466,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
           />
           {projectOptions.length === 0 && !projectOptionsLoading ? (
             <div className="text-xs text-gray-400">
-              没有读到任何项目；项目 ID 也可以在工作台地址栏 `/projects/&lt;项目 ID&gt;` 中查看。
+              没有读到任何项目；也可以从项目工作台的地址里找到项目。
             </div>
           ) : null}
         </div>

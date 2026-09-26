@@ -1039,3 +1039,111 @@ export function summarizeSingleAssetResult(
 export function formatAssetCounts(summary: AssetResultSummary): string {
   return summary.countsText
 }
+
+/* ------------------------------------- 单条结果行的三层分层（审计 §5.5-C 口径） */
+
+/**
+ * 单条结果行「图片长期地址」这一格的**主区口径**。
+ *
+ * ## 为什么单独抽成纯函数
+ *
+ * 审计 §5.5-C（`site/content/docs/plans/frontend-leak-audit-2026-09-26.md`）指出
+ * 资产编辑页批量结果面板的**同一行里挤了四种泄漏**：
+ *
+ * | 模式 | 原样上屏的东西 |
+ * |---|---|
+ * | 1 | `{row.source_asset_id}`（来源资产 UUID） |
+ * | 2 | 字面标签 `oss_url：`（后端字段名） |
+ * | 3 | `DRY_RUN 下为空，未上传 OSS` |
+ * | 4 | `<a href={row.oss_url}>{row.oss_url}</a>`（**完整 OSS 地址同时作链接文本与 href**） |
+ *
+ * 修法必须落在**渲染点/映射层**（§5.6：泄漏的根因是「渲后端值」而不是「写死后端值」），
+ * 而渲染点在 `.tsx` 里、`node --test` 加载不了 —— 所以把这一格的口径抽成纯函数，
+ * 让「主区只给动作、不给地址」这条断言**可被真的跑起来验证**（而不是只做源码正则）。
+ *
+ * ## 三条硬口径
+ *
+ * 1. **主区绝不出现地址本身**：`text` 只回答「有没有保存到长期存储」，`link.text`
+ *    是固定动作词（「查看图片」/「查看临时图片」）—— 链接本身不算泄漏，但**可见文本不许是地址**。
+ * 2. **不删用户要看的信息**：能不能打开这张图（`link`）、有没有上传成功（`text`）都留在主区。
+ * 3. **地址只进技术详情**：完整地址（含 bucket / prefix / object key）由
+ *    `buildResultRowTechnicalFields()` 交给默认收起的折叠区。
+ */
+export type AssetResultRowAddressView = {
+  /** 主区中文结论（**绝不含地址**） */
+  readonly text: string
+  /** 可打开图片时的链接；`text` 是链接可见文本，固定为动作词 */
+  readonly link: { readonly href: string; readonly text: string } | null
+}
+
+/** 已保存到长期存储时，主区那一格说的结论。 */
+export const ASSET_RESULT_ADDRESS_SAVED_TEXT = '已上传到长期存储'
+/** 只有临时地址、还没保存到长期存储时的结论。 */
+export const ASSET_RESULT_ADDRESS_TEMP_TEXT = '还没有上传到长期存储'
+/** 演练模式（没有真实出图、也没有上传）。口径来源：审计 §5.5-C 建议文案。 */
+export const ASSET_RESULT_ADDRESS_DRY_RUN_TEXT = '当前是演练模式，没有上传长期存储'
+/** 连可打开的地址都没有。 */
+export const ASSET_RESULT_ADDRESS_MISSING_TEXT = '还没有可查看的图片'
+/** 链接的可见文本（动作词，**不是地址**）。 */
+export const ASSET_RESULT_VIEW_IMAGE_TEXT = '查看图片'
+/** 只有临时地址时链接的可见文本（让用户知道这张图还不是长期资产）。 */
+export const ASSET_RESULT_VIEW_TEMP_IMAGE_TEXT = '查看临时图片'
+
+/** 演练占位地址（后端自己也会拒），不可打开、也不该给链接。 */
+function isOpenableImageUrl(url: string): boolean {
+  if (!/^https?:\/\//i.test(url)) return false
+  if (url.includes('dry-run.invalid')) return false
+  return true
+}
+
+/** 单条结果行 → 主区「图片长期地址」格的口径。 */
+export function describeResultRowAddress(normalized: NormalizedAssetResult): AssetResultRowAddressView {
+  const url = String(normalized?.url ?? '').trim()
+  if (normalized?.dryRun === true) {
+    return { text: ASSET_RESULT_ADDRESS_DRY_RUN_TEXT, link: null }
+  }
+  const openable = isOpenableImageUrl(url)
+  if (normalized?.ossReady === true) {
+    return {
+      text: ASSET_RESULT_ADDRESS_SAVED_TEXT,
+      link: openable ? { href: url, text: ASSET_RESULT_VIEW_IMAGE_TEXT } : null,
+    }
+  }
+  if (openable) {
+    return { text: ASSET_RESULT_ADDRESS_TEMP_TEXT, link: { href: url, text: ASSET_RESULT_VIEW_TEMP_IMAGE_TEXT } }
+  }
+  return { text: ASSET_RESULT_ADDRESS_MISSING_TEXT, link: null }
+}
+
+/** 技术详情层的一行（标签 + 值）。 */
+export type AssetResultRowTechnicalField = {
+  /** 中文标签 —— 第三层**允许**写字段名，但这里刻意用中文（见下） */
+  readonly label: string
+  readonly value: string
+}
+
+/**
+ * 单条结果行 → **第三层（默认收起的「技术详情」）**字段：内部编号 + 完整地址 + 原始状态值。
+ *
+ * 标签刻意写**中文**（而不是 `oss_url：` / `source_asset_id：`）：审计 §4.6 模式 2 点名
+ * 「后端字段名直渲」本身是一种泄漏；第三层的作用是「让用户查得到」，用中文标签 +
+ * 原值同样查得到，而且折叠标题在收起态也可见 —— 标题干净是 §2.1 判定铁律的要求。
+ *
+ * `value` 里就是**原样**的内部信息（UUID / 完整 OSS 地址含 bucket + prefix + object key），
+ * 所以它**只能**出现在默认收起的折叠区里。
+ */
+export function buildResultRowTechnicalFields(
+  normalized: NormalizedAssetResult,
+): AssetResultRowTechnicalField[] {
+  const record = asRecord(normalized?.raw)
+  const url = String(normalized?.url ?? '').trim()
+  const fields: AssetResultRowTechnicalField[] = [
+    { label: '提交编号', value: readString(record, ['service_task_id', 'serviceTaskId']) },
+    { label: '来源资产编号', value: readString(record, ['source_asset_id', 'sourceAssetId']) },
+    { label: '图片长期地址', value: normalized?.ossReady === true ? url : '' },
+    { label: '图片临时地址', value: normalized?.ossReady === true ? '' : url },
+    { label: '原始状态值', value: String(normalized?.rawStatus ?? '') },
+    { label: '失败原因原文', value: normalized?.hasUpstreamError === true ? String(normalized.errorText ?? '') : '' },
+  ]
+  return fields.filter((field) => field.value !== '')
+}
