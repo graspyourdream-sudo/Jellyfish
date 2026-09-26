@@ -274,11 +274,15 @@ test('保存来源：改过正文或没有令牌一律降到 manual', () => {
   assert.equal(resolveSaveOrigin({ origin: 'jurilu_import', edited: true, draftToken: '' }), 'jurilu_import')
 })
 
-test('租约 busy 的中文提示带上镜头编号与后端原因', () => {
+test('租约 busy 的中文提示带上镜头编号与中文原因（后端原文过管道，且不回显机器码）', () => {
   const text = formatBusyNotice('S003', '该镜头正在生成中（120 秒后租约自动释放；同一镜不允许并发生成，避免重复付费）。')
   assert.match(text, /^S003 正在生成中，已跳过/)
   assert.match(text, /同一镜不允许并发生成/)
   assert.equal(formatBusyNotice('S004', ''), 'S004 正在生成中，已跳过')
+  // 审计 §4.5 模式 6：后端原文里夹内部标识时必须被掩码，不许原样上屏
+  const masked = formatBusyNotice('S005', '该镜头正在生成中（shot_id=9f3c1a2b-0000-4000-8000-000000000001）。')
+  assert.ok(!masked.includes('9f3c1a2b-0000-4000-8000-000000000001'), `内部编号漏上屏：${masked}`)
+  assert.ok(!/shot_id=/.test(masked), `内部字段名漏上屏：${masked}`)
 })
 
 test('非生成结果收尾：原状态是失败/已完成就写回去，claim 不改动它的观感', () => {
@@ -378,5 +382,7 @@ test('状态中文文案：已中断与未开始分开，不混淆', () => {
   assert.equal(describeDraftStatus('running'), '生成中')
   assert.equal(sourceLabel('skill'), '一键技能生成')
   assert.equal(sourceLabel(''), '来源未标记')
-  assert.equal(sourceLabel('weird_source'), 'weird_source')
+  /* 审计 §4.5 模式 3（`:502`）：旧期望是 `sourceLabel('weird_source') === 'weird_source'`
+     （钉住「未登记就回显原值」）；新口径是**绝不回显原值**，统一中文兜底。 */
+  assert.equal(sourceLabel('weird_source'), '来源未标记')
 })

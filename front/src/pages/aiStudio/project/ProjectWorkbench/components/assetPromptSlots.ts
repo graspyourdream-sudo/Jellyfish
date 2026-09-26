@@ -55,6 +55,9 @@ export const ASSET_PROMPT_CATEGORY_LABEL: Record<string, string> = {
 export const ASSET_PROMPT_UNSUPPORTED_SLOT_TEXT = '暂时不能一键生成'
 export const ASSET_PROMPT_UNSUPPORTED_STATE_TEXT = '这一类资产暂时不能一键生成'
 export const ASSET_PROMPT_EMPTY_EXISTING_TEXT = '—'
+/** 未登记的槽位码 / 类型码的中文兜底（**绝不回显后端原值**，审计 §1.2 模式 3）。 */
+export const ASSET_PROMPT_SLOT_FALLBACK_TEXT = '图片提示词'
+export const ASSET_PROMPT_TYPE_FALLBACK_TEXT = '其它类型'
 
 /** 资产类型的中文名（与 `assetProduction.ASSET_TYPE_LABEL` 同口径）。 */
 export const ASSET_PROMPT_TYPE_LABEL: Record<AssetPromptAssetType, string> = {
@@ -152,9 +155,15 @@ export function builtinPromptSlotFor(assetType: AssetPromptAssetType): string {
   return ASSET_PROMPT_CATEGORY[assetType] ?? ''
 }
 
-/** 内置兜底的中文槽位名。 */
+/**
+ * 内置兜底的中文槽位名。
+ *
+ * 审计 §4.5 模式 3（`:236` 同款）：改前是 `ASSET_PROMPT_CATEGORY_LABEL[category] ?? category`，
+ * 未登记的槽位码（`xxx_image_front` 这种后端原值）会原样回显到表里。
+ * 现在未登记统一「图片提示词」—— **绝不回显原值**（§1.2 模式 3 的口径）。
+ */
 export function builtinPromptSlotLabel(category: string): string {
-  return ASSET_PROMPT_CATEGORY_LABEL[category] ?? category
+  return ASSET_PROMPT_CATEGORY_LABEL[category] ?? ASSET_PROMPT_SLOT_FALLBACK_TEXT
 }
 
 /** 后端槽位表里是否有这个资产类型的**正面**槽位（先按 entity_type + `_front` 精确匹配）。 */
@@ -220,9 +229,10 @@ export function resolveAssetPromptSlot(
 export function describePromptRowAsset(row: Pick<PromptSlotRowLike, 'name' | 'type'>): string {
   const name = String(row.name ?? '').trim() || '（未命名资产）'
   const rawType = String(row.type ?? '').trim()
+  // 未登记的资产类型码也不回显原值（审计 §4.5 模式 3 的同型兜底）
   const type = rawType
-    ? (ASSET_PROMPT_TYPE_LABEL as Record<string, string>)[rawType] ?? rawType
-    : '未知类型'
+    ? (ASSET_PROMPT_TYPE_LABEL as Record<string, string>)[rawType] ?? ASSET_PROMPT_TYPE_FALLBACK_TEXT
+    : ASSET_PROMPT_TYPE_FALLBACK_TEXT
   return `${name}（${type}）`
 }
 
@@ -233,7 +243,7 @@ export function describePromptRowSlot(row: Pick<PromptSlotRowLike, 'supported' |
   if (!category) return ASSET_PROMPT_UNSUPPORTED_SLOT_TEXT
   const label = String(row.label ?? '').trim()
   if (label) return label
-  return ASSET_PROMPT_CATEGORY_LABEL[category] ?? category
+  return ASSET_PROMPT_CATEGORY_LABEL[category] ?? ASSET_PROMPT_SLOT_FALLBACK_TEXT
 }
 
 /** 「已有提示词」列的文案：N 字 / —。 */
@@ -282,7 +292,7 @@ export function buildUnsupportedSlotAlert(
   const count = rows.filter((row) => !row.supported).length
   if (count === 0) return null
   const typeText = types
-    .map((type) => (ASSET_PROMPT_TYPE_LABEL as Record<string, string>)[type] ?? type)
+    .map((type) => (ASSET_PROMPT_TYPE_LABEL as Record<string, string>)[type] ?? ASSET_PROMPT_TYPE_FALLBACK_TEXT)
     .join('、')
   return {
     count,
@@ -303,7 +313,7 @@ export function describeServerSlotPendingNote(
     new Set(
       rows
         .filter((row) => row.supported && row.generateSupported !== true)
-        .map((row) => (ASSET_PROMPT_TYPE_LABEL as Record<string, string>)[String(row.type)] ?? String(row.type)),
+        .map((row) => (ASSET_PROMPT_TYPE_LABEL as Record<string, string>)[String(row.type)] ?? ASSET_PROMPT_TYPE_FALLBACK_TEXT),
     ),
   )
   if (pending.length === 0) return ''

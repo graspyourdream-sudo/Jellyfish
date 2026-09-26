@@ -25,6 +25,7 @@ import type {
   PromptBoardOrigin,
   PromptBoardShot,
 } from '../../../../../services/llmPipelineApi'
+import { toUserFacingText } from '../../../components/userFacingMessage.ts'
 
 /* ------------------------------------------------------------------ 逐镜阶段 */
 
@@ -399,11 +400,18 @@ export function restorePlanFor(prev: ShotDraftStatus | undefined | null): DraftR
   return empty
 }
 
-/** 服务端拒抢租约时的中文提示（"该镜头正在生成中，已跳过"）。 */
+/**
+ * 服务端拒抢租约时的中文提示（"这一镜正在生成中，已跳过"）。
+ *
+ * 审计 §4.5 模式 6（`:406`）：改前是 `` `${label} 正在生成中，已跳过｜${detail}` ``，
+ * `detail` 直接取后端 `claim.reason` 原文。现在这一段先过统一管道
+ * （掩码 → 洗句 → 业务化改写 → 中文兜底），后端原值不会原样上屏。
+ */
 export function formatBusyNotice(code: string, reason: string): string {
-  const label = String(code || '').trim() || '该镜头'
+  const label = String(code || '').trim() || '这一镜'
   const detail = String(reason || '').trim()
-  return detail ? `${label} 正在生成中，已跳过｜${detail}` : `${label} 正在生成中，已跳过`
+  if (!detail) return `${label} 正在生成中，已跳过`
+  return `${label} 正在生成中，已跳过：${toUserFacingText(detail, '这一镜正在生成，等它跑完再试')}`
 }
 
 /**
@@ -487,7 +495,8 @@ export function draftRestoreNotice(statuses: ShotDraftStatus[]): string {
   if (pending) parts.push(`未开始 ${pending} 镜`)
   const missing = failed + interrupted + pending
   const tail = missing ? `；可重试 ${missing} 镜（已完成的不会重发）` : '；没有需要重试的镜头'
-  return `服务端草稿：共 ${total} 镜 · ${parts.join(' · ')}${tail}`
+  /* 审计 §4.5 模式 6（`:485`）：「服务端草稿」是开发视角的说法，主区改「上次生成到」。 */
+  return `上次生成到：共 ${total} 镜 · ${parts.join(' · ')}${tail}`
 }
 
 const KNOWN_LABELS: Record<string, string> = {
@@ -498,11 +507,17 @@ const KNOWN_LABELS: Record<string, string> = {
   skill: '一键技能生成',
 }
 
-/** 正式提示词来源的中文标签（读不出来时原样回显，不猜）。 */
+/**
+ * 正式提示词来源的中文标签。
+ *
+ * 审计 §4.5 模式 3（`:502` 的 `return KNOWN_LABELS[key] ?? key`）：
+ * 未登记的来源码会**原样回显**（`weird_source` 这种英文原值直接上卡片）。
+ * 现在未知来源统一「来源未标记」，绝不回显原值（§1.2 模式 3 的口径）。
+ */
 export function sourceLabel(source: string): string {
   const key = String(source || '').trim()
   if (!key) return '来源未标记'
-  return KNOWN_LABELS[key] ?? key
+  return KNOWN_LABELS[key] ?? '来源未标记'
 }
 
 /** 后端草稿状态 → 中文（含"已中断"细分），页面文案与测试共用一份。 */

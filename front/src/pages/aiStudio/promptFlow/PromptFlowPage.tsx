@@ -234,13 +234,14 @@ const PromptFlowPage: React.FC = () => {
           description={
             <div>
               <div>
-                <b>导入</b>：粘贴巨日禄 Cookie，把分镜提示词拉下来写到指定章节的镜头上（来源标记 jurilu）。
+                {/* §9.1-1：枚举原名 `jurilu` 必须换成显示名「巨日禄导入」；同一个判定的同型残留。 */}
+                <b>导入</b>：粘贴巨日禄 Cookie，把分镜提示词拉下来写到指定章节的镜头上（来源记为「巨日禄导入」）。
               </div>
               <div>
-                <b>交付</b>：把 jurilu 来源的提示词导出成 TXT（带 BOM），拿去其他平台生成视频。
+                <b>交付</b>：把「巨日禄导入」的提示词导出成 TXT（带 BOM），拿去其他平台生成视频。
               </div>
               <div>
-                <b>生成</b>：选一个导演 Skill，填需求，让模型产出一条成品提示词；可导出 TXT，也可写回镜头（来源标记 skill）。
+                <b>生成</b>：选一个导演技能，填需求，让模型产出一条成品提示词；可导出 TXT，也可写回镜头（来源记为「一键技能生成」）。
               </div>
             </div>
           }
@@ -395,16 +396,22 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
 
   const canSubmit = Boolean(projectId && chapterId && url.trim())
 
-  /** 提交前的凭证填写护栏：Authorization 框只接**单个** Authorization 值，整串 Cookie 属于 Cookie 框。 */
+  /**
+   * 提交前的凭证填写护栏：登录凭证框只接**单个**凭证值，整串 Cookie 属于 Cookie 框。
+   *
+   * 审计 §4.5 模式 4（`:402`）：改前主区文案里直接写 `Authorization` / `Referer`
+   * 这类原始请求头名。按建议口径统一换成用户语言（登录凭证 / 来源页）；
+   * 代码里判断的仍然是真实请求头（`Authorization=`），只有**给用户看的那一句**变了。
+   */
   const juriluCredentialBlocked = useCallback(() => {
     const raw = authorization.trim()
     if (raw.includes('Authorization=') || raw.includes(';')) {
-      message.error('Authorization 框收到的是整串 Cookie：请把它放进上面的 Cookie 框，Authorization 框留空（模式选「不发送（仅 Cookie）」）')
+      message.error('登录凭证框收到的是整串 Cookie：请把它放进上面的 Cookie 框，登录凭证框留空（发送方式选「不发送（仅 Cookie）」）')
       return true
     }
     if (!referer.trim()) {
-      // Referer 留空也能跑（后端会用页面 URL 兜底），这里只提示更稳的填法
-      message.info('Referer 留空将默认使用上面的页面 URL（后端兜底）')
+      // 来源页留空也能跑（后端会用页面 URL 兜底），这里只提示更稳的填法
+      message.info('来源页留空将默认使用上面的页面 URL')
     }
     return false
   }, [authorization, referer])
@@ -588,14 +595,15 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         <Input.TextArea
           style={{ marginTop: 4 }}
           rows={3}
-          placeholder="粘贴整段 Cookie 字符串（应包含开头的 Authorization= 项）"
+          placeholder="粘贴整段 Cookie 字符串（应包含开头的登录凭证项）"
           value={cookie}
           onChange={(e) => {
             const next = e.target.value
             setCookie(next)
             if (!authModeTouched && next.includes('Authorization=')) setAuthMode('none')
             if (next && !next.includes('Authorization=')) {
-              message.warning('Cookie 里没有 Authorization= 项，可能不是完整 Cookie（请用「复制全部 Cookie」）')
+              /* 审计 §4.5 模式 4：用户可见的那一句不写原始请求头名。 */
+              message.warning('Cookie 里没有登录凭证项，可能不是完整 Cookie（请用「复制全部 Cookie」）')
             }
           }}
           autoComplete="off"
@@ -607,22 +615,22 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         items={[
           {
             key: 'advanced',
-            label: '高级选项（Authorization / Referer / API 覆盖 / 写入开关）',
+            label: '高级选项（登录凭证 / 来源页 / 接口地址覆盖 / 是否写回）',
             children: (
               <Space direction="vertical" size="small" style={{ width: '100%' }}>
                 <Row gutter={16}>
                   <Col span={12}>
-                    <Text>Authorization（可留空）</Text>
+                    <Text>登录凭证（可留空）</Text>
                     <Input.Password
                       style={{ marginTop: 4 }}
-                      placeholder="单个 Authorization 值（整串 Cookie 请放 Cookie 框并留空这里）"
+                      placeholder="单个登录凭证值（整串 Cookie 请放上面的 Cookie 框，这里留空）"
                       value={authorization}
                       onChange={(e) => setAuthorization(e.target.value)}
                       autoComplete="off"
                     />
                   </Col>
                   <Col span={12}>
-                    <Text>Authorization 模式</Text>
+                    <Text>登录凭证发送方式</Text>
                     <Select
                       style={{ width: '100%', marginTop: 4 }}
                       value={authMode}
@@ -641,7 +649,7 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
                 </Row>
                 <Row gutter={16}>
                   <Col span={12}>
-                    <Text>Referer 覆盖（可留空）</Text>
+                    <Text>来源页覆盖（可留空）</Text>
                     <Input
                       style={{ marginTop: 4 }}
                       value={referer}
@@ -650,7 +658,7 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
                     />
                   </Col>
                   <Col span={12}>
-                    <Text>API 覆盖地址（可留空）</Text>
+                    <Text>接口地址覆盖（可留空）</Text>
                     <Input
                       style={{ marginTop: 4 }}
                       placeholder="默认从页面 URL 推断"
@@ -1169,7 +1177,7 @@ const PromptDeliveryPanel: React.FC<{ projectId?: string }> = ({ projectId }) =>
             <Alert
               type="warning"
               showIcon
-              message="这个范围内没有可导出的提示词（只认来源为 jurilu 且有正文的）"
+              message="这个范围内没有可导出的提示词（只导出「巨日禄导入」且有正文的那些）"
             />
           )}
 
@@ -1546,7 +1554,7 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         })
       const data = res.data
       if (data?.saved) {
-        message.success('已写入镜头视频提示词（来源标记 skill）')
+        message.success('已写入镜头视频提示词（来源记为「一键技能生成」）')
         setWrittenToShot(true)
         // **只有确认写入正式列之后**才清对应草稿：草稿的使命到此结束
         if (chapterId) {

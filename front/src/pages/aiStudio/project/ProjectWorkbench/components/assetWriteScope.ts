@@ -36,9 +36,17 @@ const TYPE_LABEL: Record<string, string> = {
   costume: '服装',
 }
 
+/** 未登记的类型码的中文兜底（**绝不回显后端原值**，审计 §1.2 模式 3）。 */
+export const ASSET_SCOPE_TYPE_FALLBACK_TEXT = '其他类型'
+
+/**
+ * 类型名。它的返回值会拼进主区句子（「X 只属于当前项目：改了不影响别的项目」），
+ * 所以未登记的类型码**不许原样回显** —— 否则后端换一个类型码，主区就印上英文。
+ */
 export function assetScopeTypeLabel(assetType: unknown): string {
   const type = String(assetType ?? '').trim()
-  return TYPE_LABEL[type] ?? type
+  if (!type) return ASSET_SCOPE_TYPE_FALLBACK_TEXT
+  return TYPE_LABEL[type] ?? ASSET_SCOPE_TYPE_FALLBACK_TEXT
 }
 
 /* ------------------------------------------------------------ 页面上的一句说明 */

@@ -425,7 +425,11 @@ function readProfileFields(value: unknown): BasisProfileField[] {
     if (!text) return
     if (INTERNAL_FIELD_NAME.test(label)) return
     const known = PROFILE_FIELD_LABEL[label.toLowerCase()]
-    fields.push({ label: known ?? label, value: text })
+    /* 未登记的资料键若是机器码形态（`light_tone` 这种），**不许原样当标签**上屏
+       （审计 §1.2 模式 3 的同型兜底）；后端自己给的中文标签照旧原样用。 */
+    const fallback =
+      /^[a-zA-Z][a-zA-Z0-9_]*$/.test(label) ? '其他资料项' : label
+    fields.push({ label: known ?? fallback, value: text })
   }
   if (Array.isArray(value)) {
     value.forEach((item) => {
@@ -964,7 +968,8 @@ export function summarizeGenerationBasis(basis: GenerationBasis): string {
         : `资料来自：${describeStructuredSource(basis.structuredSource) || '未知来源'}`,
     )
   }
-  if (isBasisItemProvided(basis, 'scopedBasis')) parts.push(`本章依据 ${basis.scopedBasis.length} 条`)
+  /* 审计 §4.5「基准禁词命中」（同款 :967-973）：改前是「本章依据 N 条」，按建议口径改成用户语言。 */
+  if (isBasisItemProvided(basis, 'scopedBasis')) parts.push(`本章资料 ${basis.scopedBasis.length} 条`)
   if (isBasisItemProvided(basis, 'globalProfile')) parts.push('全局通用资料')
   if (isBasisItemProvided(basis, 'requestStructure')) parts.push('脱敏请求结构')
   if (isBasisItemProvided(basis, 'finalPrompts')) parts.push('本次采用的提示词')

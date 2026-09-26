@@ -14,6 +14,7 @@ import { Button, Checkbox, Empty, Tag, Tooltip } from 'antd'
 import { PictureOutlined } from '@ant-design/icons'
 
 import {
+  WORKBENCH_PROMPT_REGENERATION_MAIN_TEXT,
   WORKBENCH_STATUS_TONE,
   WORKBENCH_TAB_LABEL,
   isBatchEligible,
@@ -24,6 +25,7 @@ import {
   workbenchItemType,
   workbenchStatusKey,
   workbenchStatusLabel,
+  workbenchStatusNotice,
 } from './workbenchState.ts'
 import type { AssetWorkbenchItem } from './assetWorkbenchContract.ts'
 
@@ -88,7 +90,11 @@ export function AssetCardGrid(props: AssetCardGridProps) {
         const hasImg = item.image?.has_image === true
         const thumbnail = String(item.image?.thumbnail ?? '')
         const shotRefs = item.script_relation?.shot_refs ?? []
-        const reason = String(item.status?.reason ?? '')
+        /* 审计 §4.5 模式 6（`:158`）：改前这里把 `item.status?.reason` 原文渲在卡片正面
+           （原文来自 `assetWorkbenchContract.ts:249-250` 的 `toText(raw.reason)`，未掩码）。
+           现在卡片正面只放**按业务状态键映射出的中文结论**；后端原文不在这里渲染 ——
+           它的落点是「资产详情」抽屉里默认收起的「技术详情」（`AssetDetailDrawer`）。 */
+        const statusNotice = workbenchStatusNotice(item)
         return (
           <article
             key={key}
@@ -155,11 +161,13 @@ export function AssetCardGrid(props: AssetCardGridProps) {
                   {shotRefs.length > 6 ? <span className="text-[11px] text-gray-400">{`等 ${shotRefs.length} 个`}</span> : null}
                 </div>
               ) : null}
-              {reason ? <div className="text-[11px] text-red-500">{reason}</div> : null}
+              {statusNotice ? <div className="text-[11px] text-red-500">{statusNotice}</div> : null}
               {requiresNewPrompt ? (
                 <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
                   <div className="font-medium">提示词需要重新生成</div>
-                  <div>{(item.prompt?.quality?.reasons ?? []).filter(Boolean).join('；') || '这条提示词不足以出图，建议重新生成后再生成图片。'}</div>
+                  {/* 卡片正面只留写死的中文结论 + 按钮；后端 `quality.reasons[]` 数组
+                      只进「资产详情」抽屉的技术详情层（审计 §4.5 模式 6，`:162`）。 */}
+                  <div>{WORKBENCH_PROMPT_REGENERATION_MAIN_TEXT}</div>
                 </div>
               ) : null}
             </div>

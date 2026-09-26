@@ -11,7 +11,18 @@
 import type { ReactNode } from 'react'
 import { Button, Descriptions, Divider, Drawer, Empty, Space, Tag, Typography } from 'antd'
 
-import { profileFieldLabel, workbenchItemName, workbenchItemType, workbenchStatusLabel, WORKBENCH_TAB_LABEL } from './workbenchState.ts'
+import {
+  WORKBENCH_PROMPT_REGENERATION_MAIN_TEXT,
+  needsPromptRegeneration,
+  profileFieldLabel,
+  workbenchItemName,
+  workbenchItemType,
+  workbenchStatusLabel,
+  workbenchStatusNotice,
+  WORKBENCH_TAB_LABEL,
+} from './workbenchState.ts'
+import { TechnicalDetailSection } from './TechnicalDetailCollapse.tsx'
+import { buildUserFacingMessage } from '../../../../components/userFacingMessage.ts'
 import type { AssetWorkbenchItem } from './assetWorkbenchContract.ts'
 
 export type AssetDetailDrawerProps = {
@@ -45,6 +56,16 @@ export function AssetDetailDrawer(props: AssetDetailDrawerProps) {
   const shotRefs = item?.script_relation?.shot_refs ?? []
   const evidence = item?.script_relation?.evidence ?? []
   const promptText = String(item?.prompt?.text ?? '').trim()
+  /* 审计 §4.5 模式 6（`:63` 同款 `:135`）：主区只放**写死 / 枚举映射**的中文结论；
+     后端 `status.reason` 与 `prompt.quality.reasons[]` 原文（先掩码 + 洗过）进下面
+     默认收起的「技术详情」。 */
+  const statusNotice = item ? workbenchStatusNotice(item) : ''
+  const regeneration = item ? needsPromptRegeneration(item) : false
+  const statusReasonDetail = item?.status?.reason ? buildUserFacingMessage(item.status.reason).detail : ''
+  const qualityReasonDetails = ((item?.prompt?.quality?.reasons ?? []) as unknown[])
+    .map((raw) => (String(raw ?? '').trim() ? buildUserFacingMessage(raw).detail : ''))
+    .filter((text) => text.length > 0)
+  const hasTechnicalDetail = Boolean(statusReasonDetail) || qualityReasonDetails.length > 0
 
   return (
     <Drawer
@@ -60,7 +81,7 @@ export function AssetDetailDrawer(props: AssetDetailDrawerProps) {
         <div className="space-y-4">
           <Space size={8} wrap>
             <Tag bordered={false}>{workbenchStatusLabel(item)}</Tag>
-            {item.status?.reason ? <span className="text-[11px] text-red-500">{item.status.reason}</span> : null}
+            {statusNotice ? <span className="text-[11px] text-red-500">{statusNotice}</span> : null}
           </Space>
 
           <section>
@@ -127,12 +148,12 @@ export function AssetDetailDrawer(props: AssetDetailDrawerProps) {
             <div className="mb-1 flex items-center justify-between gap-2">
               <span className="text-xs font-medium text-slate-700">本次图片提示词</span>
               <Button size="small" onClick={() => onEditPrompt(item)}>
-                {item.prompt?.quality?.needs_regeneration ? '重新生成提示词' : '修改提示词'}
+                {regeneration ? '重新生成提示词' : '修改提示词'}
               </Button>
             </div>
-            {item.prompt?.quality?.needs_regeneration ? (
+            {regeneration ? (
               <div className="mb-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
-                {`提示词需要重新生成：${(item.prompt.quality.reasons ?? []).filter(Boolean).join('；') || '这条提示词不足以出图'}`}
+                {`提示词需要重新生成：${WORKBENCH_PROMPT_REGENERATION_MAIN_TEXT}`}
               </div>
             ) : null}
             <div className="whitespace-pre-wrap rounded bg-slate-50 px-2 py-2 text-[12px] leading-5 text-slate-700">
@@ -157,6 +178,19 @@ export function AssetDetailDrawer(props: AssetDetailDrawerProps) {
           <Typography.Text type="secondary" className="text-[11px]">
             这里的资料来自本章剧本与你的补充；重新分析不会覆盖你手工填过的内容。
           </Typography.Text>
+
+          {/* 技术详情（默认收起）：后端给的原因原文（已掩码 + 洗过）落在这里。
+              主区上面那两句是本页自己写的结论；两者各有断言（审计 §7.1-8 配套要求）。 */}
+          {hasTechnicalDetail ? (
+            <TechnicalDetailSection testId="asset-detail-technical-detail">
+              <div className="space-y-0.5 text-[11px] leading-5 text-slate-500">
+                {statusReasonDetail ? <div>{`状态给出的原始原因：${statusReasonDetail}`}</div> : null}
+                {qualityReasonDetails.length > 0 ? (
+                  <div>{`提示词判定给出的原始原因：${qualityReasonDetails.join('；')}`}</div>
+                ) : null}
+              </div>
+            </TechnicalDetailSection>
+          ) : null}
         </div>
       )}
     </Drawer>

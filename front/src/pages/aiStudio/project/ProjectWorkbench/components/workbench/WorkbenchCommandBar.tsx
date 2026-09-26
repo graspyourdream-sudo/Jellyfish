@@ -24,12 +24,18 @@ import {
   WORKBENCH_TAB_LABEL,
   WORKBENCH_TABS,
   describePendingReview,
+  workbenchAnalysisHintMainText,
+  workbenchAnalysisStatusLabel,
   type WorkbenchAnalysisLike,
   type WorkbenchCommand,
   type WorkbenchItemLike,
   type WorkbenchStatusCounts,
   type WorkbenchTypeCounts,
 } from './workbenchState.ts'
+/* 技术详情**只能**用全仓唯一的折叠壳（审计 §9-2 / §8.1.1-1）：
+   这里不带任何内部字段名的显示标签，标签由折叠壳自己拼。 */
+import { TechnicalDetailSection } from './TechnicalDetailCollapse.tsx'
+import { buildUserFacingMessage } from '../../../../components/userFacingMessage.ts'
 import { ASPECT_RATIO_OPTIONS } from '../assetProduction.ts'
 
 export type WorkbenchCommandBarProps = {
@@ -105,6 +111,15 @@ export function WorkbenchCommandBar(props: WorkbenchCommandBarProps) {
   } = props
 
   const analyzed = analysis ? analysis.generated === true : true
+  /* 主区的分析状态与下一步说明必须是**本页自己写死的句子**（审计 §7.1-8）：
+     后端 `status_label` / `hint` 一律不上主区，只进下面默认收起的「技术详情」。 */
+  const analysisStatusLabel = workbenchAnalysisStatusLabel(analysis)
+  const analysisHintMain = workbenchAnalysisHintMainText(analysis)
+  /* 折叠层只看**掩码 + 洗过**的原文（§7.1-6 的三级顺序里前两级，保留原始措辞便于排查）。 */
+  const analysisHintDetail = analysis?.hint ? buildUserFacingMessage(analysis.hint).detail : ''
+  const analysisStatusDetail = [String(analysis?.status ?? '').trim(), String(analysis?.status_label ?? '').trim()]
+    .filter(Boolean)
+    .join(' / ')
 
   return (
     <section
@@ -118,7 +133,11 @@ export function WorkbenchCommandBar(props: WorkbenchCommandBarProps) {
           <span className="text-[11px] text-gray-500">当前章节</span>
           <span className="text-sm font-medium text-slate-900">{chapterLabel}</span>
           <Tag bordered={false}>{`剧本 ${scriptChars} 字`}</Tag>
-          {analysis?.status_label ? <Tag bordered={false}>{analysis.status_label}</Tag> : null}
+          {analysisStatusLabel ? (
+            <Tag bordered={false} data-testid="analysis-status">
+              {analysisStatusLabel}
+            </Tag>
+          ) : null}
         </Space>
         <Space size={6} wrap>
           {hasPendingReview ? (
@@ -168,9 +187,10 @@ export function WorkbenchCommandBar(props: WorkbenchCommandBarProps) {
           <div className="text-[11px] text-gray-500" data-testid="command-detail">
             {command.detail}
           </div>
-          {analysis?.hint ? (
+          {/* 主区：本页自己写的下一步说明（后端 hint 不在这里） */}
+          {analysisHintMain ? (
             <Typography.Text type="secondary" className="text-[11px]" data-testid="analysis-hint">
-              {analysis.hint}
+              {analysisHintMain}
             </Typography.Text>
           ) : null}
         </div>
@@ -266,6 +286,25 @@ export function WorkbenchCommandBar(props: WorkbenchCommandBarProps) {
           )
         })}
       </div>
+
+      {/*
+        技术详情（默认收起）：后端 `analysis.status` / `status_label` / `hint` 的原文落点。
+
+        审计 §4.5 模式 3/6 点名本文件 `:121` 与 `:173` 把后端原值直接渲在主区；
+        收进这里之后，主区只剩上面那两句**本页自己写的**中文结论（§7.1-8）。
+        折叠壳复用全仓唯一实现，本文件不出现任何内部字段名的显示标签（§8.1.1-1）。
+      */}
+      {analysisHintDetail || analysisStatusDetail || command.primaryDisabledDetail ? (
+        <TechnicalDetailSection testId="command-bar-technical-detail" className="mt-2">
+          <div className="space-y-0.5 text-[11px] leading-5 text-slate-500">
+            {analysisStatusDetail ? <div>{`本次读取到的分析状态原始值：${analysisStatusDetail}`}</div> : null}
+            {analysisHintDetail ? <div>{`分析给出的原始说明：${analysisHintDetail}`}</div> : null}
+            {command.primaryDisabledDetail ? (
+              <div>{`主按钮不可用时给出过的原始说明：${command.primaryDisabledDetail}`}</div>
+            ) : null}
+          </div>
+        </TechnicalDetailSection>
+      ) : null}
     </section>
   )
 }

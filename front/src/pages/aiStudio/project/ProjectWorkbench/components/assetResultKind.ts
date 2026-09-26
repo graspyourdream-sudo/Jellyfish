@@ -127,9 +127,30 @@ export function resolveResultKind(assetType: ImageAssetType, serverKind?: unknow
 }
 
 /**
+ * 后端回包的标签能不能直接上卡片。
+ *
+ * 审计 §4.5 模式 3（`assetResultKind.ts:146` 的 `return server`）：
+ * 改前后端只要回一个前端不认识的 `result_label`（英文枚举原值 / `scene_asset_image`
+ * 这种机器码），就会**原样印在结果卡片的「图片类型」标签上**。
+ *
+ * 判据：登记过的中文标签放行；**含中文且不含机器码**的新标签也放行（后端加新中文说法不用改前端）；
+ * 其余（英文 / 下划线机器码 / 空）一律退回本类型的兜底标签。
+ */
+const KNOWN_RESULT_LABELS: readonly string[] = Object.values(RESULT_LABEL_BY_ASSET_TYPE)
+
+export function isRenderableResultLabel(value: unknown): boolean {
+  const text = String(value ?? '').trim()
+  if (!text) return false
+  if (KNOWN_RESULT_LABELS.includes(text)) return true
+  if (!/[\u4e00-\u9fff]/.test(text)) return false
+  return !/(?<![A-Za-z0-9_])[a-z]+(?:_[a-z]+){1,}(?![A-Za-z0-9_])/.test(text)
+}
+
+/**
  * 结果类型的中文标签（卡片上的「图片类型」标签）：优先用后端回包 `result_label`。
  *
  * 同样对人物专用标签做防御：非人物类型不许显示「人物参考图」。
+ * 另外按审计 §4.5 的建议口径：**不认识的 label 退回本类型的兜底标签**，不回显后端原值。
  */
 export function resolveResultLabel(
   assetType: ImageAssetType,
@@ -144,6 +165,7 @@ export function resolveResultLabel(
   if (assetType !== 'character' && server.includes('人物参考图')) {
     return RESULT_LABEL_BY_ASSET_TYPE[assetType]
   }
+  if (!isRenderableResultLabel(server)) return RESULT_LABEL_BY_ASSET_TYPE[assetType]
   return server
 }
 

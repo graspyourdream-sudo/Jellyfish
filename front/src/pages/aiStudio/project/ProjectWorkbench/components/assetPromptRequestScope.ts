@@ -13,6 +13,8 @@
  * 立刻停止、不自动重试（真实调用是按次数授权的）。两者在这里用结构化错误码分开。
  */
 
+import { maskInternalIds } from '../../../components/maskInternalIds.ts'
+
 /** 后端"本次要的资产都没有资料"的结构化错误码（见图片提示词生成服务）。 */
 export const ASSET_PROFILE_MISSING_CODE = 'asset_profile_missing'
 
@@ -83,8 +85,11 @@ function readRecord(value: unknown): Record<string, unknown> | null {
 function fromRecord(record: Record<string, unknown> | null): AssetPromptAvailability | null {
   if (!record) return null
   const code = String(record.code ?? '').trim()
-  const message = String(record.message ?? record.detail ?? '').trim()
-  const fix = String(record.fix ?? '').trim()
+  /* 审计 §4.5 模式 6（`:86`）：后端 `message` / `detail` / `fix` 是**动态原文**，
+     改前原样带出去、由 `describeRowAvailability`（`:158`）直接插进那一行。
+     这里先过 `maskInternalIds`（去 UUID / `file_id=` / `*_task_id=` / 内部词汇）。 */
+  const message = maskInternalIds(String(record.message ?? record.detail ?? '').trim())
+  const fix = maskInternalIds(String(record.fix ?? '').trim())
   const names = Array.isArray(record.assets)
     ? record.assets.map((item) => String(item ?? '').trim())
     : []
@@ -104,7 +109,7 @@ function onlyMention(text: string): AssetPromptAvailability {
   const trimmed = String(text ?? '').trim()
   if (!trimmed) return NO_AVAILABILITY
   if (!MISSING_PROFILE_MARKERS.some((marker) => trimmed.includes(marker))) return NO_AVAILABILITY
-  return { missingProfile: true, reason: trimmed, fix: '', assets: [] }
+  return { missingProfile: true, reason: maskInternalIds(trimmed), fix: '', assets: [] }
 }
 
 /** 从一段文字里抠出被拼进去的结构化明细（统一信封会把 `detail` 拼进消息）。 */
@@ -155,7 +160,9 @@ export function readAssetPromptAvailabilityError(error: unknown): AssetPromptAva
  * 后端没给"怎么补"时就不硬凑（宁可少说，也不编一句没法照做的修法）。
  */
 export function describeRowAvailability(name: string, reason: string, fix?: string): string {
-  const head = `${String(name ?? '').trim()}：${String(reason ?? '').trim()}`
-  const tail = String(fix ?? '').trim()
+  /* 审计 §4.5 模式 6（`:158`）：渲染前统一过 `maskInternalIds` —— 无论调用方
+     （出图面板 / 提示词面板）把什么形态的后端原文传进来，都不许把内部标识带上屏。 */
+  const head = `${String(name ?? '').trim()}：${maskInternalIds(String(reason ?? '').trim())}`
+  const tail = maskInternalIds(String(fix ?? '').trim())
   return tail ? `${head} 怎么补：${tail}` : head
 }

@@ -921,7 +921,9 @@ export function buildPromptQualityGateModal<T extends PromptQualityGateAsset>(
   options: { typeLabel?: (type: string) => string } = {},
 ): PromptQualityGateModal {
   const typeLabel =
-    options.typeLabel ?? ((type: string) => ASSET_PROMPT_TYPE_LABEL[type as keyof typeof ASSET_PROMPT_TYPE_LABEL] ?? type)
+    /* 未登记的类型码也不回显原值（审计 §1.2 模式 3 的同型兜底，与 assetPromptSlots 同口径） */
+    options.typeLabel ??
+    ((type: string) => ASSET_PROMPT_TYPE_LABEL[type as keyof typeof ASSET_PROMPT_TYPE_LABEL] ?? '其它类型')
   const blocked = gate.blocked
   const lines: string[] = []
   if (blocked.length > 0) {
@@ -1021,7 +1023,9 @@ export function summarizePromptDifferences(
   options: { typeLabel?: (type: string) => string } = {},
 ): PromptDifferenceRow[] {
   const typeLabel =
-    options.typeLabel ?? ((type: string) => ASSET_PROMPT_TYPE_LABEL[type as keyof typeof ASSET_PROMPT_TYPE_LABEL] ?? type)
+    /* 未登记的类型码也不回显原值（审计 §1.2 模式 3 的同型兜底，与 assetPromptSlots 同口径） */
+    options.typeLabel ??
+    ((type: string) => ASSET_PROMPT_TYPE_LABEL[type as keyof typeof ASSET_PROMPT_TYPE_LABEL] ?? '其它类型')
   return items.map((item, index) => {
     let maxSimilarity: number | null = null
     let closestName = ''

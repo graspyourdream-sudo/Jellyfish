@@ -19,6 +19,9 @@
  *      内部字段（模型 / 供应商 / 任务号 / file_id / 槽位 / 候选条数 …）只进默认收起的「技术详情」。
  */
 
+import { ASSET_PROFILE_FIELD_SPECS } from '../assetProfileFields.ts'
+import { maskInternalIds } from '../../../../components/maskInternalIds.ts'
+
 /** 工作台四类资产的顺序（与出图分页签口径一致）。 */
 export type WorkbenchAssetType = 'character' | 'scene' | 'prop' | 'costume'
 
@@ -190,10 +193,30 @@ export function workbenchStatusKey(item: WorkbenchItemLike): WorkbenchStatusKey 
   return 'needs_profile'
 }
 
-/** 业务状态**中文标签**（用户语言；后端 `status.label` 优先）。 */
+/**
+ * 后端给的 `status.label` 能不能直接当主区文案用。
+ *
+ * 审计 §4.5 模式 3/6 点名 `workbenchState.ts:196` 的 `if (fromServer) return fromServer`：
+ * 后端一旦回英文枚举（`ready` / `needs_profile` / `partial_failed`）或
+ * `xxx_yyy` 形态的机器码，就会**原样印在卡片上**。
+ *
+ * 这里做**白名单式**校验：只有「含中文、且不含下划线连写英文码」的短句才放行；
+ * 其余一律退回本文件自己的中文状态词表（`WORKBENCH_STATUS_LABEL`），
+ * 后端原文不进主区（需要排查时由调用方把它放进默认收起的「技术详情」）。
+ */
+export function isRenderableStatusLabel(value: unknown): boolean {
+  const text = String(value ?? '').trim()
+  if (!text) return false
+  if (!/[\u4e00-\u9fff]/.test(text)) return false
+  if (/(?<![A-Za-z0-9_])[a-z]+(?:_[a-z]+){1,}(?![A-Za-z0-9_])/.test(text)) return false
+  if (findMainScreenForbiddenTerms(text, MAIN_SCREEN_FORBIDDEN_SOURCE_TERMS).length > 0) return false
+  return true
+}
+
+/** 业务状态**中文标签**（用户语言；后端 `status.label` 过了白名单才优先）。 */
 export function workbenchStatusLabel(item: WorkbenchItemLike): string {
   const fromServer = String(item.status?.label ?? '').trim()
-  if (fromServer) return fromServer
+  if (isRenderableStatusLabel(fromServer)) return fromServer
   return WORKBENCH_STATUS_LABEL[workbenchStatusKey(item)]
 }
 
@@ -341,6 +364,14 @@ export type WorkbenchCommand = {
   /** 主按钮禁用时**为什么**（用户语言；可用时为空串） */
   primaryDisabledReason: string
   /**
+   * 禁用原因对应的**后端原文**（已过 `maskInternalIds`；空串 = 没有原文）。
+   *
+   * 为什么单列：按 §7.1-8，主区那一句必须是产品自己写死的中文结论，
+   * 后端 `analysis.hint` 只能进默认收起的「技术详情」——所以它需要一个**非主区**的出口，
+   * 而不是像改前那样直接当 `primaryDisabledReason` 上屏（审计 §4.5 模式 6）。
+   */
+  primaryDisabledDetail: string
+  /**
    * 主按钮**可用**时的一句说明（例如"会调用 3 次文本模型（按次计费）"）。
    *
    * 为什么单列一个字段：`primaryDisabledReason` 按契约在可用时是空串，
@@ -421,14 +452,19 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
   ].join(' · ')
 
   if (!analyzed) {
-    const hint = String(analysis?.hint ?? '').trim() || '本章还没有资产资料：先点「分析本章资产」。'
+    const hint = String(analysis?.hint ?? '').trim()
     return {
       title: '请先分析本章资产',
       detail,
       primaryLabel: '批量生成选中项',
       primaryAction: 'none',
       primaryDisabled: true,
-      primaryDisabledReason: hint,
+      /* 审计 §4.5 模式 6（`workbenchState.ts:431` 的 `primaryDisabledReason: hint`）：
+         主区这一句必须是**本文件自己写的中文状态机词**，不许是后端 `hint` 的改写结果
+         （§7.1-8：`toUserFacingText(后端值)` 只允许当兜底 / 当折叠层原文）。
+         后端 hint 原样另存 `primaryDisabledDetail`，由「技术详情」折叠区展示。 */
+      primaryDisabledReason: '还没有分析过本章资产：先点「分析本章资产」。',
+      primaryDisabledDetail: hint ? maskInternalIds(hint) : '',
       primaryHint: '',
       regenerateLabel: '批量重新生成已选项',
       regenerateDisabled: true,
@@ -488,6 +524,7 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
     primaryLabel,
     primaryDisabled,
     primaryDisabledReason: primaryDisabled ? primaryDisabledReason : '',
+    primaryDisabledDetail: '',
     // 可用时也给一句"点了会发生什么/花几次钱"（用户明确要求按钮旁就能看到）
     primaryHint: primaryDisabled ? '' : primaryHint,
     regenerateLabel:
@@ -531,6 +568,84 @@ export function deriveAnalysisAction(analysis?: WorkbenchAnalysisLike | null): A
       ? '本章剧本已经改过：重新分析只会更新资料，你手动改过的内容不会被覆盖。'
       : '',
   }
+}
+
+/* -------------------------------------------------- 「为什么做不了」的主区说法 */
+
+/**
+ * 「这一项为什么现在做不了」的**主区**说法 —— 按业务状态键给一句**本文件自己写的**中文结论。
+ *
+ * 审计 §4.5 模式 6（`AssetCardGrid.tsx:158` / `AssetDetailDrawer.tsx:63`）：
+ * 改前把后端 `status.reason` 原文直接渲在卡片正面 / 抽屉顶部，
+ * `assetWorkbenchContract.ts:249-250` 也只是 `toText(raw.reason)`（§7.3 的「未掩码路径」）。
+ *
+ * 按 §7.1-8，主区那一句必须是**产品自己写的句子**（或由枚举映射产出的名词），
+ * 所以这里按**业务状态键**（本文件的状态机，不是后端自由文本）给结论；
+ * 后端 `reason` 原文只进默认收起的「技术详情」（由调用方用统一折叠壳渲染）。
+ *
+ * 只在**确实有原因**时才显示（与改前的显示条件一致，不凭空多出一行）。
+ */
+export const WORKBENCH_STATUS_NOTICE: Record<WorkbenchStatusKey, string> = {
+  needs_profile: '资料还没补齐：补齐后才能生成图片',
+  needs_prompt: '还没有可用的图片提示词：先生成提示词再生成图片',
+  ready: '这一项可以生成图片',
+  generating: '这一项正在生成：等这一轮跑完再操作',
+  failed: '上一次没有生成成功：可以重新生成图片',
+  has_image: '已有图片待选择：采纳一张后再定版',
+  primary: '这一项已经定版',
+}
+
+/** 状态原因对应的主区中文结论（没有原因时返回空串 = 整行不显示）。 */
+export function workbenchStatusNotice(item: WorkbenchItemLike): string {
+  if (!String(item.status?.reason ?? '').trim()) return ''
+  return WORKBENCH_STATUS_NOTICE[workbenchStatusKey(item)]
+}
+
+/** 提示词需要重新生成时，卡片正面那一句**写死**的说明（后端 reasons 只进技术详情）。 */
+export const WORKBENCH_PROMPT_REGENERATION_MAIN_TEXT =
+  '这条提示词不足以出图：点「重新生成提示词」后再生成图片。'
+
+/* -------------------------------------------------- 顶部「分析状态」的映射 */
+
+/**
+ * `analysis.status`（后端业务键）→ 用户语言。
+ *
+ * 审计 §4.5 模式 3 点名 `WorkbenchCommandBar.tsx:121`：
+ * 改前直接 `{analysis.status_label}`，**没有任何枚举校验** ——
+ * 后端回英文（`not_generated` / `ready` / `stale`）就原样印在主区。
+ */
+const WORKBENCH_ANALYSIS_STATUS_LABEL: Record<string, string> = {
+  not_generated: '还没分析',
+  generated: '资料已就绪',
+  stale: '资料需要更新',
+  running: '正在分析',
+  failed: '分析失败',
+}
+
+/** 后端返回没登记的 `status` 时的中文兜底（绝不回显原值）。 */
+export const WORKBENCH_ANALYSIS_STATUS_FALLBACK = '分析结果待确认'
+
+/** 分析状态的中文标签（`analysis` 为空时返回空串 = 不渲染这个标签）。 */
+export function workbenchAnalysisStatusLabel(analysis?: WorkbenchAnalysisLike | null): string {
+  if (!analysis) return ''
+  const key = String(analysis.status ?? '').trim()
+  const mapped = WORKBENCH_ANALYSIS_STATUS_LABEL[key]
+  if (mapped) return mapped
+  /* 没登记的 status：后端 label 只有「含中文且不含机器码」才放行，
+     否则一律中文兜底 —— 映射兜底**不许回显原值**（审计 §1.2 模式 3）。 */
+  const fromServer = String(analysis.status_label ?? '').trim()
+  if (isRenderableStatusLabel(fromServer)) return fromServer
+  return WORKBENCH_ANALYSIS_STATUS_FALLBACK
+}
+
+/** 顶部「分析状态」那一行的**主区**固定中文句子（不随后端措辞漂移）。 */
+export const WORKBENCH_ANALYSIS_HINT_MAIN_READY = '本章资料已分析完成，可以开始生产。'
+export const WORKBENCH_ANALYSIS_HINT_MAIN_PENDING = '还没有分析过本章资产：先点「分析本章资产」。'
+
+/** 主区那一句（产品自己写的句子，§7.1-8），后端 `hint` 只进「技术详情」。 */
+export function workbenchAnalysisHintMainText(analysis?: WorkbenchAnalysisLike | null): string {
+  if (!analysis) return ''
+  return analysis.generated === true ? WORKBENCH_ANALYSIS_HINT_MAIN_READY : WORKBENCH_ANALYSIS_HINT_MAIN_PENDING
 }
 
 /* ----------------------------------------------------- 主界面禁词（用户点名） */
@@ -616,34 +731,76 @@ export function describePendingReviewKind(kind: string): string {
   return PENDING_REVIEW_KIND_LABEL[key] ?? '需要你确认'
 }
 
+/**
+ * 待处理项**主区**那一句：按类型给一句本文件自己写死的中文结论。
+ *
+ * 审计 §4.5 模式 6（`PendingReviewDrawer.tsx:64`）改前直接渲后端 `row.reason`。
+ * 按 §7.1-8，主区只放产品自己写的句子；后端原文（掩码后）由抽屉收进
+ * 每行默认收起的「技术详情」，两边各有断言。
+ */
+export const PENDING_REVIEW_REASON_MAIN_TEXT: Record<PendingReviewKind, string> = {
+  alias_conflict: '这一项的名称和已有资产对不上：请确认用哪个名字。',
+  same_name_other_type: '有两个同名但类型不同的资产：请确认这一项到底是哪一类。',
+  multiple_candidates: '这一项对上了多个来源：请确认保留哪一个。',
+  costume_without_asset: '这套服装还没有对应的资产：请先建好资产再继续。',
+}
+
+export function pendingReviewReasonMainText(kind: string): string {
+  const key = String(kind ?? '') as PendingReviewKind
+  return PENDING_REVIEW_REASON_MAIN_TEXT[key] ?? '这一项需要你确认该怎么处理。'
+}
+
 /* -------------------------------------------------- 资产资料字段中文标签 */
+
+/**
+ * 后端字段表的**唯一事实来源**是 `assetProfileFields.ASSET_PROFILE_FIELD_SPECS`
+ * （它由后端 `asset_profiles.py::PROFILE_FIELD_SPECS` 一条测试逐项比对，两边不许漂移）。
+ *
+ * 审计 §4.5 模式 2（`workbenchState.ts:622-647`）：这里原先**手抄**了一张映射表，
+ * 结果与 spec 的键对不上 —— 14 个真实后端键（`relations` / `costume_accessories` /
+ * `related_plot` / `shot_refs` / `era_location` / `indoor_outdoor` / `spatial_structure` /
+ * `furnishings` / `light_tone` / `atmosphere` / `related_events` / `usage` /
+ * `identity_era` / `accessories`）全部查不到标签。
+ *
+ * 修法按审计 §7.1-2「优先复用既有机制」：**消费**它，不再手抄第二份。
+ * （`assetProfileFields.ts` 属区域 6 的可写范围，本批只 import、不编辑。）
+ */
+const WORKBENCH_PROFILE_FIELD_TYPES = ['character', 'scene', 'prop', 'costume'] as const
+
+const PROFILE_FIELD_LABEL_FROM_SPECS: Record<string, string> = (() => {
+  const out: Record<string, string> = {}
+  WORKBENCH_PROFILE_FIELD_TYPES.forEach((type) => {
+    ASSET_PROFILE_FIELD_SPECS[type].forEach((spec) => {
+      // 先出现的类型优先：同一个键在不同类型下标签不同时（例如 `appearance`），
+      // 保持「人物优先」的既有观感，不随类型顺序漂移。
+      if (!(spec.key in out)) out[spec.key] = spec.label
+    })
+  })
+  return out
+})()
+
+/**
+ * 早期版本手抄过的**历史别名**。
+ *
+ * 这些键在 spec 里已经改名（`relation → relations`、`costume_style → costume_accessories`、
+ * `space → spatial_structure`、`furnishing → furnishings`、`lighting → light_tone`、
+ * `mood → atmosphere`、`accessory → accessories`），但老数据 / 老快照里仍可能出现。
+ * 保留它们**不是**开口子：它们给出的仍是中文，去掉反而会让用户少看到一项资料（§3-6）。
+ */
+const PROFILE_FIELD_LABEL_LEGACY: Record<string, string> = {
+  relation: '人物关系',
+  costume_style: '服装配饰',
+  space: '空间',
+  furnishing: '陈设',
+  lighting: '光线',
+  mood: '氛围',
+  accessory: '配饰',
+}
 
 /** 详情抽屉里按类型展示资料字段的中文标签（后端字段名不出现在主界面）。 */
 export const PROFILE_FIELD_LABEL: Record<string, string> = {
-  identity: '身份',
-  relation: '人物关系',
-  appearance: '外貌',
-  hairstyle: '发型',
-  personality: '性格',
-  costume_style: '服装配饰',
-  gender_age: '性别年龄',
-  space: '空间',
-  furnishing: '陈设',
-  time_weather: '时间天气',
-  lighting: '光线',
-  mood: '氛围',
-  material: '材质',
-  shape: '形状',
-  size: '尺寸',
-  state: '状态',
-  owner: '所属',
-  plot_role: '剧情作用',
-  wearer: '穿着人物',
-  era: '身份时代',
-  style: '款式',
-  color: '颜色',
-  accessory: '配饰',
-  occasion: '场合',
+  ...PROFILE_FIELD_LABEL_LEGACY,
+  ...PROFILE_FIELD_LABEL_FROM_SPECS,
 }
 
 /**
@@ -656,4 +813,20 @@ export const PROFILE_FIELD_LABEL: Record<string, string> = {
  */
 export function profileFieldLabel(key: string): string {
   return PROFILE_FIELD_LABEL[String(key ?? '')] ?? '其他资料项'
+}
+
+/**
+ * 后端 spec 里有、但前端标签表查不到的键（空数组 = 已对齐）。
+ *
+ * 存在的意义：让护栏能**证明**「标签表与后端唯一事实来源同源」，
+ * 而不是只断言某几个键碰巧查得到（审计 §4.5 要求这条对齐是机械可验证的）。
+ */
+export function profileFieldKeysMissingLabel(): string[] {
+  const missing: string[] = []
+  WORKBENCH_PROFILE_FIELD_TYPES.forEach((type) => {
+    ASSET_PROFILE_FIELD_SPECS[type].forEach((spec) => {
+      if (!PROFILE_FIELD_LABEL[spec.key]) missing.push(`${type}.${spec.key}`)
+    })
+  })
+  return missing
 }

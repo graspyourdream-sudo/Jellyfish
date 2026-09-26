@@ -108,7 +108,8 @@ import {
   type ShotDraftStatus,
 } from './promptBoardDrafts'
 import { buildPromptBoardSaveBody, juriluScriptScopeError } from './promptBoardSaveBody'
-import { showUserError, toUserFacingText } from '../../../components/userFacingMessage'
+import { buildUserFacingMessage, showUserError, showUserWarning, toUserFacingText } from '../../../components/userFacingMessage'
+import { TechnicalDetailSection } from './workbench/TechnicalDetailCollapse.tsx'
 
 type RowStatus = 'ok' | 'draft' | 'dry_run' | 'failed' | 'interrupted' | 'busy' | 'skipped' | 'unmatched' | 'duplicate'
 
@@ -271,7 +272,9 @@ export function EpisodeVideoPromptBoard({
         switchTargetChapter(createdId, { silent: true })
         await refreshChapters()
       } catch (error) {
-        message.error(`创建章节失败：${error instanceof Error ? error.message : '未知原因'}`)
+        /* 审计 §4.5 模式 6（`:273`）：改前把后端原文拼进 toast。现在主区只出中文结论，
+           原文（掩码后）由 showUserError 收进「技术详情」日志（`rememberTechnicalDetail`）。 */
+        void showUserError(error, '创建章节失败：请稍后重试')
       } finally {
         setCreatingChapter(false)
       }
@@ -289,6 +292,13 @@ export function EpisodeVideoPromptBoard({
   const [selectedShotIds, setSelectedShotIds] = useState<string[]>([])
   const [allowPartial, setAllowPartial] = useState(false)
   const [issues, setIssues] = useState<string[]>([])
+  /**
+   * 最近一次巨日禄抓取 / 匹配失败的**原始诊断**（已掩码 + 洗过）。
+   *
+   * 审计 §4.5 模式 6（`:1073,1216`）：改前把「后端原文｜脱敏诊断」整串扔进 toast
+   * 和页面的问题清单（都是**主区**）。现在主区只给「登录凭证可能已失效」这类结论，
+   * 诊断收进下面默认收起的「技术详情」。 */
+  const [juriluFailureDetail, setJuriluFailureDetail] = useState('')
   const [countMismatch, setCountMismatch] = useState(false)
   const [running, setRunning] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -448,7 +458,8 @@ export function EpisodeVideoPromptBoard({
       setDrafts(list)
       return list
     } catch (error) {
-      message.warning(`读取服务端草稿状态失败：${error instanceof Error ? error.message : '未知原因'}`, 6)
+      /* 审计 §4.5 模式 6（`:450`）：后端原文不再直渲（原文进技术详情日志）。 */
+      void showUserWarning(error, '读取上次生成进度失败：请稍后重试')
       return []
     }
   }, [chapterId])
@@ -466,11 +477,13 @@ export function EpisodeVideoPromptBoard({
         const state = await fetchPromptBoardDrafts(chapterId)
         applyDraftState(state, list)
       } catch (error) {
-        setDraftNote('服务端草稿状态读取失败：本页只显示内存里的内容，刷新可能丢。')
-        message.warning(`读取服务端草稿失败（刷新可能丢草稿）：${error instanceof Error ? error.message : '未知原因'}`, 8)
+        setDraftNote('上次生成进度读取失败：本页只显示当前内容，刷新可能丢。')
+        /* 审计 §4.5 模式 6（`:469`）：主区只留中文结论，原文进技术详情。 */
+        void showUserWarning(error, '读取上次生成进度失败：本页只显示当前内容，刷新可能丢。')
       }
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '读取本集镜头失败')
+      /* 审计 §4.5 模式 6（`:472`）。 */
+      void showUserError(error, '读取本集镜头失败：请刷新页面重试')
     } finally {
       setLoading(false)
     }
@@ -644,8 +657,10 @@ export function EpisodeVideoPromptBoard({
         }
         claimToken = String(claim.claim_token || '')
       } catch (error) {
-        const text = error instanceof Error ? error.message : '申请生成租约失败'
-        message.error(`镜头 ${code} 申请生成租约失败：${text}`)
+        const text = error instanceof Error ? error.message : '这一镜暂时排不上'
+        /* 审计 §4.5 模式 6（`:647`）：「申请生成租约失败」是开发术语，
+           主区改成用户能懂的一句；原文（掩码后）进技术详情。 */
+        void showUserError(error, `镜头 ${code} 暂时排不上：请稍后重试`)
         return { shotId, code, status: 'error', prompt: '', draftToken: '', message: text, persisted: false }
       }
       claimTokensRef.current.set(shotId, claimToken)
@@ -957,7 +972,8 @@ export function EpisodeVideoPromptBoard({
       applyImportPreview(preview.entries ?? [], 'external_import')
       message.success(`已解析 ${preview.entries?.length ?? 0} 条，请在预览表中校对`)
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '解析失败')
+      /* 审计 §4.5 模式 6（`:959`）。 */
+      void showUserError(error, '解析失败：请检查粘贴的内容后再试')
     } finally {
       setParsing(false)
     }
@@ -1049,7 +1065,8 @@ export function EpisodeVideoPromptBoard({
         // 后端要求先选组，却没给出脚本组 → 不能拿 rows 硬凑
         setRows([])
         setJuriluNotices(selection.notices)
-        setIssues(['后端返回 requires_script_selection=true，但没有返回任何 script_groups：请重新抓取或联系后端核对。'])
+        /* 同型残留（审计 §4.5 模式 2/3）：这句话原本把两个后端字段名写进了主区。 */
+        setIssues(['这一次没有拿到可选的脚本组：请重新抓取，或联系管理员核对导入设置。'])
         message.error('后端要求先选脚本组，但没有返回脚本组清单：本次不匹配任何镜头', 8)
         setImportOpen(false)
         return
@@ -1066,15 +1083,13 @@ export function EpisodeVideoPromptBoard({
       setImportOpen(false)
     } catch (error) {
       // 错误信息只透出后端的文案，绝不回显 Cookie / Authorization；
-      // 401/403 时把**脱敏诊断**（接口阶段 / HTTP 状态 / 是否带 Cookie / 是否额外带 Authorization / 授权模式）显式给出来。
+      // 401/403 的**脱敏诊断**（接口阶段 / HTTP 状态 / 是否带 Cookie / 是否额外带 Authorization / 授权模式）
+      // 一律收进默认收起的「技术详情」，不上主区（审计 §4.5 模式 6，`:1073`）。
       const text = error instanceof Error ? error.message : '巨日禄抓取失败（Cookie 是否有效？）'
       const diag = extractJuriluDiagnostics(error)
-      if (diag) {
-        setIssues([diag])
-        message.error(`${text}｜${diag}`, 8)
-      } else {
-        message.error(text)
-      }
+      setIssues([])
+      setJuriluFailureDetail(buildUserFacingMessage(diag || text).detail)
+      void showUserError(error, '巨日禄抓取失败：登录凭证可能已失效，请重新获取后再试')
     } finally {
       setJuriluFetching(false)
       clearJuriluCredentials()
@@ -1204,7 +1219,8 @@ export function EpisodeVideoPromptBoard({
         chapterShotCount: Math.max(0, Math.trunc(preview.chapter_shot_count ?? 0)),
       })
       message.success(
-        `已用脚本组 ${plan.scriptIds[0]} 整组匹配 ${entries.length} 条巨日禄提示词（默认不合并、未写库）：请在下面的预览表里核对后确认保存`,
+        /* 审计 §4.5 模式 1（与 `:1416` 同口径）：内部组编号不上主区，用户只需要知道匹配了多少条。 */
+        `已用所选脚本组整组匹配 ${entries.length} 条巨日禄提示词（默认不合并、未写库）：请在下面的预览表里核对后确认保存`,
         8,
       )
     } catch (error) {
@@ -1212,12 +1228,9 @@ export function EpisodeVideoPromptBoard({
       setJuriluMatch(null)
       const text = error instanceof Error ? error.message : '巨日禄匹配失败（Cookie 是否有效？）'
       const diag = extractJuriluDiagnostics(error)
-      if (diag) {
-        setIssues([diag])
-        message.error(`${text}｜${diag}`, 8)
-      } else {
-        message.error(text)
-      }
+      setIssues([])
+      setJuriluFailureDetail(buildUserFacingMessage(diag || text).detail)
+      void showUserError(error, '巨日禄匹配失败：登录凭证可能已失效，请重新获取后再试')
     } finally {
       setJuriluMatching(false)
     }
@@ -1431,7 +1444,8 @@ export function EpisodeVideoPromptBoard({
       // 保存后草稿可能已被服务端清掉，但其它镜头（失败/未保存）的草稿要在表里继续可见
       await restoreFromServer()
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '保存失败')
+      /* 审计 §4.5 模式 6（`:1429`）。 */
+      void showUserError(error, '保存失败：请稍后重试')
     } finally {
       setSaving(false)
     }
@@ -1470,7 +1484,8 @@ export function EpisodeVideoPromptBoard({
       setRows((prev) => prev.filter((row) => row.origin !== 'llm_draft'))
       await restoreFromServer()
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '清空草稿失败')
+      /* 审计 §4.5 模式 6（`:1468`）。 */
+      void showUserError(error, '清空草稿失败：请稍后重试')
     } finally {
       setPurging(false)
     }
@@ -1768,6 +1783,13 @@ export function EpisodeVideoPromptBoard({
         />
       ) : null}
 
+      {/* 技术详情（默认收起）：巨日禄抓取 / 匹配失败的原始诊断落点（已掩码 + 洗过）。 */}
+      {juriluFailureDetail ? (
+        <TechnicalDetailSection testId="prompt-board-jurilu-failure" className="mb-2">
+          <div className="text-[11px] leading-5 text-slate-500">{juriluFailureDetail}</div>
+        </TechnicalDetailSection>
+      ) : null}
+
       {/* 脚本组选择区：抓取后显示在统一预览表**上面**；默认一组都不选，选完才整组匹配 */}
       {scriptGroups.length ? (
         <JuriluScriptGroupPicker
@@ -1802,7 +1824,7 @@ export function EpisodeVideoPromptBoard({
           message={`巨日禄流程状态：${juriluFlow.statusText}`}
           description={
             juriluFlow.matchedScriptId
-              ? `下面这张表里的巨日禄分镜全部来自脚本组 ${juriluFlow.matchedScriptId}（${juriluMatch?.entryCount ?? 0} 条，不截断、不与其他 scriptId 混合）；换组或换目标章节都会先清空这张表、清掉缺口与已匹配标记。`
+              ? `下面这张表里的巨日禄分镜全部来自当前选中的那一组（${juriluMatch?.entryCount ?? 0} 条，不截断、也不与别的组混在一起）；换组或换目标章节都会先清空这张表、清掉缺口与已匹配标记。`
               : '下面这张表里没有巨日禄分镜：在完成该组的「用这一组匹配镜头」之前，页面不会显示镜头缺口，也不会提供任何创建镜头的入口。'
           }
         />

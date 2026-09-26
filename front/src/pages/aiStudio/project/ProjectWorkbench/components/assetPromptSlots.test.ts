@@ -138,12 +138,19 @@ test('D1：误报的「没有大模型槽位」提示只按真实无槽位的类
   // 四类资产都有槽位（含道具）→ 一条提示都不该有
   assert.equal(buildUnsupportedSlotAlert(merged), null)
 
-  // 真的没有槽位的类型（例如还没进契约的 actor）才计数
+  // 真的没有槽位的类型（例如还没进契约的类型码）才计数
   const withUnknown = [...rows, row('actor', 'a1')]
   const alert = buildUnsupportedSlotAlert(withUnknown)
   assert.ok(alert)
   assert.equal(alert?.count, 1)
-  assert.match(String(alert?.description), /actor/)
+  /* 旧期望是 `assert.match(description, /actor/)` —— 它把「未登记的类型码原样回显」
+     钉成了期望值（审计 §4.5 模式 3 点名的映射兜底）。新口径：**绝不回显原值**，
+     未登记的类型码给中文兜底，所以这里改成「不许出现原值 + 必须出现中文兜底」。 */
+  assert.ok(
+    !String(alert?.description).includes('actor'),
+    `未登记的类型码被回显到主区了：${alert?.description}`,
+  )
+  assert.match(String(alert?.description), /其它类型/)
 
   // 全是支持的型号 → 不显示这条提示
   assert.equal(buildUnsupportedSlotAlert([row('character', 'c1'), row('scene', 's1')]), null)
