@@ -82,6 +82,64 @@ function formatProjectTime(value?: string): string {
   return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
 }
 
+/**
+ * 「孤立项目 <内部编号>（迁移）」形态的项目名。
+ *
+ * 迁移时有些项目按内部编号自动生成了名字（例：`孤立项目 script_9c3aafd08a（迁移）`），
+ * 这种名字本身就是一个内部标识，直接渲染等于把内部编号端给用户看。
+ * 判定要求编号里含**连续 8 位以上十六进制字符**，这样用户自己起的
+ * 「孤立项目 1」之类不会被误判成自动生成的。
+ */
+const ORPHAN_PROJECT_NAME_PATTERN =
+  /^孤立项目[\s\u3000]+[\w-]*[0-9a-f]{8,}[\w-]*[\s\u3000]*(（迁移）|\(迁移\))?$/i
+
+/**
+ * 项目名的展示口径：只在名字形如「孤立项目 <内部编号>（迁移）」时才折叠成
+ * 「未命名项目（迁移）」，其余名字**一个字符都不改**地原样返回。
+ *
+ * 为什么放在展示层：改名要经过运营确认，前端不该写回库；但主区也不该出现内部编号，
+ * 所以在渲染前折叠。原名仍留在数据层（`ProjectView.name`），技术详情层需要时可直接取用。
+ *
+ * 导出为纯函数（只吃字符串、只吐字符串，不碰状态、不发请求），便于单独单测形态判断。
+ */
+export function displayProjectName(name: string): string {
+  const source = typeof name === 'string' ? name : ''
+  const matched = ORPHAN_PROJECT_NAME_PATTERN.exec(source.trim())
+  if (!matched) return name
+  return matched[1] ? '未命名项目（迁移）' : '未命名项目'
+}
+
+/**
+ * 排序下拉的中文文案。
+ *
+ * 为什么必须是一张「全集」映射表：`SortKey` 是内部键，而下拉的 `value` 用的就是 `sortKey`。
+ * 以前选项里**没有** `createdAt` 这一项，默认值却是 `'createdAt'` —— antd 在
+ * 「当前值在 options 里找不到」时会把 value 原样当文案渲染，于是「排序」后面直接跟着
+ * 那个内部键的英文原文（首屏可见）。用 `Record<SortKey, string>` 收口后，
+ * 任何一个合法键都必然有中文文案，内部键不可能再上屏。
+ *
+ * TODO(阶段B①): 迁移到 enumLabels.ts（SortKey）
+ */
+const SORT_KEY_LABELS: Record<SortKey, string> = {
+  updatedAt: '最近更新',
+  createdAt: '创建时间',
+  name: '名称 A-Z',
+  chapters: '章节数量',
+}
+
+/** 排序方向的业务说法：按当前排序键给出「新→旧」这类中文，不显示内部键，也不用裸箭头。 */
+const SORT_DIRECTION_LABELS: Record<SortKey, { asc: string; desc: string }> = {
+  updatedAt: { asc: '旧→新', desc: '新→旧' },
+  createdAt: { asc: '旧→新', desc: '新→旧' },
+  name: { asc: 'A→Z', desc: 'Z→A' },
+  chapters: { asc: '少→多', desc: '多→少' },
+}
+
+/** 下拉可选项：从上面的中文文案表推导，保证「有键必有中文文案」。 */
+const SORT_SELECT_OPTIONS: { label: string; value: SortKey }[] = (
+  Object.keys(SORT_KEY_LABELS) as SortKey[]
+).map((key) => ({ label: SORT_KEY_LABELS[key], value: key }))
+
 const ProjectLobby: React.FC = () => {
   const navigate = useNavigate()
   const [projects, setProjects] = useState<ProjectView[]>([])
@@ -627,7 +685,7 @@ const ProjectLobby: React.FC = () => {
             <div className="min-w-0">
               <div className="text-xs text-gray-500 mb-0.5">{p.style}</div>
               <div className={`${isCompact ? 'text-sm' : 'text-base'} font-semibold truncate text-gray-900`}>
-                {p.name}
+                {displayProjectName(p.name)}
               </div>
               <div className="text-[10px] text-gray-500 truncate">
                 {formatProjectTime(p.createdAt)}
@@ -835,19 +893,16 @@ const ProjectLobby: React.FC = () => {
                 value={sortKey}
                 style={{ width: 128 }}
                 onChange={(value: SortKey) => setSortKey(value)}
-                options={[
-                  { label: '最近更新', value: 'updatedAt' },
-                  { label: '名称 A-Z', value: 'name' },
-                  { label: '章节数量', value: 'chapters' },
-                ]}
+                options={SORT_SELECT_OPTIONS}
               />
               <Button
                 size="small"
                 type="text"
                 className="text-[11px]"
+                title="切换排序方向"
                 onClick={() => setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))}
               >
-                {sortOrder === 'asc' ? '↑' : '↓'}
+                {SORT_DIRECTION_LABELS[sortKey][sortOrder]}
               </Button>
             </Space>
 
@@ -951,7 +1006,7 @@ const ProjectLobby: React.FC = () => {
                 <div className="space-y-2">
                   <div>
                     <div className="text-[11px] text-gray-500 mb-0.5">项目名称</div>
-                    <div className="font-medium">{selectedProject.name}</div>
+                    <div className="font-medium">{displayProjectName(selectedProject.name)}</div>
                   </div>
                   <div>
                     <div className="text-[11px] text-gray-500 mb-0.5">简介</div>
@@ -1083,7 +1138,7 @@ const ProjectLobby: React.FC = () => {
           <Form.Item
             name="default_video_ratio"
             label="默认视频比例"
-            tooltip="可选预设，也可直接输入自定义比例（格式如 9:16）；留空则由模型/供应商决定"
+            tooltip="可选预设，也可直接输入自定义比例（格式如 9:16）；留空则由系统默认画幅决定"
           >
             <AutoComplete
               allowClear
@@ -1133,7 +1188,7 @@ const ProjectLobby: React.FC = () => {
           <Form.Item
             name="default_video_ratio"
             label="默认视频比例"
-            tooltip="可选预设，也可直接输入自定义比例（格式如 9:16）；留空则由模型/供应商决定"
+            tooltip="可选预设，也可直接输入自定义比例（格式如 9:16）；留空则由系统默认画幅决定"
           >
             <AutoComplete
               allowClear
