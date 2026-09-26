@@ -5871,7 +5871,8 @@ function Inspector(props: {
                                 ) : (
                                   linkedCharacterIds.map((cid) => {
                                     const thumb = linkedAssetThumbByKey.get(`character:${cid}`)
-                                    const name = characterNameMap[cid] ?? cid
+                                    // 审计 §4.3 模式 1：`?? cid` 会把角色内部 ID 端上屏
+                                    const name = characterNameMap[cid] ?? '（角色名称读取失败）'
                                     return thumb ? (
                                     <Image
                                         key={cid}
@@ -5919,7 +5920,8 @@ function Inspector(props: {
                                       preview={{ src: resolveAssetUrl(linkedAssetThumbByKey.get(`scene:${linkedSceneId}`) ?? '') }}
                                     />
                                   ) : (
-                                    <div className="text-xs text-gray-400">已关联场景：{sceneNameMap[linkedSceneId] ?? linkedSceneId}</div>
+                                    // 审计 §4.3 模式 1：`?? linkedSceneId` 会把场景内部 ID 端上屏
+                                    <div className="text-xs text-gray-400">已关联场景：{sceneNameMap[linkedSceneId] ?? '（场景名称读取失败）'}</div>
                                   )
                                 ) : (
                                   <div className="text-xs text-gray-400">暂无关联场景</div>
@@ -6896,7 +6898,8 @@ function Inspector(props: {
                       <Image.PreviewGroup>
                         {keyframePromptPreviewRefFileIds.map((fid, index) => (
                           <div key={fid} className="w-[92px] shrink-0">
-                            <Tooltip title={shotLinkedAssetNameByFileId.get(fid) ?? fid}>
+                            {/* 审计 §4.3 模式 1：`?? fid` 会把 file_id 同时打进正文与**悬停可见**的 title */}
+                            <Tooltip title={shotLinkedAssetNameByFileId.get(fid) ?? '（未命名参考图）'}>
                               <Image
                                 width={72}
                                 height={72}
@@ -6908,7 +6911,7 @@ function Inspector(props: {
                               <Tag color="blue">{`图${index + 1}`}</Tag>
                             </div>
                             <div className="truncate text-[11px] text-gray-700">
-                              {shotLinkedAssetNameByFileId.get(fid) ?? fid}
+                              {shotLinkedAssetNameByFileId.get(fid) ?? '（未命名参考图）'}
                             </div>
                             <div className="mt-1 flex gap-1">
                               <Button
