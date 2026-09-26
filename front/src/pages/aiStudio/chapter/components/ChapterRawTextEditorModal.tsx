@@ -22,6 +22,10 @@ import { handleTaskResultSafely } from '../../components/taskResultHelpers'
 import { useRelationTaskNotification } from '../../components/taskNotificationHelpers'
 import { useTaskPageContext } from '../../components/taskPageContext'
 import { TASK_COPY } from '../../components/taskCopy'
+// 阶段 B ③（审计 §4.3 模式 6）：任务失败原文（`data.error`）与信封错误原文都要过管道
+import { showUserError } from '../../components/userFacingMessage'
+// 阶段 B ③（审计 §4.3 模式 2）：问题类型枚举原值不许直渲
+import { SCRIPT_ISSUE_TYPE, labelFor } from '../../components/enumLabels'
 
 type EditorMode = 'raw' | 'condensed' | 'compare'
 
@@ -121,7 +125,8 @@ export function ChapterRawTextEditorModal({
       failedFallbackMessage: '一致性检查失败',
       onSucceeded: (resultValue) => applyConsistencyResultValue(resultValue),
       onFailed: (errorMessage) => {
-        message.error(errorMessage)
+        // 审计 §4.3 模式 6：`errorMessage` 来自 taskResultHelpers 的 `data.error`（后端原文）
+        void showUserError(errorMessage, '一致性检查失败')
       },
       onReadError: () => {
         message.error('读取一致性检查结果失败')
@@ -152,7 +157,7 @@ export function ChapterRawTextEditorModal({
       failedFallbackMessage: '智能精简失败',
       onSucceeded: (resultValue) => applySimplifyResultValue(resultValue),
       onFailed: (errorMessage) => {
-        message.error(errorMessage)
+        void showUserError(errorMessage, '智能精简失败')
       },
       onReadError: () => {
         message.error('读取智能精简结果失败')
@@ -180,7 +185,7 @@ export function ChapterRawTextEditorModal({
       failedFallbackMessage: '一键优化失败',
       onSucceeded: (resultValue) => applyOptimizeResultValue(resultValue),
       onFailed: (errorMessage) => {
-        message.error(errorMessage)
+        void showUserError(errorMessage, '一键优化失败')
       },
       onReadError: () => {
         message.error('读取一键优化结果失败')
@@ -290,7 +295,8 @@ export function ChapterRawTextEditorModal({
       applySimplifyResultValue(res.data)
     } catch (error) {
       message.destroy(SYNC_SIMPLIFY_MESSAGE_KEY)
-      message.error(describeEnvelopeError(error, '智能精简失败'))
+      // 审计 §4.3 模式 6：`describeEnvelopeError` 会原样返回 `meta.error.message` / `detail`
+      void showUserError(describeEnvelopeError(error, '智能精简失败'), '智能精简失败')
     } finally {
       setExtracting(false)
     }
@@ -323,7 +329,7 @@ export function ChapterRawTextEditorModal({
       applyConsistencyResultValue(res.data)
     } catch (error) {
       message.destroy(SYNC_CONSISTENCY_MESSAGE_KEY)
-      message.error(describeEnvelopeError(error, '一致性检查失败'))
+      void showUserError(describeEnvelopeError(error, '一致性检查失败'), '一致性检查失败')
     } finally {
       setCheckingConsistency(false)
     }
@@ -380,7 +386,7 @@ export function ChapterRawTextEditorModal({
       applyOptimizeResultValue(res.data)
     } catch (error) {
       message.destroy(SYNC_OPTIMIZE_MESSAGE_KEY)
-      message.error(describeEnvelopeError(error, '一键优化失败'))
+      void showUserError(describeEnvelopeError(error, '一键优化失败'), '一键优化失败')
     } finally {
       setOptimizingScript(false)
     }
@@ -587,7 +593,7 @@ export function ChapterRawTextEditorModal({
                     disabled={actionsLoading || !!consistencyTask}
                     onClick={() => void handleCheckConsistency()}
                   >
-                    {consistencyTask ? '检查中' : '角色混淆检查'}
+                    {consistencyTask ? '正在检查…' : '角色混淆检查'}
                   </Button>
                 </span>
               </Tooltip>
@@ -735,7 +741,7 @@ export function ChapterRawTextEditorModal({
                     <Tag color={consistencyResult.has_issues ? 'red' : 'green'}>
                       {consistencyResult.has_issues ? '发现问题' : '无问题'}
                     </Tag>
-                    <Tag>issues：{consistencyIssues.length}</Tag>
+                    <Tag>问题 {consistencyIssues.length} 处</Tag>
                     <Tooltip title={SYNC_AI_HINT}>
                       <span>
                         <Button
@@ -774,12 +780,12 @@ export function ChapterRawTextEditorModal({
                       <List.Item>
                         <div className="min-w-0">
                           <div className="font-medium">
-                            {it?.issue_type ? `[${it.issue_type}] ` : ''}
-                            Issue {idx + 1}
+                            {it?.issue_type ? `【${labelFor(SCRIPT_ISSUE_TYPE, it.issue_type)}】 ` : ''}
+                            第 {idx + 1} 处问题
                           </div>
                           <div className="text-sm">{it?.description}</div>
                           {it?.character_candidates?.length ? (
-                            <div className="text-xs text-gray-500 mt-1">候选角色：{it.character_candidates.join('、')}</div>
+                            <div className="text-xs text-gray-500 mt-1">相关角色：{it.character_candidates.join('、')}</div>
                           ) : null}
                           {it?.suggestion ? (
                             <div className="text-xs text-gray-500 mt-1">建议：{it.suggestion}</div>

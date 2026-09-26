@@ -21,6 +21,8 @@ import {
   type PromptDeliveryPreview,
   type PromptDeliveryRow,
 } from '../../../../services/llmPipelineApi'
+// 阶段 B ③（审计 §4.3 模式 6）：后端原文 → 主区中文结论（掩码 → 洗句 → 业务化改写）
+import { toUserFacingText } from '../../components/userFacingMessage'
 
 export type StudioStepProgressStep = 'video_prompt' | 'binding' | 'deliver'
 
@@ -85,7 +87,7 @@ export function StudioStepProgressStrip({ projectId, chapterId, step, selectedSh
     try {
       setData(await previewPromptDelivery(projectId, chapterId, 'episode', selectedShotIds))
     } catch (e) {
-      setError((e as Error)?.message || '进度加载失败')
+      setError(toUserFacingText(e, '进度加载失败'))
       setData(null)
     } finally {
       setLoading(false)
@@ -188,7 +190,7 @@ export function StudioStepProgressStrip({ projectId, chapterId, step, selectedSh
                   // 走 fetch+Blob 的真实下载：失败会提示错误，不会打开一个 404 页面
                   void downloadDeliveryTxt(projectId, chapterId, selectedShotIds)
                     .then((result) => message.success(`已下载：${result.filename}（${result.bytes} 字节）`))
-                    .catch((error) => message.error(error instanceof Error ? error.message : '导出失败'))
+                    .catch((error) => message.error(toUserFacingText(error, '导出失败')))
                 }}
               >
                 {`下载 TXT${selectedShotIds.filter(Boolean).length ? `（选中 ${selectedShotIds.filter(Boolean).length} 镜）` : ''}`}

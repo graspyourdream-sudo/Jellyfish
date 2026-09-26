@@ -62,7 +62,8 @@ export function ShotBoundFilesPanel({ projectId, chapterId, shotId }: ShotBoundF
       setRows(((row?.bound_files ?? []) as BoundFileRow[]) ?? [])
     } catch (err) {
       setRows([])
-      setError(err instanceof Error ? err.message : '读取实际绑定文件失败')
+      // 审计 §4.3 模式 6：同文件 `:131`（warnings 出口）已经调了管道，这条路径口径要一致
+      setError(toUserFacingText(err, '读取实际绑定文件失败'))
     } finally {
       setLoading(false)
     }
@@ -122,11 +123,11 @@ export function ShotBoundFilesPanel({ projectId, chapterId, shotId }: ShotBoundF
                 )}
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1">
-                    <span className="truncate text-xs">{row.asset_name || row.asset_id}</span>
+                    <span className="truncate text-xs">{row.asset_name || '（资产名称读取失败）'}</span>
                     <Tag color={meta.color} style={{ marginInlineEnd: 0 }}>{meta.label}</Tag>
                   </div>
                   <div className="text-[10px] text-gray-500">
-                    {`${row.slot_label || row.slot} · ${row.file_id ? '文件已就绪' : '（无文件）'}（内部 ID 见「技术详情」）`}
+                    {`${row.slot_label || '本镜素材'} · ${row.file_id ? '文件已就绪' : '（无文件）'}（内部 ID 见「技术详情」）`}
                   </div>
                   {row.warnings?.length ? (
                     <div className="text-[10px] text-amber-600">{toUserFacingText(row.warnings[0], '这一项有需要注意的地方')}</div>
@@ -141,7 +142,7 @@ export function ShotBoundFilesPanel({ projectId, chapterId, shotId }: ShotBoundF
           <div className="flex items-center gap-1">
             <Tag color="cyan" style={{ marginInlineEnd: 0 }}>声音</Tag>
             {audioRow ? (
-              <span className="truncate text-xs">{audioRow.asset_name || audioRow.asset_id}</span>
+              <span className="truncate text-xs">{audioRow.asset_name || '（声音名称读取失败）'}</span>
             ) : (
               <span className="text-xs text-gray-500">未绑定声音</span>
             )}

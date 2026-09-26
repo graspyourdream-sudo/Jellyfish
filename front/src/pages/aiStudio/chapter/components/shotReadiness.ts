@@ -10,6 +10,11 @@
  *   绑定文件缺失只作为提醒标注，不阻止导出。
  */
 
+// 阶段 B ③（审计 §4.3 模式 3）：帧类型不许原值上屏，复用同目录已有的 frameTypeLabel
+import { frameTypeLabel } from './shotStatusText.ts'
+// 阶段 B ③（审计 §4.3 模式 6）：`frame_block_reasons` 是后端原文，进主区前先过三级管道
+import { toUserFacingText } from '../../components/userFacingMessage.ts'
+
 export type PromptDeliveryFile = {
   slot?: string
   slot_label?: string
@@ -109,12 +114,14 @@ export function evaluateShotReadiness(input: ReadinessInput): ShotReadiness {
   // 区分两类阻断，页面提示必须说清是"没上传"还是"上传了但供应商取不到"
   const absentFrames = missingFrames.filter((frame) => !unusable.has(frame))
   const blockedFrames = missingFrames.filter((frame) => unusable.has(frame))
-  if (absentFrames.length) missing.push(`缺少参考帧：${absentFrames.join('、')}`)
+  if (absentFrames.length) missing.push(`缺少参考帧：${absentFrames.map(frameTypeLabel).join('、')}`)
   if (blockedFrames.length) {
-    missing.push(`参考帧已上传但供应商无法访问：${blockedFrames.join('、')}`)
+    // 审计 §4.3 模式 5：主区禁词「供应商」→ 用户语言「当前服务取不到」；帧类型同样过映射
+    missing.push(`参考帧已上传但当前服务取不到：${blockedFrames.map(frameTypeLabel).join('、')}`)
   }
   for (const reason of input.frameBlockReasons ?? []) {
-    if (reason) missing.push(reason)
+    // 审计 §4.3 模式 6：这串直接渲染在主区「本镜还缺什么」里（源头 ChapterStudio 传 frame_block_reasons）
+    if (reason) missing.push(toUserFacingText(reason, '这一帧这次用不了：可以重新生成或换一张参考图'))
   }
   if (input.planReady === false && required.length) missing.push('生成计划尚未加载完成')
   missing.push(...(input.extraBlockers ?? []))

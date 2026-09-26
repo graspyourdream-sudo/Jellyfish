@@ -24,6 +24,10 @@ import {
   saveShotVideoPrompt,
   type PromptDeliveryRow,
 } from '../../../../services/llmPipelineApi'
+// 阶段 B ③（审计 §4.3 模式 6）：后端原文 → 主区中文结论（掩码 → 洗句 → 业务化改写）
+import { showUserError, toUserFacingText } from '../../components/userFacingMessage'
+// 阶段 B ③（审计 §4.3 模式 3）：提示词来源枚举原值不许直渲（jurilu / manual_workspace…）
+import { videoPromptSourceLabel } from '../../components/enumLabels'
 
 /** 可进入交付导出的来源白名单：这些来源的内容视为"已确认"，默认不覆盖。 */
 export const CONFIRMED_PROMPT_SOURCES: string[] = [
@@ -99,7 +103,7 @@ export function VideoPromptLlmPanel({
       setRows(data?.rows ?? [])
     } catch (error) {
       setRows([])
-      setLoadError(error instanceof Error ? error.message : '读取本集镜头失败')
+      setLoadError(toUserFacingText(error, '读取本集镜头失败'))
     } finally {
       setLoadingRows(false)
     }
@@ -192,7 +196,7 @@ export function VideoPromptLlmPanel({
           setItems((prev) =>
             prev.map((item) =>
               item.shotId === target.shotId
-                ? { ...item, status: 'failed', error: error instanceof Error ? error.message : '生成失败' }
+                ? { ...item, status: 'failed', error: toUserFacingText(error, '生成失败') }
                 : item,
             ),
           )
@@ -238,7 +242,7 @@ export function VideoPromptLlmPanel({
       onSaved?.(item.shotId, text, 'llm')
       return true
     } catch (error) {
-      message.error(`保存失败：${error instanceof Error ? error.message : String(error)}`)
+      void showUserError(error, '保存失败')
       return false
     } finally {
       setSavingId('')
@@ -333,7 +337,7 @@ export function VideoPromptLlmPanel({
           type="warning"
           showIcon
           message={`有 ${dryRunRows.length} 条是演练结果（后端未调用大模型），不能保存为正式产物`}
-          description="演练模式（DRY_RUN）下不会真的调用大模型，也不会花钱；要拿到可保存的结果需要先确认并关闭守卫。"
+          description="演练模式下不会真的调用大模型，也不会花钱；要拿到可保存的结果需要先确认并开启真实调用。"
         />
       ) : null}
 
@@ -374,7 +378,7 @@ export function VideoPromptLlmPanel({
                   return <Tag color={color}>{label}</Tag>
                 },
               },
-              { title: '已有内容', dataIndex: 'saved', width: 120, render: (value: string, row) => (value ? `${value.length} 字 / ${row.savedSource || '无来源'}` : '—') },
+              { title: '已有内容', dataIndex: 'saved', width: 120, render: (value: string, row) => (value ? `${value.length} 字 / ${videoPromptSourceLabel(row.savedSource) || '无来源'}` : '—') },
               {
                 title: '生成结果（可编辑）',
                 dataIndex: 'draft',
@@ -383,7 +387,7 @@ export function VideoPromptLlmPanel({
                     <Input.TextArea
                       rows={3}
                       value={value}
-                      placeholder={row.status === 'failed' ? row.error : '点上面的「生成提示词」后在这里检查/修改'}
+                      placeholder={row.status === 'failed' ? toUserFacingText(row.error, '这一条没有生成成功，请重试') : '点上面的「生成提示词」后在这里检查/修改'}
                       disabled={row.status === 'failed'}
                       onChange={(event: React.ChangeEvent<HTMLTextAreaElement>) =>
                         setItems((prev) => prev.map((item) => (item.shotId === row.shotId ? { ...item, draft: event.target.value } : item)))
@@ -400,14 +404,13 @@ export function VideoPromptLlmPanel({
                         保存到镜头（来源：大模型生成）
                       </Button>
                       {row.status === 'generated' && !row.llmCalled ? (
-                        <span className="text-[11px] text-amber-600">演练结果：后端未调用大模型，不可保存</span>
+                        <span className="text-[11px] text-amber-600">演练结果：没有真正调用大模型，不可保存</span>
                       ) : null}
-                      {row.latencyMs ? <span className="text-[11px] text-gray-400">{`${row.latencyMs} ms`}</span> : null}
                     </div>
                     {row.warnings?.length ? (
                       <ul className="list-disc pl-5 text-[11px] text-amber-600">
                         {row.warnings.slice(0, 3).map((warning, index) => (
-                          <li key={`${row.shotId}-warn-${index}`}>{warning}</li>
+                          <li key={`${row.shotId}-warn-${index}`}>{toUserFacingText(warning, '这一条有需要注意的地方')}</li>
                         ))}
                       </ul>
                     ) : null}

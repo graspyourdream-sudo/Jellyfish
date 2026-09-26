@@ -14,7 +14,7 @@
  *   ⑦ 导出绑定提示词
  *
  * 另有两条折叠：**对白与镜头内容**（有对白时才有）与**技术详情**
- * （供应商名 / 内部 ID / file_id / 接口参数，默认收起）。
+ * （内部标识与调用参数，默认收起）。
  *
  * 当前工作室步骤只决定**哪一块默认展开**：切换镜头不改变展开状态（用户停在哪就在哪），
  * 切换步骤才重新定位到该步骤对应的块。
@@ -150,7 +150,7 @@ export function ShotProductionWorkspace({
             <ExperimentOutlined /> 技术详情
           </div>
           <div className="text-[11px] text-gray-500">
-            供应商、内部 ID、file_id / storage_key、接口参数与守卫状态（默认收起）
+            内部标识与调用参数（默认收起）
           </div>
         </div>
       ),

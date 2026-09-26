@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { message } from 'antd'
 import { REFERENCE_MODE, labelFor, videoModelBusinessName as videoModelBusinessNameShared } from '../../components/enumLabels.ts'
-import { toUserFacingText } from '../../components/userFacingMessage.ts'
+import { showUserWarning, toUserFacingText } from '../../components/userFacingMessage.ts'
 import { frameTypeLabel } from './shotStatusText.ts'
 import {
   persistGeneratedVideo,
@@ -145,7 +145,8 @@ export function useShotRequestPlan(args: {
       setPlan(data)
     } catch (error) {
       setPlan(null)
-      message.warning(error instanceof Error ? error.message : '读取生成计划失败')
+      // 审计 §4.3 模式 6：这里原来直传 `error.message`（走 callApi，后端原文 + HTTP xxx 会一起弹）
+      void showUserWarning(error, '读取生成计划失败')
     } finally {
       setPlanLoading(false)
     }
