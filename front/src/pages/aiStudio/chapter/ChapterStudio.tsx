@@ -140,8 +140,15 @@ import {
 } from './components/shotReadiness'
 import { TASK_COPY } from '../components/taskCopy'
 // 阶段 B ①：后端原文 → 主区的中文结论（掩码 → 洗句 → 业务化改写三级管道）
-import { toUserFacingText } from '../components/userFacingMessage'
-import { TARGET_RATIO_SOURCE, labelFor } from '../components/enumLabels'
+import { showUserError, showUserWarning, toUserFacingText } from '../components/userFacingMessage'
+import {
+  TARGET_RATIO_SOURCE,
+  framePromptSourceLabel as framePromptSourceLabelShared,
+  guardStatusLabel,
+  labelFor,
+  taskStatusLabel,
+  videoPromptSourceLabel as videoPromptSourceLabelShared,
+} from '../components/enumLabels'
 import { classifyGenerationFailure, failureText } from '../components/generationGate'
 import { ChapterStudioBatchToolbar } from './components/ChapterStudioBatchToolbar'
 import { ChapterStudioMaintenancePanel } from './components/ChapterStudioMaintenancePanel'
@@ -186,7 +193,7 @@ type VideoPromptDerived = {
  * 固定模型直提计划（`/api/v1/studio/image-pipeline/video-plan/preview`）的只读视图。
  *
  * 只用于在「视频生成提示词预览」弹窗里如实展示后端固定策略
- * （seedance-2.0-mini / 480p / 最短 5s）与 DRY_RUN 守卫状态；
+ * （短视频标准方案 / 480p / 最短 5s）与付费守卫状态；
  * 它只预览、不提交，也不代表当前弹窗的「生成」一定走这条路。
  */
 type VideoPinnedPlanView = {
@@ -218,40 +225,36 @@ function normalizeVideoPinnedPlan(raw: unknown): VideoPinnedPlanView | null {
   }
 }
 
-/** 视频提示词来源的中文标签（与后端白名单 jurilu / skill / llm / internal 对齐）。 */
+/**
+ * 视频提示词来源的中文标签。
+ *
+ * 审计 §4.3 模式 3：旧实现的兜底是 `return normalized || '未知来源'` ——
+ * **未登记来源码会被原样端上屏**（运行时实测过 `jurilu` / `manual_workspace`）。
+ * 现在收敛到全仓唯一映射表 `components/enumLabels.ts`（未登记一律中文兜底）。
+ */
 function videoPromptSourceLabel(source: string): string {
-  const normalized = String(source ?? '').trim().toLowerCase()
-  if (normalized === 'llm') return 'LLM 生成'
-  if (normalized === 'manual' || normalized === 'manual_workspace' || normalized === 'internal') return '人工编辑'
-  if (normalized === 'shot_description') return '镜头描述生成'
-  if (normalized === 'jurilu') return '剧立方导入'
-  if (normalized === 'skill') return '技能生成'
-  return normalized || '未知来源'
+  return videoPromptSourceLabelShared(source)
 }
 
 /**
  * 是否允许真实付费（后端 `guard_status` → 中文结论）。
  *
- * 审计 §4.3 模式 3：这个值和 `pending` 一样属英文枚举原值直渲。
- * 后端的 `short_status()` 是自由文本（可能带 `DRY_RUN=开（JELLYFISH_DRY_RUN，…）`），
- * 所以这里按语义归类成中文结论，**原文仍留在「技术详情」的技术块里**。
+ * 审计 §4.3 模式 3 / §6 边界项：这个值和 `pending` 一样属英文枚举原值直渲。
+ * 口径已收敛到 `components/enumLabels.ts` 的 `guardStatusLabel`（**单一定义**，
+ * 顺手修掉了旧实现里 `dry_run` 正则因 `i` 标志把「DRY_RUN=关且已确认」
+ * 也判成「演练模式」的错误结论）；**原文仍留在「技术详情」的技术块里**。
  */
 function describeGuardStatus(raw: string): string {
-  const text = String(raw ?? '')
-  if (!text.trim()) return '待确认'
-  if (/DRY_RUN\s*=\s*开|dry_run/i.test(text)) return '不允许（当前是演练模式）'
-  if (/未确认|not_confirmed|unconfirmed/i.test(text)) return '不允许（真实调用还没有确认）'
-  if (/真实|real/i.test(text)) return '允许'
-  return '待确认（原始状态见「技术详情」）'
+  return guardStatusLabel(raw)
 }
 
-/** 关键帧出图的提示词来源（后端 frame-submit 计划里的 prompt_source）。 */
+/**
+ * 关键帧出图的提示词来源（后端 frame-submit 计划里的 prompt_source）。
+ *
+ * 旧兜底同样是 `return normalized || '未知'`（未登记原值上屏），现走唯一映射表。
+ */
 function framePromptSourceLabel(source: string): string {
-  const normalized = String(source ?? '').trim().toLowerCase()
-  if (normalized === 'saved') return '镜头已保存'
-  if (normalized === 'request') return '本次输入'
-  if (normalized === 'empty') return '无（提交会被拒）'
-  return normalized || '未知'
+  return framePromptSourceLabelShared(source)
 }
 
 /** 帧类型 → shot_details 上保存该帧提示词的字段（与后端 FRAME_PROMPT_FIELDS 一致）。 */
@@ -534,14 +537,14 @@ function getKeyframeRenderStatusMeta(state: GenerationDraftState) {
     return {
       color: 'green' as const,
       label: '已同步',
-      description: '当前最终提示词已与基础提示词和参考图顺序保持一致。',
+      description: '当前提交版本已与基础提示词和参考图顺序保持一致。',
     }
   }
   if (renderState === 'syncing') {
     return {
       color: 'blue' as const,
       label: '同步中',
-      description: '正在根据当前基础提示词和参考图顺序更新最终提示词…',
+      description: '正在根据当前基础提示词和参考图顺序更新提交版本…',
     }
   }
   if (renderState === 'error') {
@@ -555,13 +558,13 @@ function getKeyframeRenderStatusMeta(state: GenerationDraftState) {
     return {
       color: 'default' as const,
       label: '待生成',
-      description: '请先输入基础提示词，系统会自动生成最终提示词。',
+      description: '请先输入基础提示词，系统会自动生成提交版本。',
     }
   }
   return {
     color: 'gold' as const,
     label: '待同步',
-    description: '基础提示词或参考图顺序已变化，最终提示词正在等待更新。',
+    description: '基础提示词或参考图顺序已变化，提交版本正在等待更新。',
   }
 }
 
@@ -1414,7 +1417,7 @@ const ChapterStudio: React.FC = () => {
       .map((x) => x.character_id)
     const removed = current.filter((id) => !next.includes(id))
     if (removed.length > 0) {
-      message.warning('当前接口暂不支持移除已关联角色，仅会新增或重排')
+      message.warning('这一版还不支持移除已关联角色，只会新增或重排')
     }
     if (next.length === 0) return
     setPromptAssetsUpdating(true)
@@ -1446,7 +1449,7 @@ const ChapterStudio: React.FC = () => {
       frameImages.find((x) => x.frame_type === 'key') ||
       frameImages[0]
     if (!target) {
-      message.warning('请先添加一张分镜帧图（frame image）')
+      message.warning('请先添加一张分镜帧图')
       return
     }
     const prompt =
@@ -1510,15 +1513,17 @@ const ChapterStudio: React.FC = () => {
         model_id: keyframeImageModelId || null,
       })
       if (result.dry_run) {
-        message.info('演练模式：未真实出图（DRY_RUN 开着）。')
+        // 审计 §4.3 模式 4：主区不许出现 DRY_RUN / 环境变量名
+        message.info('演练模式：没有真实出图、没有产生费用。')
       } else if (result.status === 'succeeded' && result.file_id) {
         await refreshShotFrameImages()
         message.success('帧图已生成并保存到本镜（内部 ID 见「技术详情」）')
       } else {
-        message.error(result.error || `生成未成功（status=${result.status || 'unknown'}）`)
+        // 审计 §4.3 模式 3：不许把 `status=xxx` 拼进中文句
+        message.error(toUserFacingText(result.error, '图片没能生成出来，请重试；若持续失败请到「技术详情」看原因'))
       }
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '生成失败')
+      void showUserError(error, '图片没能生成出来，请重试')
     } finally {
       setGenerating(false)
     }
@@ -3169,14 +3174,16 @@ function Inspector(props: {
       if (result.status === 'dry_run') {
         // 演练模式：守卫拦下了真实调用。这不是错误，要说清楚而不是报红。
         message.info(
-          '演练模式（DRY_RUN）：未真实生成、未产生费用。要真实生成请在后端显式关闭守卫（JELLYFISH_DRY_RUN=0 且 JELLYFISH_REAL_LLM_CONFIRMED=1）后重试。',
+          // 审计 §4.3 模式 4：整句里的 DRY_RUN / JELLYFISH_* 环境变量名全部摘掉
+          '演练模式：本次没有真实生成、没有产生费用。如需真实生成，请联系管理员开启。',
           8,
         )
         // 关键：把「被门禁阻止」和「没有任务 ID」区分开，否则调用方会再报一次红字。
         return { taskId: null, gated: true }
       }
       if (result.status !== 'completed' || !result.url) {
-        throw new Error(result.error || `视频生成未完成（status=${result.status}）`)
+        // 审计 §4.3 模式 3：`status=xxx` 属英文枚举原值直渲
+        throw new Error(toUserFacingText(result.error, '视频没有生成出来，请重试'))
       }
       const fileId = await persistGeneratedVideo(selectedShot.id, result.url, '镜头视频（直提）')
       const refreshed = await StudioShotDetailsService.getShotDetailApiV1StudioShotDetailsShotIdGet({
@@ -3248,7 +3255,7 @@ function Inspector(props: {
       if (refreshed.data) onPatchShotDetail(refreshed.data)
       message.success(`视频提示词已保存到镜头（来源：${videoPromptSourceLabel(source)}）`)
     } catch (err) {
-      message.error(`保存视频提示词失败：${err instanceof Error ? err.message : String(err)}`)
+      void showUserError(err, '保存视频提示词失败')
     } finally {
       setVideoPromptTabSaving(false)
     }
@@ -4427,8 +4434,8 @@ function Inspector(props: {
         if (savedPrompt) {
           if (savedPrompt !== llmPrompt) {
             message.warning(
-              `已载入该镜头已保存的视频提示词（来源：${videoPromptSourceLabel(savedSource)}），本次 LLM 生成结果未覆盖它；` +
-                '如需改用本次生成结果，请在弹窗内点击「使用本次 LLM 结果」。',
+              `已载入该镜头已保存的视频提示词（来源：${videoPromptSourceLabel(savedSource)}），本次大模型生成结果未覆盖它；` +
+                '如需改用本次生成结果，请在弹窗内点击「使用本次大模型结果」。',
             )
           } else {
             message.info('已载入该镜头已保存的视频提示词')
@@ -4457,7 +4464,7 @@ function Inspector(props: {
   /**
    * 保存视频提示词到镜头（`shot_details.video_prompt` + `video_prompt_source`）。
    *
-   * 来源判定：与本次 LLM 生成结果完全一致 → `llm`；被人工改过 → `internal`。
+   * 来源判定：与本次大模型生成结果完全一致 → `llm`；被人工改过 → `internal`。
    * 保存后回读一次详情，让 inspector 立刻显示已持久化的值（与 patchShotDetailImmediate 同款做法）。
    */
   const saveVideoPromptToShot = async () => {
@@ -4480,17 +4487,17 @@ function Inspector(props: {
       if (refreshed.data) onPatchShotDetail(refreshed.data)
       message.success(`视频提示词已保存到镜头（来源：${videoPromptSourceLabel(source)}）`)
     } catch (err) {
-      message.error(`保存视频提示词失败：${err instanceof Error ? err.message : String(err)}`)
+      void showUserError(err, '保存视频提示词失败')
     } finally {
       setVideoPromptSaving(false)
     }
   }
 
-  /** 放弃已保存/人工编辑内容，改用本次 LLM 生成结果（保存时会标记为 llm 来源）。 */
+  /** 放弃已保存/人工编辑内容，改用本次大模型生成结果（保存时会标记为 llm 来源）。 */
   const applyVideoLlmDerivedPrompt = () => {
     const llmPrompt = videoLlmDerivedPrompt.trim()
     if (!llmPrompt) {
-      message.warning('本次没有可用的 LLM 生成结果')
+      message.warning('本次没有可用的大模型生成结果')
       return
     }
     const currentDerived = videoPromptDraft.derived
@@ -4501,7 +4508,7 @@ function Inspector(props: {
         ? { ...currentDerived, prompt: llmPrompt }
         : { prompt: llmPrompt, images: videoPromptDraft.context.images, pack: null },
     })
-    message.info('已切换为本次 LLM 生成结果')
+    message.info('已切换为本次大模型生成结果')
   }
 
   const submitVideoGeneration = async () => {
@@ -4541,7 +4548,8 @@ function Inspector(props: {
       }
       const taskId = result?.taskId
       if (!taskId) {
-        message.error('视频生成未返回产物：接口没有返回任务 ID，也没有返回视频地址')
+        // 审计 §4.3 模式 2/3：主区不出现「接口」「任务 ID」
+        message.error('视频没有生成出来：服务没有返回成片，请重试')
         return
       }
       setVideoTaskId(taskId)
@@ -4718,7 +4726,7 @@ function Inspector(props: {
       })
       const taskId = created.data?.task_id
       if (!taskId) {
-        message.error('生成任务创建失败：缺少任务 ID')
+        message.error('提示词生成没能启动，请重试')
         return
       }
       setPromptTask({
@@ -4868,7 +4876,7 @@ function Inspector(props: {
         setKeyframePlanPreview(plan)
       } catch (error) {
         setKeyframePlanPreview(null)
-        message.warning(error instanceof Error ? error.message : '读取关键帧提交计划失败')
+        void showUserWarning(error, '读取关键帧提交计划失败')
       }
     },
     [
@@ -4921,7 +4929,7 @@ function Inspector(props: {
       message.success(`已保存到本镜（${frameLabel[frameType]}提示词，${prompt.length} 字）`)
       await loadKeyframePlanPreview(frameType)
     } catch (error) {
-      message.error(`保存失败：${error instanceof Error ? error.message : String(error)}`)
+      void showUserError(error, '保存失败')
     } finally {
       setKeyframePromptActionLoading(false)
     }
@@ -5100,8 +5108,9 @@ function Inspector(props: {
 
       const notes = result.provider_notes ?? []
       if (notes.length) {
-        // 供应商/适配层的如实说明必须让用户看到（例如垫片「参考图未透传」）
-        message.warning(notes[0], 6)
+        // 审计 §4.3 模式 6：这是唯一一处把生成服务方的原话铺到主区 toast 的地方
+        // （`:5086`），原文只进「技术详情」，主区只给中文结论。
+        void showUserWarning(notes[0], '这一条有需要注意的地方', '生成关键帧')
       }
 
       if (result.dry_run) {
@@ -5117,10 +5126,11 @@ function Inspector(props: {
         setKeyframePromptPreviewOpen(false)
         return
       }
-      message.error(result.error || `${frameLabel[frameType]}生成未成功（status=${result.status || 'unknown'}）`)
+      // 审计 §4.3 模式 3：不许把 `status=xxx` 拼进中文句
+      message.error(toUserFacingText(result.error, `${frameLabel[frameType]}没能生成出来，请重试；若持续失败请到「技术详情」看原因`))
     } catch (error) {
       updateCardState(frameType, { taskStatus: 'failed' })
-      message.error(error instanceof Error ? error.message : `${frameLabel[frameType]}生成失败`)
+      void showUserError(error, `${frameLabel[frameType]}生成失败`)
     } finally {
       updateCardState(frameType, { loading: false })
       setKeyframePromptActionLoading(false)
@@ -5174,9 +5184,10 @@ function Inspector(props: {
         })
       }
       await onRefreshShotFrameImages?.()
-      message.success(`${frameLabel[frameType]}已上传并写入槽位`)
+      // 审计 §4.3 模式 2：主区禁词「槽位」
+      message.success(`${frameLabel[frameType]}已上传并设为该帧`)
     } catch (error) {
-      message.error(error instanceof Error ? error.message : `${frameLabel[frameType]}上传失败`)
+      void showUserError(error, `${frameLabel[frameType]}上传失败`)
     } finally {
       updateCardState(frameType, { uploading: false })
     }
@@ -5238,7 +5249,7 @@ function Inspector(props: {
             message.success(`已下载交付提示词：${result.filename}（${result.bytes} 字节，${shotIds.length} 镜）`)
             setExportScopeOpen(false)
           } catch (error) {
-            message.error(error instanceof Error ? error.message : '导出失败')
+            void showUserError(error, '导出失败')
           }
         }}
       />
@@ -5639,7 +5650,7 @@ function Inspector(props: {
                     <div className="cs-group-title">
                       <SoundOutlined /> 对白状态
                     </div>
-                    <div className="cs-hint">这里主要查看当前镜头对白与待确认状态。对白候选的主确认入口在分镜编辑页，工作室侧重继续准备关键帧、图片和视频生成。</div>
+                    <div className="cs-hint">这里主要查看当前镜头对白与待确认状态。待确认对白的主确认入口在分镜编辑页，工作室侧重继续准备关键帧、图片和视频生成。</div>
                     <div className="space-y-4 mt-3">
                       <div>
                         <Button icon={<EditOutlined />} onClick={goToShotEditForAssets}>
@@ -5652,7 +5663,7 @@ function Inspector(props: {
 
                       {pendingDialogueCandidates.length > 0 ? (
                         <div>
-                          <div className="text-gray-500 text-xs mb-2">待确认对白候选</div>
+                          <div className="text-gray-500 text-xs mb-2">待确认对白</div>
                           <div className="space-y-2">
                             {pendingDialogueCandidates.map((candidate) => (
                               <div key={candidate.id} className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
@@ -5715,6 +5726,7 @@ function Inspector(props: {
               ),
             },
               {
+              // >>> 技术详情层开始（kf_specs 整块只由 technical 折叠块渲染；主区禁词扫描按本标记区间豁免）
               key: 'kf_specs',
               label: '关键帧规格',
               children: (
@@ -5778,6 +5790,7 @@ function Inspector(props: {
               ),
             },
               {
+              // <<< 技术详情层结束
               key: 'kf_cards',
               label: '关键帧与参考图',
               children: (
@@ -6284,7 +6297,7 @@ function Inspector(props: {
                     </div>
                     <div className="text-xs text-gray-500">
                       生成入口在工作区「⑥ 生成视频」；这里只列已产出的视频（同一份预检与守卫）。
-                      {videoTaskStatus ? ` 任务状态：${videoTaskStatus}` : ''}
+                      {videoTaskStatus ? ` 任务状态：${taskStatusLabel(videoTaskStatus)}` : ''}
                     </div>
                   </div>
 
@@ -6381,7 +6394,8 @@ function Inspector(props: {
                     <div className="space-y-2">
                       <Space size={6} wrap>
                         <Tag color={savedPromptText.trim() ? 'green' : 'gold'}>
-                          {savedPromptText.trim() ? `来源：${savedPromptSrc || '未标记'}` : '尚未保存'}
+                          {/* 审计 §4.3 模式 3：与弹窗里 `:7465` 同一字段，必须走同一份映射 */}
+                          {savedPromptText.trim() ? `来源：${videoPromptSourceLabel(savedPromptSrc) || '未标记'}` : '尚未保存'}
                         </Tag>
                         <span className="text-[11px] text-gray-500">{`${savedPromptText.trim().length} 字`}</span>
                       </Space>
@@ -6460,7 +6474,7 @@ function Inspector(props: {
                                   </Tag>
                                   {frame.file_id && !frame.usable ? (
                                     <Tag color="orange" style={{ marginInlineEnd: 4 }}>
-                                      已存在但供应商取不到
+                                      已上传但当前服务取不到这张图
                                     </Tag>
                                   ) : null}
                                   <span className="text-[11px] text-gray-500">{frame.usable ? '本次请求会使用' : '本次请求用不了'}</span>
@@ -6494,7 +6508,9 @@ function Inspector(props: {
                               <div className="mt-1 max-w-[560px] text-[10px] leading-4 text-orange-600">
                                 <div>{toUserFacingText(String(requestPlan.plan.audio.excluded_reason || ''), '这条声音这次送不出去：生成服务取不到它')}</div>
                                 {requestPlan.plan.audio.how_to_fix ? (
-                                  <div className="text-slate-500">怎么修：{requestPlan.plan.audio.how_to_fix}</div>
+                                  <div className="text-slate-500">
+                                    怎么修：{toUserFacingText(requestPlan.plan.audio.how_to_fix, '把这条声音换成公网可访问的地址后重新绑定')}
+                                  </div>
                                 ) : null}
                               </div>
                             ) : null}
@@ -6551,7 +6567,8 @@ function Inspector(props: {
                           查看完整请求（可保存提示词）
                         </Button>
                         {requestPlan.plan?.guard_status ? (
-                          <Tag color="gold">{`付费守卫：${requestPlan.plan.guard_status}`}</Tag>
+                          // 审计 §4.3 模式 3：`guard_status` 是自由文本，主区只给中文结论
+                          <Tag color="gold">{`是否允许真实付费：${describeGuardStatus(requestPlan.plan.guard_status)}`}</Tag>
                         ) : null}
                       </Space>
                       {requestPlan.generateBlockedReason ? (
@@ -6575,7 +6592,7 @@ function Inspector(props: {
                             {requestPlan.plan.seconds == null ? '最短有效时长' : `${requestPlan.plan.seconds} 秒`}
                           </Descriptions.Item>
                           <Descriptions.Item label="提示词来源">
-                            {requestPlan.plan.prompt_source || '—'}
+                            {videoPromptSourceLabel(requestPlan.plan.prompt_source) || '—'}
                           </Descriptions.Item>
                           <Descriptions.Item label="参考图数量">
                             {requestPlan.plan.reference_image_count ?? 0}
@@ -6586,7 +6603,7 @@ function Inspector(props: {
                         <Alert
                           type="info"
                           showIcon
-                          message="后端提示"
+                          message="补充说明"
                           description={
                             <ul className="list-disc pl-4 text-[11px]">
                               {requestPlan.plan.warnings.slice(0, 4).map((warning: string, index: number) => (
@@ -6613,7 +6630,8 @@ function Inspector(props: {
                     </div>
                   ),
                   dialogue: dialogLines.length ? part('dialogue') : null,
-                  // 技术详情：供应商、内部 ID、file_id / storage_key、接口参数（默认收起）
+                  // 技术详情：内部标识与调用参数（默认收起；STEP_OPEN_KEYS 不含 technical）
+                  // >>> 技术详情层开始（默认收起；主区禁词扫描按本标记区间豁免）
                   technical: (
                     <div className="space-y-3">
                       <Descriptions size="small" column={1} bordered>
@@ -6665,10 +6683,23 @@ function Inspector(props: {
                             '—'
                           )}
                         </Descriptions.Item>
+                        {/* 审计 §4.3 模式 4：原来铺在主区的「不再走 POST /api/v1/film/tasks/video：
+                            Celery 队列 / Redis / worker / 停在 pending」整段，下沉到这里（历史实现说明）。 */}
+                        <Descriptions.Item label="历史实现说明">
+                          视频生成一度走 POST /api/v1/film/tasks/video（队列链路）：任务会丢给 Celery 队列，
+                          本机没有 Redis / worker 时任务只会停在 pending（表现为「点了生成没反应」）。
+                          现在改为同进程内联执行。
+                        </Descriptions.Item>
+                        {/* 审计 §4.3 模式 4：原来铺在主区的「DRY_RUN 守卫只作用于直提端点…」，下沉到这里。 */}
+                        <Descriptions.Item label="付费守卫适用范围">
+                          DRY_RUN 守卫只作用于「生成」这条直提链路；既有任务链路不经过该守卫，
+                          请到任务状态 /「已生成视频」里核对真实结果。
+                        </Descriptions.Item>
                       </Descriptions>
                       {part('kf_specs')}
                     </div>
                   ),
+                  // <<< 技术详情层结束
                 }}
               />
 
@@ -6853,7 +6884,7 @@ function Inspector(props: {
                     <div>
                       <div className="text-sm font-medium text-slate-900">参考图映射</div>
                       <div className="mt-1 text-xs text-slate-500">
-                        图片顺序会直接决定最终提示词中的图1、图2映射关系，并影响模型生成结果。
+                        图片顺序会直接决定提交版本中的图1、图2映射关系，并影响模型生成结果。
                       </div>
                     </div>
                     <Tag color="gold">顺序影响图1/图2</Tag>
@@ -6980,7 +7011,8 @@ function Inspector(props: {
                     <div className="mt-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-3 text-xs text-sky-800">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <div className="font-medium">基础提示词生成依据</div>
+                          {/* 审计 §4.3 模式 2：主区禁词「生成依据」 */}
+                          <div className="font-medium">这条基础提示词是怎么来的</div>
                           <div className="mt-1 text-sky-700">
                             这些导演约束主要用于生成上游基础提示词，默认先看摘要；只有少量高优先级规则会再进入最终图片提示词。
                           </div>
@@ -7240,7 +7272,7 @@ function Inspector(props: {
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                   <div className="mb-3 flex items-center justify-between">
                     <div>
-                      <div className="text-sm font-medium text-slate-900">最终生成提示词</div>
+                      <div className="text-sm font-medium text-slate-900">最终提交版本</div>
                       <div className="mt-1 text-xs text-slate-500">
                         系统会根据当前基础提示词和参考图顺序自动生成这一版内容，提交给模型时将使用这里的结果。
                       </div>
@@ -7270,7 +7302,7 @@ function Inspector(props: {
                         onClick={async () => {
                           try {
                             await navigator.clipboard.writeText(keyframePromptRenderedDraft || '')
-                            message.success('最终提示词已复制')
+                            message.success('已复制提交版本')
                           } catch {
                             message.error('复制失败')
                           }
@@ -7402,7 +7434,7 @@ function Inspector(props: {
                   ) : null}
                   {hasBasePrompt ? (
                     <div className="rounded-lg border border-slate-200 bg-white px-3 py-3 text-sm leading-6 text-slate-800 whitespace-pre-wrap min-h-[220px]">
-                      {keyframePromptRenderedDraft || '系统正在根据当前内容准备最终提示词…'}
+                      {keyframePromptRenderedDraft || '系统正在根据当前内容准备提交版本…'}
                     </div>
                   ) : (
                     <div className="rounded-lg border border-dashed border-slate-300 bg-white px-4 py-6 text-sm text-slate-500">
@@ -7491,24 +7523,21 @@ function Inspector(props: {
                 </div>
                 <div className="mt-1">
                   {savedVideoPrompt
-                    ? '打开弹窗时已回填该已保存内容，并且不会被 LLM 结果自动覆盖；点击「保存提示词」才会写回。'
+                    ? '打开弹窗时已回填该已保存内容，并且不会被大模型结果自动覆盖；点击「保存提示词」才会写回。'
                     : '当前草稿尚未落库，交付（PromptFlowPage）读不到；点击「保存提示词」可写入该镜头。'}
                 </div>
                 <div className="mt-1">
                   {`本次保存将标记来源为：${videoPromptSourceLabel(videoPromptSaveSource)}`}
-                  {videoLlmResultDiffers ? '（与本次 LLM 生成结果不一致）' : '（与本次 LLM 生成结果一致）'}
+                  {videoLlmResultDiffers ? '（与本次大模型生成结果不一致）' : '（与本次大模型生成结果一致）'}
                 </div>
               </div>
               <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
-                <div className="font-medium">生成路径：直提（同进程内联执行）</div>
+                {/* 审计 §4.3 模式 4：「生成路径：直提」+ 两个完整接口路径 + Celery/Redis/pending
+                    整段从主区撤下 —— 接口路径与历史实现说明下沉到下面默认收起的「技术详情」。 */}
+                <div className="font-medium">生成方式：立即执行，生成完自动挂到本镜</div>
                 <div className="mt-1">
-                  「生成」走 <span className="font-mono">POST /api/v1/studio/image-pipeline/video-submit</span>：
-                  它在本进程内真实执行并等到结果，成功后自动把产物登记成素材并挂到本镜头
+                  「生成」会在当前服务里直接跑完并等你看到结果：成功后自动把成片登记成素材并挂到本镜
                   （刷新后仍可见、交付也能读到）。
-                </div>
-                <div className="mt-1">
-                  不再走 <span className="font-mono">POST /api/v1/film/tasks/video</span>：那条链路把任务丢给
-                  Celery 队列，本机没有 Redis / worker 时任务只会停在 pending（表现为"点了生成没反应"）。
                 </div>
                 <div className="mt-1">
                   本集统一用「短视频标准方案」（固定 480p、最短 5 秒）；
@@ -7525,7 +7554,8 @@ function Inspector(props: {
                     {videoPinnedPlan.providerSupported ? null : <Tag color="red">当前视频方案不支持这个参考方式</Tag>}
                   </div>
                 ) : (
-                  <div className="mt-2">固定模型直提计划预览不可用（参考图数量或镜头数据暂不满足直提契约）。</div>
+                  // 审计 §4.3 点名的开发术语：「契约」不上主区
+                  <div className="mt-2">暂时还读不到这次的视频方案预览（参考图数量或镜头数据不满足生成条件）。</div>
                 )}
                 <div className="mt-1">
                   {videoPinnedPlan?.guardStatus
@@ -7534,21 +7564,20 @@ function Inspector(props: {
                 </div>
                 {videoPinnedPlan && videoPinnedPlan.warnings.length > 0 ? (
                   <ul className="mt-1 list-disc pl-4">
+                    {/* 审计 §4.3 模式 6：`:7519` 这一族 warnings 直渲后端原文，同文件 `:6575` 已用管道 */}
                     {videoPinnedPlan.warnings.map((item) => (
-                      <li key={item}>{item}</li>
+                      <li key={item}>{toUserFacingText(item, '这一条有需要注意的地方')}</li>
                     ))}
                   </ul>
                 ) : null}
-                <div className="mt-1">
-                  DRY_RUN 守卫只作用于直提端点；既有任务链路不经过该守卫，请在任务状态 / 「已生成视频」里核对真实结果。
-                </div>
+                {/* 审计 §4.3 模式 4：「DRY_RUN 守卫只作用于直提端点…」整句下沉到「技术详情」 */}
               </div>
               <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="font-medium text-slate-700">镜头连续性上下文</div>
                     <div className="mt-1 text-[11px] leading-5 text-slate-500">
-                      这些上下文会参与视频模板渲染和最终提示词补强，默认先展示摘要，需要时再展开细节。
+                      这些上下文会参与视频模板渲染和提交版本补强，默认先展示摘要，需要时再展开细节。
                     </div>
                   </div>
                   <Button
@@ -7665,7 +7694,7 @@ function Inspector(props: {
                   <div className="flex items-center gap-2">
                     {videoLlmDerivedPromptTrimmed && videoLlmResultDiffers ? (
                       <Button type="link" size="small" className="px-0" onClick={applyVideoLlmDerivedPrompt}>
-                        使用本次 LLM 结果
+                        使用本次大模型结果
                       </Button>
                     ) : null}
                     <span className="text-[11px] text-gray-400">{`保存来源：${videoPromptSourceLabel(videoPromptSaveSource)}`}</span>
