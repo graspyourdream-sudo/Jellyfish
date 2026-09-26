@@ -60,8 +60,22 @@ import {
   scannerSelfCheck,
 } from '../components/mainScreenCopyGuard.ts'
 import { maskInternalIds } from '../components/maskInternalIds.ts'
-import { toUserFacingText } from '../components/userFacingMessage.ts'
+import {
+  clearTechnicalDetails,
+  readTechnicalDetails,
+  setUserMessageNotifier,
+  showUserConclusion,
+  toUserFacingText,
+} from '../components/userFacingMessage.ts'
 import { frameTypeLabel } from './components/shotStatusText.ts'
+import {
+  FRAME_BLOCK_FALLBACK_TEXT,
+  describeFrameBlockReason,
+} from './components/shotReadiness.ts'
+import {
+  AUDIO_NOT_REACHABLE_TITLE,
+  describeAudioAdmission,
+} from '../shots/components/audioAdmissionCore.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 /** `front/src/pages/aiStudio/chapter` → `front/src` */
@@ -144,6 +158,24 @@ const CHAPTER_EXTRA_FIELD_PATTERNS: readonly RegExp[] = [
 ]
 
 /** 主区文案里不许插值的内部编号（审计 §6.1 任务号口径）。 */
+/**
+ * 阶段 B 第 3 批收尾（审计 §4.3 模式 4 / §3.4）：**主区禁「地址 / 存储形态」**。
+ *
+ * 与共享禁词表配套的第二张表 —— 完整 URL、存储形态（`asset://` / `data:`）、
+ * 本地存储路径（`/files/...`）、本机 / 内网地址都属于第三层，
+ * 只允许出现在默认收起的「技术详情」里。
+ */
+const MAIN_SCREEN_ADDRESS_PATTERNS: readonly RegExp[] = [
+  /https?:\/\//i,
+  /asset:\/\//i,
+  /data:[a-z]+\//i,
+  /\/files\//i,
+  /(?<![A-Za-z0-9_])localhost(?![A-Za-z0-9_])/i,
+  /127\.0\.0\.1/,
+  /192\.168\./,
+  /\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/,
+]
+
 const INTERNAL_ID_INTERPOLATION_RE =
   /\$\{[^}]*\b(?:task_id|service_task_id|source_task_id|provider_task_id|video_task_id|file_id|asset_id|shot_id|chapter_id|project_id)\b[^}]*\}/
 
@@ -479,7 +511,7 @@ test('帧类型映射：未登记帧类型不许回显原值（§4.3 模式 3 / 
   assert.ok(!/\$\{key\} 帧/.test(stripComments(readScan('chapter/components/shotStatusText.ts'))))
 })
 
-test('准备度文案：缺失 / 取不到的帧类型都过映射，后端原因过管道（§4.3 模式 3/5/6）', () => {
+test('准备度文案：缺失 / 取不到的帧类型都过映射，后端原因只进技术详情（§4.3 模式 3/4/5/6）', () => {
   const source = stripComments(readScan('chapter/components/shotReadiness.ts'))
   assert.ok(
     !/absentFrames\.join\('、'\)/.test(source),
@@ -491,10 +523,36 @@ test('准备度文案：缺失 / 取不到的帧类型都过映射，后端原�
     !source.includes('供应商'),
     '「参考帧已上传但供应商无法访问」是主区禁词（§4.3 模式 5），必须改业务说法',
   )
+  /* 第 3 批收尾：旧断言只要求「过三级管道」，但 `toUserFacingText` 不会去掉地址 ——
+     后端 `reference_preflight` 的本机 / 内网原因里**带 host**（`192.168.1.9`），
+     相对路径那条会写 `/files/...`。所以断言改成更强的一对：
+     ①主区不再拼「后端句子的改写结果」；②后端原文必须走 `technicalDetails`（技术详情层）。 */
   assert.ok(
-    /missing\.push\(toUserFacingText\(reason/.test(source),
-    '`frame_block_reasons` 是后端原文，进主区「本镜还缺什么」前必须过三级管道',
+    !/missing\.push\(toUserFacingText\(reason/.test(source),
+    '主区仍在把后端原因过管道后直接拼进 `missing`（那是后端文本，且可能带地址）',
   )
+  assert.ok(
+    /describeFrameBlockReason\(reason\)/.test(source),
+    '帧不可用原因必须先过 `describeFrameBlockReason`（分类成产品自己写的中文结论）',
+  )
+  assert.ok(
+    /technicalDetails\.push\(described\.technicalDetail\)/.test(source),
+    '后端原因原文必须进 `technicalDetails`（默认收起的「技术详情」层）',
+  )
+  // 纯函数级：本机 / 内网原因的主区结论不含地址，原句只在技术详情里
+  const local = describeFrameBlockReason('参考图指向本机 / 内网地址（192.168.1.9），只有这台机器能打开，上游取不到。')
+  assert.ok(!/192\.168\./.test(local.mainText), `主区结论里还有地址：${local.mainText}`)
+  assert.ok(!/https?:\/\//.test(local.mainText), `主区结论里还有 URL：${local.mainText}`)
+  assert.match(local.technicalDetail, /192\.168\.1\.9/)
+  const relative = describeFrameBlockReason('参考图是本机 / 项目内相对路径（公网匿名访问取不到），这正是「本机可读、上游 404」的成因。')
+  assert.ok(!/\/files\/|相对路径原文/.test(relative.mainText), `主区结论里还有存储形态：${relative.mainText}`)
+  assert.ok(CJK_RE.test(local.mainText), '主区结论必须是中文')
+  // 反向断言：认不出来的原因也要给产品自己的中文兜底（不回显后端原句）
+  const unknown = describeFrameBlockReason('上游返回了一个没见过的原因')
+  assert.equal(unknown.mainText, FRAME_BLOCK_FALLBACK_TEXT)
+  assert.ok(!unknown.mainText.includes('上游返回了一个没见过的原因'))
+  // 空原因不产生任何主区噪音
+  assert.deepEqual(describeFrameBlockReason(''), { mainText: '', technicalDetail: '' })
 })
 
 test('守卫状态 / 提示词来源 / 画幅来源必须过映射，不许原值上屏（§4.3 模式 3 同族）', () => {
@@ -641,15 +699,217 @@ test('声音绑定区块：长段落与状态文案都不含禁词，后端原�
   // 模式 6：后端原文出口必须过管道，且标题用单一常量
   assert.ok(/AUDIO_NOT_REACHABLE_TITLE/.test(core), '「取不到」的标题必须只有一个定义（单一定义）')
   assert.ok(!core.includes("'已绑定，但供应商无法访问'"), '标题里仍有主区禁词「供应商」')
+  /* 第 3 批收尾（审计 §4.3 模式 4 / §7.1-6）：旧断言只要求 `excluded_reason` 过三级管道，
+     但后端那句话里**带地址**（`…是本地/相对地址（/files/files/voice.mp3）：供应商抓不到。`），
+     管道只掩内部 ID、不会去掉 `/files/...`。断言改成更强的一对：
+     ①主区只用产品自己写的中文结论（按原因码分类）；②原文（掩码后）只进 `technicalDetail`。 */
   assert.ok(
-    /detail: text\(audit\.excluded_reason\)[\s\S]{0,80}toUserFacingText\(audit\.excluded_reason/.test(core),
-    '`excluded_reason` 是后端原文，必须过三级管道（审计 §5.5-F：这条路原本完全没掩码）',
+    !/detail: text\(audit\.excluded_reason\)/.test(core),
+    '主区仍在放后端 `excluded_reason` 的改写结果（它带地址）',
+  )
+  assert.ok(
+    /detail: EXCLUDED_MAIN_TEXT\[reasonCode\] \|\| EXCLUDED_MAIN_FALLBACK/.test(core),
+    '主区的「取不到」结论必须来自产品自己的文案表（EXCLUDED_MAIN_TEXT）',
+  )
+  assert.ok(
+    /technicalDetail: technicalDetailOf\(\[rawNote\(audit\.excluded_reason\), rawNote\(audit\.how_to_fix\)\]\)/.test(core),
+    '后端 `excluded_reason` / `how_to_fix` 原文必须进技术详情层（`technicalDetail`）',
+  )
+  // 主区出口（**用户可见扫描面**，不是整份源码）里不许出现地址 / 存储形态：
+  // 用扫描面而不是 raw source，是因为文件里合法地写着 `127\.0\.0\.1` 这类**正则字面量**
+  // （`PRIVATE_HOST_RE`）—— 它不是用户可见文案。
+  const coreAddressOffenders = extractScanSurfaces(readScan('shots/components/audioAdmissionCore.ts'))
+    .filter((surface) => MAIN_SCREEN_ADDRESS_PATTERNS.some((pattern) => pattern.test(surface.text)))
+    .map((surface) => `:${surface.line} ${surface.text.trim().slice(0, 100)}`)
+  assert.deepEqual(
+    coreAddressOffenders,
+    [],
+    `audioAdmissionCore.ts 的用户可见文案里出现了地址 / 存储形态：\n${coreAddressOffenders.join('\n')}`,
   )
   assert.ok(
     /showUserError\(/.test(section),
     '`ShotAudioBindingSection.tsx` 的错误出口必须走统一 message 包装层',
   )
   assert.ok(!/\(e as Error\)\?\.message/.test(section), '仍然直传 `(e as Error)?.message`（模式 6）')
+})
+
+/* --------------------------------- 第 3 批收尾（任务 A / B / C）：地址与成对文案 */
+
+test('任务A/C：主区禁「地址 / 存储形态」扫描 —— chapter/** + audioAdmissionCore.ts 0 命中', () => {
+  const offenders: string[] = []
+  scanFiles().forEach((file) => {
+    const relPath = relAiStudio(file)
+    const source = readFileSync(file, 'utf8')
+    const exempt = relPath === TECH_LAYER_WAIVER_FILE ? technicalLayerLines(source) : new Set<number>()
+    extractScanSurfaces(source).forEach((surface) => {
+      if (exempt.has(surface.line)) return
+      MAIN_SCREEN_ADDRESS_PATTERNS.forEach((pattern) => {
+        if (pattern.test(surface.text)) {
+          offenders.push(`${relPath}:${surface.line} ｜ 命中 ${pattern} ｜ ${surface.text.trim().slice(0, 120)}`)
+        }
+      })
+    })
+  })
+  assert.deepEqual(
+    offenders,
+    [],
+    `主区出现了地址 / 存储形态（审计 §4.3 模式 4：一律进默认收起的「技术详情」）：\n${offenders.join('\n')}`,
+  )
+  // 空转自检：这张表必须真的能抓到东西（否则「0 命中」毫无意义）
+  const probe = 'const __probe__ = () => <div>本次请求携带的地址：asset://project-1/voice-asset-1（http://127.0.0.1:8000/files/a.mp3）</div>'
+  assert.ok(
+    MAIN_SCREEN_ADDRESS_PATTERNS.some((pattern) => pattern.test(probe)),
+    '地址词表失效了：探针里的 asset:// 与 127.0.0.1 都没被判成命中',
+  )
+})
+
+test('任务A：音频准入的地址只进技术详情层，主区一个地址都不许有（§4.3 模式 4 / §3.4）', () => {
+  const cases: Array<{ label: string; audit: Parameters<typeof describeAudioAdmission>[0] }> = [
+    { label: '携带（公网）', audit: { included: true, state: 'public_url', url: 'https://cdn.example.com/a.mp3' } },
+    { label: '携带（素材引用）', audit: { included: true, state: 'asset_ref', url: 'asset://project-1/voice-asset-1' } },
+    { label: '携带（内嵌）', audit: { included: true, state: 'data_url_inline', url: 'data:audio/mpeg;base64,AAAA' } },
+    {
+      label: '取不到（本机路径）',
+      audit: {
+        included: false,
+        file_id: 'f-1',
+        state: 'local_path',
+        reason_code: 'local_path',
+        excluded_reason: '已绑定声音，但它解析出的是本地/相对地址（/files/files/voice.mp3）：供应商抓不到。',
+        how_to_fix: '把音频上传到公网（OSS 等）后重新绑定。',
+      },
+    },
+    { label: '未绑定', audit: { included: false, file_id: '', state: 'not_bound', reason_code: 'not_bound' } },
+  ]
+  const offenders: string[] = []
+  cases.forEach(({ label, audit }) => {
+    const view = describeAudioAdmission(audit)
+    const mainSurface = [view.tag, view.title, view.detail, view.fix, view.terminology].join('｜')
+    MAIN_SCREEN_ADDRESS_PATTERNS.forEach((pattern) => {
+      if (pattern.test(mainSurface)) offenders.push(`${label}：主区命中 ${pattern} → ${mainSurface}`)
+    })
+  })
+  assert.deepEqual(offenders, [], `音频准入的主区仍有地址：\n${offenders.join('\n')}`)
+  // 地址确实落在技术详情层（asset:// 与本地路径两种形态都要有）
+  assert.match(
+    describeAudioAdmission({ included: true, state: 'asset_ref', url: 'asset://project-1/voice-asset-1' }).technicalDetail,
+    /asset:\/\/project-1\/voice-asset-1/,
+  )
+  assert.match(
+    describeAudioAdmission({ included: false, file_id: 'f-1', state: 'local_path', reason_code: 'local_path', excluded_reason: '本地/相对地址（/files/files/voice.mp3）' })
+      .technicalDetail,
+    /\/files\/files\/voice\.mp3/,
+  )
+  // 主区结论仍是**产品自己写的中文**（不是后端句子的改写结果）
+  const blocked = describeAudioAdmission({
+    included: false,
+    file_id: 'f-1',
+    state: 'local_path',
+    reason_code: 'local_path',
+    excluded_reason: '已绑定声音，但它解析出的是本地/相对地址（/files/files/voice.mp3）：供应商抓不到。',
+  })
+  assert.equal(blocked.title, AUDIO_NOT_REACHABLE_TITLE)
+  assert.match(blocked.detail, /本机或只是相对路径/)
+  assert.ok(!blocked.detail.includes('抓不到'), '主区结论不能是后端句子的改写结果')
+})
+
+test('任务B：三处成对文案 —— 主区是产品自己写的中文结论，后端原文进技术详情层', () => {
+  const source = stripComments(readScan('chapter/ChapterStudio.tsx'))
+  // ① `provider_notes` 出口：不再走「后端句子过管道」的 showUserWarning
+  assert.ok(
+    !/showUserWarning\(notes\[0\]/.test(source),
+    '`provider_notes` 仍在把后端原话过管道后当主区文案（应改用 showUserConclusion）',
+  )
+  assert.ok(/showUserConclusion\(/.test(source), '`provider_notes` 出口必须给产品自己写的中文结论')
+  assert.ok(/notes\.join\('\\n'\)/.test(source), '后端原话必须原样喂给技术详情层（不是丢弃）')
+  // ② 关键帧提交计划的 warnings：主区不再逐条渲染后端文本
+  assert.ok(
+    !/keyframePlanPreview\.warnings\.slice\(0, 4\)/.test(source),
+    '关键帧提交计划的 warnings 仍在主区逐条渲染后端文本（旧实现还只显示前 4 条）',
+  )
+  assert.ok(
+    /<TechnicalDetailSection testId="keyframe-plan-warning-detail"[\s\S]{0,400}?maskInternalIds\(String\(item\)\)/.test(source),
+    '关键帧提交计划的 warnings 原文必须掩码后进技术详情折叠壳',
+  )
+  assert.ok(
+    /<TechnicalDetailSection testId="video-pinned-plan-warning-detail"[\s\S]{0,400}?maskInternalIds\(item\)/.test(source),
+    '视频直提计划的 warnings 原文必须掩码后进技术详情折叠壳',
+  )
+  // ⑥ 生成视频里的「补充说明」是同一族 `plan.warnings`：实机走查抓到过一句英文后端原文，
+  // 所以这条出口也必须换成产品自己的中文结论（原文已在 technical 块的「后端原始提示」里）
+  assert.ok(
+    !/requestPlan\.plan\.warnings\.slice\(0, 4\)/.test(source),
+    '⑥ 生成视频的 warnings 仍在主区逐条渲染后端文本',
+  )
+  assert.ok(
+    /这次提交计划有 \$\{requestPlan\.plan\.warnings\.length\} 条需要注意的地方/.test(source),
+    '⑥ 生成视频的 warnings 必须给产品自己写的中文结论',
+  )
+  // 两处 warnings 的主区都要有「产品自己写的中文结论」（不再由后端句子派生）
+  assert.ok(
+    /这次的提交计划有 \$\{keyframePlanPreview\.warnings\.length\} 条需要注意的地方/.test(source),
+    '关键帧提交计划的主区必须给一句产品自己写的中文结论（带条数）',
+  )
+  assert.ok(
+    /这次的提交计划有 \$\{videoPinnedPlan\.warnings\.length\} 条需要注意的地方/.test(source),
+    '视频直提计划的主区必须给一句产品自己写的中文结论（带条数）',
+  )
+  // ③ 两处 warnings 都必须收进**复用**的技术详情折叠壳（不是自建 details）
+  const technicalDetailUses = source.match(/<TechnicalDetailSection/g) ?? []
+  assert.ok(
+    technicalDetailUses.length >= 3,
+    `ChapterStudio 只用了 ${technicalDetailUses.length} 处统一折叠壳（帧原因 / 关键帧计划 / 视频计划至少要 3 处）`,
+  )
+  assert.ok(
+    /import \{ TechnicalDetailSection \} from '\.\.\/project\/ProjectWorkbench\/components\/workbench\/TechnicalDetailCollapse'/.test(source),
+    '必须从全仓唯一的 TechnicalDetailCollapse 导入折叠壳',
+  )
+  // 主区的两句产品结论必须是中文，且不含地址
+  const mainCopy = [
+    '生成服务对这次结果有额外说明（可能没有按你选的参考图出图）。建议先核对再采用；原始说明见「技术详情」。',
+  ]
+  mainCopy.forEach((text) => {
+    assert.ok(CJK_RE.test(text), `主区结论必须是中文：${text}`)
+    MAIN_SCREEN_ADDRESS_PATTERNS.forEach((pattern) => {
+      assert.ok(!pattern.test(text), `主区结论里出现地址 / 存储形态：${text}`)
+    })
+  })
+})
+
+test('任务B：showUserConclusion 主区只收到产品结论，后端原文只进技术详情日志', async () => {
+  const emitted: Array<{ kind: string; title: string }> = []
+  clearTechnicalDetails()
+  setUserMessageNotifier((kind, title) => {
+    emitted.push({ kind, title })
+  })
+  try {
+    const conclusion = '生成服务对这次结果有额外说明（可能没有按你选的参考图出图）。建议先核对再采用；原始说明见「技术详情」。'
+    // 后端原话是「脏」的：含 DRY_RUN= / file_id / UUID —— 过通用管道会被整句丢弃
+    const raw = 'DRY_RUN=1 file_id=1ebace78-b083-49fe-a86b-d17c524e501d 参考图未透传，回退使用了非 OSS 地址。'
+    const result = await showUserConclusion('warning', conclusion, raw, '生成关键帧')
+    assert.equal(emitted.length, 1, '主区 must 只弹一条提示')
+    assert.equal(emitted[0].title, conclusion, '主区必须收到产品自己写的中文结论')
+    assert.ok(!emitted[0].title.includes('DRY_RUN'), '主区不许出现 DRY_RUN')
+    assert.equal(result.title, conclusion)
+    const log = readTechnicalDetails()
+    assert.equal(log.length, 1, '后端原文必须写入技术详情日志')
+    assert.ok(
+      !log[0].detail.includes('1ebace78-b083-49fe-a86b-d17c524e501d'),
+      `技术详情层也不许留 UUID（掩码必须生效）：${log[0].detail}`,
+    )
+    assert.ok(!log[0].detail.includes('file_id='), `技术详情层不许留字段名赋值形态：${log[0].detail}`)
+    assert.match(log[0].detail, /参考图未透传/, '技术详情层要保留后端措辞，便于排查')
+    assert.equal(log[0].scope, '生成关键帧', '技术详情日志要标出处，便于定位')
+    // 反向：没有原文时不留日志，也不把结论退化成通用兜底
+    clearTechnicalDetails()
+    await showUserConclusion('warning', conclusion, '', '生成关键帧')
+    assert.equal(readTechnicalDetails().length, 0, '没有后端原文时不该写技术详情日志')
+    assert.equal(emitted.length, 2)
+    assert.equal(emitted[1].title, conclusion)
+  } finally {
+    setUserMessageNotifier(null)
+    clearTechnicalDetails()
+  }
 })
 
 /* -------------------------------------------------------- ③ 扫描范围守卫 */
