@@ -69,6 +69,16 @@ const MainLayout: React.FC = () => {
       shots: '分镜',
       editor: '视频剪辑',
       edit: '编辑',
+      /* 资产子路径（审计 §4.6-R20 运行时实测：`/assets/scenes/{id}/edit` 的面包屑里
+         出现了英文段 `scenes` 与 percent-encoded 的内部 ID）。 */
+      actors: '演员',
+      scenes: '场景',
+      props: '道具',
+      costumes: '服装',
+      roles: '角色',
+      images: '图片',
+      videos: '视频',
+      audios: '声音',
     }
     path.forEach((segment, i) => {
       // 特殊：/projects/:projectId/chapters/:chapterId/* 中的 chapterId 段不展示（避免出现“章节”这一层）
@@ -99,7 +109,11 @@ const MainLayout: React.FC = () => {
       if (label === undefined) {
         if (path[0] === 'projects' && i === 1) label = '项目工作台'
         else if (path[2] === 'chapters' && i === 3) label = '章节'
-        else label = segment
+        /* 兜底**禁止回落 URL 段原样**（审计 §4.6-R20 / §7.2 序 4 点名）：
+           `/assets/scenes/{id}/edit` 的 `{id}` 段是 percent-encoded 的内部 ID，
+           未登记的英文段（`actors` / `roles` …）也会原样上屏 —— 两者都是 §2.3 模式 1/2。
+           未登记段一律说「详情」；已登记的路由段在 `pathLabels` 里补中文名。 */
+        else label = '详情'
       }
       items.push({
         key: href,
