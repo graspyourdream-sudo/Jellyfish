@@ -95,7 +95,7 @@ export function ChapterStudioReadinessDiagnosisPanel({
           </div>
         </div>
       ) : !shotAssetsOverview ? (
-        <div className="text-xs text-gray-400 mt-3">当前分镜还没有可用的资产总览数据，请前往分镜编辑页处理提取与确认。</div>
+        <div className="text-xs text-gray-400 mt-3">当前分镜还没有读到资产情况，请前往分镜编辑页处理提取与确认。</div>
       ) : (
         <div className="space-y-4 mt-3">
           <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-500">

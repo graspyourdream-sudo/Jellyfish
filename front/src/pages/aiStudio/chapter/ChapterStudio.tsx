@@ -3806,7 +3806,7 @@ function Inspector(props: {
   const promptAssetReadinessNote = useMemo(() => {
     if (!selectedShot) return '请先选择一个分镜。'
     if (selectedShot.skip_extraction) return '当前分镜已明确标记为无需提取，系统会直接按“提取确认已完成”处理。'
-    if (!shotAssetsOverview) return '当前还没有拿到这条分镜的资产总览，暂时无法展示候选确认状态。'
+    if (!shotAssetsOverview) return '当前还没有读到这条分镜的资产情况，暂时无法显示确认进度。'
     return '这里作为生成前的诊断：先看当前镜头的信息确认状态；需要提取、刷新或精细确认，请到分镜编辑页处理。'
   }, [selectedShot, shotAssetsOverview])
 
