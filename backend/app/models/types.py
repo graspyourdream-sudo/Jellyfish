@@ -184,7 +184,11 @@ class FileType(str, Enum):
 
 
 class FileUsageKind(str, Enum):
-    """文件在项目业务链上的用途（file_usages.usage_kind）。"""
+    """文件在项目业务链上的用途（file_usages.usage_kind）。
+
+    注：``usage_kind`` 在库中是 ``String(32)`` 列，所以**新增成员不需要改表结构**
+    （与 :class:`FileType` 同一条约定）。
+    """
 
     shot_frame = "shot_frame"
     generated_video = "generated_video"
@@ -193,6 +197,14 @@ class FileUsageKind(str, Enum):
     task_link = "task_link"
     upload = "upload"
     api = "api"
+    #: **资产级声音**：角色 / 场景 / 道具 / 服装 **直接绑定**的一个音频文件。
+    #:
+    #: 需求清单第 6 条：声音改为直接绑定资产，工作室不再有逐镜声音绑定；
+    #: 之后镜头绑定了带声音的资产时，视频生成自动带出这个声音。
+    #:
+    #: 资产引用写在既有的 ``file_usages.source_ref`` 上（形如 ``character:char-1``），
+    #: 因此**不加列、不做迁移**。
+    asset_voice = "asset_voice"
 
 
 class TimelineClipType(str, Enum):
