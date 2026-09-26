@@ -388,10 +388,11 @@ test('待处理项：数量文案 + 类型中文标签（不显示后端枚举�
   assert.equal(describePendingReviewKind('brand_new_kind'), '需要你确认')
 })
 
-test('资料字段有中文标签，未知字段原样返回（不显示空标签）', () => {
+test('资料字段有中文标签，未知字段给中文兜底（绝不回显英文键）', () => {
   assert.equal(profileFieldLabel('identity'), '身份')
   assert.equal(profileFieldLabel('lighting'), '光线')
-  assert.equal(profileFieldLabel('custom_field'), 'custom_field')
+  // 这个标签会直接上资产详情抽屉的**主区**：回显英文键 = 把后端字段名印在主区
+  assert.equal(profileFieldLabel('custom_field'), '其他资料项')
 })
 
 /* --------------------------------------------------------- ⑥ 禁词不出现 */
@@ -560,7 +561,9 @@ test('降级视图只用既有接口的真实字段，不假装分析过、不�
   assert.equal(result.source, 'degraded')
   assert.equal(result.data.analysis.generated, false)
   assert.equal(result.data.analysis.status, 'not_generated')
-  assert.match(result.note, /还没有就绪/)
+  /* 阶段 B 第 2 批（审计 §4.2 模式 2）：说明文案改成用户语言「资料还在准备中」，
+     原期望值 `/还没有就绪/` 是钉住旧开发术语的，同批同步更新（需求文档授权）。 */
+  assert.match(result.note, /资料还在准备中/)
   assert.equal(result.data.pending_review.length, 0)
   assert.equal(result.data.technical.candidates_total, 0)
   result.data.items.forEach((row) => {

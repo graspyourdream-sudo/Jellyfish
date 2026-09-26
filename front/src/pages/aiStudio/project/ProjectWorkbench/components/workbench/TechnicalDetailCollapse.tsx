@@ -156,6 +156,85 @@ export function TechnicalIdBlock(props: { taskIds: readonly string[]; fileIds: r
   )
 }
 
+/* ------------------------------------------------- 「信号来源接口」与步骤判定 */
+
+/**
+ * 各步骤信号的**来源接口与字段口径**。
+ *
+ * 审计 §4.2（模式 2 / 模式 4）点名 `ProjectDevInfo.tsx:10-14,294-298`：
+ * 这张表本身内容合规（属于技术详情层），但它是**第二套技术详情实现**，
+ * 而源码级禁词测试只能给**一个文件**开口子 —— 多一套实现等于豁免范围失控。
+ *
+ * 所以表**整体搬进本文件**（本文件是全目录唯一允许出现内部字段名 / 接口路径的地方），
+ * 调用方只传动态数据（哪些信号没取到），不传任何字段名。
+ */
+const SIGNAL_ENDPOINTS: ReadonlyArray<readonly [string, string]> = [
+  ['章节与原文', 'GET /api/v1/studio/chapters?project_id=…（字段 shot_count / raw_text）'],
+  ['镜头与视频提示词', 'GET /api/v1/studio/prompt-delivery/{project_id}?scope=episodes（字段 shot_id / chapter_id / video_prompt）'],
+  ['项目角色', 'GET /api/v1/studio/entities/character?page_size=100（字段 project_id / thumbnail / image_prompts）'],
+  ['项目场景/道具/服装', 'GET /api/v1/studio/shot-links/{scene|prop|costume}?project_id=…（字段 shot_id / chapter_id / thumbnail）'],
+  ['角色镜头绑定', 'GET /api/v1/studio/shots/{shot_id}/preparation-state（字段 assets_overview.summary.linked_count，按镜头抽样）'],
+]
+
+export function TechnicalSignalSourceBlock(props: { failedSources: readonly string[] }) {
+  const { failedSources } = props
+  return (
+    <div>
+      <div className="mb-1 font-medium text-gray-500">信号来源接口</div>
+      <ul className="m-0 list-disc space-y-0.5 pl-4">
+        {SIGNAL_ENDPOINTS.map(([name, endpoint]) => (
+          <li key={name}>
+            <span className="text-gray-500">{name}：</span>
+            <code>{endpoint}</code>
+          </li>
+        ))}
+      </ul>
+      {failedSources.length > 0 ? (
+        <div className="mt-1 text-amber-600">
+          未取到的信号（已按 0/未知降级，判定会停在更靠前的步骤）：
+          {failedSources.join('、')}
+        </div>
+      ) : (
+        <div className="mt-1 text-emerald-600">全部信号抓取成功。</div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 步骤判定的优先级表。
+ *
+ * 里面写的是后端 6 个步骤 key（`script` / `extract_assets` / …），属于内部枚举原值，
+ * 与上一条同理由，**只允许出现在本文件**。
+ */
+const STEP_PRECEDENCE = [
+  '1. 没有章节或没有任何章节原文            → script（剧本）',
+  '2. 有章节原文但当前集分镜数为 0           → script（剧本）',
+  '3. 已有分镜但项目资产（角色/场景/道具）为空 → extract_assets（提取资产）',
+  '4. 有资产但没有参考图片/图片提示词        → image_prep（图片准备）',
+  '5. 有图片但当前集镜头都没有 video_prompt  → video_prompt（视频提示词）',
+  '6. 有提示词但当前集镜头都没有关联资产      → binding（关联绑定）',
+  '7. 以上都满足                            → generate_deliver（生成与交付）',
+].join('\n')
+
+export function TechnicalStepPrecedenceBlock(props: { modelInput: unknown }) {
+  const { modelInput } = props
+  return (
+    <>
+      <div>
+        <div className="mb-1 font-medium text-gray-500">步骤判定的原始入参（计数）</div>
+        <pre className="m-0 overflow-x-auto rounded bg-gray-50 p-2 text-[11px] leading-5">
+          {JSON.stringify(modelInput, null, 2)}
+        </pre>
+      </div>
+      <div>
+        <div className="mb-1 font-medium text-gray-500">步骤判定优先级（内部 7 条判定 → 用户可见 5 步）</div>
+        <pre className="m-0 overflow-x-auto rounded bg-gray-50 p-2 text-[11px] leading-5">{STEP_PRECEDENCE}</pre>
+      </div>
+    </>
+  )
+}
+
 function renderLines(lines: string[]): ReactNode {
   if (lines.length === 0) return <span className="text-[11px] text-gray-400">（后端没有给出内容）</span>
   return (
@@ -181,8 +260,14 @@ export function TechnicalDetailCollapse(props: TechnicalDetailCollapseProps) {
         {gateBanner}
 
         <Descriptions size="small" column={1} bordered>
-          <Descriptions.Item label="接口名">{view.endpoint}</Descriptions.Item>
-          <Descriptions.Item label="数据来源">{view.sourceLabel}</Descriptions.Item>
+          {/* 中文显示标签统一在本文件拼：`technicalView.ts` 只给结构（路径 / 是否正式数据 / 裸槽位码），
+              不拼任何内部标签 —— 否则「技术详情」的实现会散落成多处，单点豁免就守不住了（审计 §9 第 2 项）。 */}
+          <Descriptions.Item label="接口名">
+            {view.chapterId ? `${view.endpointPath}（本章：${view.chapterId}）` : view.endpointPath}
+          </Descriptions.Item>
+          <Descriptions.Item label="数据来源">
+            {view.fromContract ? '本章资产资料（正式数据）' : '本章资产资料（先用已有数据展示）'}
+          </Descriptions.Item>
           <Descriptions.Item label="读取失败原因">
             {view.loadError || '（没有失败）'}
           </Descriptions.Item>
@@ -201,7 +286,9 @@ export function TechnicalDetailCollapse(props: TechnicalDetailCollapseProps) {
           <Descriptions.Item label="本次用到的模型 / 供应商">
             {view.modelLines.length > 0 ? renderLines(view.modelLines) : '见上面的生成配置原始状态'}
           </Descriptions.Item>
-          <Descriptions.Item label="每项资产的槽位与字段名">{renderLines(view.slotLines)}</Descriptions.Item>
+          <Descriptions.Item label="每项资产的槽位与字段名">
+            {renderLines(view.slotValues.map((slot) => `槽位 ${slot}`))}
+          </Descriptions.Item>
           <Descriptions.Item label="任务号 / 文件编号">
             每一项的原始编号在结果卡片「查看详情」里；这里不重复列，避免一屏几百个编号。
           </Descriptions.Item>

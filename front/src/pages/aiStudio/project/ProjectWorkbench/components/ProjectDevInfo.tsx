@@ -9,25 +9,9 @@ import {
   TechnicalDetailSection,
   TechnicalIdBlock,
   TechnicalModelProviderBlock,
+  TechnicalSignalSourceBlock,
+  TechnicalStepPrecedenceBlock,
 } from './workbench/TechnicalDetailCollapse'
-
-const SIGNAL_ENDPOINTS = [
-  ['章节与原文', 'GET /api/v1/studio/chapters?project_id=…（字段 shot_count / raw_text）'],
-  ['镜头与视频提示词', 'GET /api/v1/studio/prompt-delivery/{project_id}?scope=episodes（字段 shot_id / chapter_id / video_prompt）'],
-  ['项目角色', 'GET /api/v1/studio/entities/character?page_size=100（字段 project_id / thumbnail / image_prompts）'],
-  ['项目场景/道具/服装', 'GET /api/v1/studio/shot-links/{scene|prop|costume}?project_id=…（字段 shot_id / chapter_id / thumbnail）'],
-  ['角色镜头绑定', 'GET /api/v1/studio/shots/{shot_id}/preparation-state（字段 assets_overview.summary.linked_count，按镜头抽样）'],
-]
-
-const STEP_PRECEDENCE = [
-  '1. 没有章节或没有任何章节原文            → script（剧本）',
-  '2. 有章节原文但当前集分镜数为 0           → script（剧本）',
-  '3. 已有分镜但项目资产（角色/场景/道具）为空 → extract_assets（提取资产）',
-  '4. 有资产但没有参考图片/图片提示词        → image_prep（图片准备）',
-  '5. 有图片但当前集镜头都没有 video_prompt  → video_prompt（视频提示词）',
-  '6. 有提示词但当前集镜头都没有关联资产      → binding（关联绑定）',
-  '7. 以上都满足                            → generate_deliver（生成与交付）',
-].join('\n')
 
 /** 出口 → 默认模型字段（与后端 model-settings 的字段名一一对应）。 */
 const DEFAULT_MODEL_KEYS: Record<GenerationOutlet, string> = {
@@ -71,7 +55,12 @@ type ProviderRow = { id: string; name: string; status: string }
 async function fetchJson(path: string): Promise<Record<string, unknown>> {
   const response = await fetch(`${OpenAPI.BASE}${path}`)
   const text = await response.text()
-  if (!response.ok) throw new Error(`GET ${path} 失败（HTTP ${response.status}）`)
+  /**
+   * 审计 §4.2 模式 4：原先把请求路径拼进用户可见的失败句里
+   * （`` `GET ${path} 失败（HTTP ${response.status}）` ``）。路径有唯一落点，
+   * 就是技术详情里的「信号来源接口」清单，所以这里只说用户该知道的事。
+   */
+  if (!response.ok) throw new Error(`读取模型与生成服务信息失败（HTTP ${response.status}）`)
   const payload = text ? (JSON.parse(text) as Record<string, unknown>) : {}
   return (payload?.data ?? {}) as Record<string, unknown>
 }
@@ -245,40 +234,14 @@ export function ProjectDevInfo({ detail, model, resolution, onReload, technical 
             </Button>
           </div>
 
-              <div>
-                <div className="mb-1 font-medium text-gray-500">resolveProjectStep 入参（原始计数）</div>
-                <pre className="m-0 overflow-x-auto rounded bg-gray-50 p-2 text-[11px] leading-5">
-                  {JSON.stringify(model, null, 2)}
-                </pre>
-              </div>
+              {/*
+                审计 §4.2 模式 2 / 模式 4：接口路径与字段名清单**只允许**出现在
+                唯一的「技术详情」实现里（`workbench/TechnicalDetailCollapse.tsx`），
+                否则源码级禁词测试的豁免范围会失控。本组件只传动态数据。
+              */}
+              <TechnicalStepPrecedenceBlock modelInput={model} />
 
-              <div>
-                <div className="mb-1 font-medium text-gray-500">步骤判定优先级（内部 6 个 key → 用户可见 5 步）</div>
-                <pre className="m-0 overflow-x-auto rounded bg-gray-50 p-2 text-[11px] leading-5">
-                  {STEP_PRECEDENCE}
-                </pre>
-              </div>
-
-              <div>
-                <div className="mb-1 font-medium text-gray-500">信号来源接口</div>
-                <ul className="m-0 list-disc pl-4 space-y-0.5">
-                  {SIGNAL_ENDPOINTS.map(([name, endpoint]) => (
-                    <li key={name}>
-                      <span className="text-gray-500">{name}：</span>
-                      <code>{endpoint}</code>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-
-              {detail.failedSources.length > 0 ? (
-                <div className="text-amber-600">
-                  未取到的信号（已按 0/未知降级，判定会停在更靠前的步骤）：
-                  {detail.failedSources.join('、')}
-                </div>
-              ) : (
-                <div className="text-emerald-600">全部信号抓取成功。</div>
-              )}
+              <TechnicalSignalSourceBlock failedSources={detail.failedSources} />
       </div>
     </TechnicalDetailSection>
   )

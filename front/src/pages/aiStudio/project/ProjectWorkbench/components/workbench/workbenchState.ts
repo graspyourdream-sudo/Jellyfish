@@ -646,6 +646,14 @@ export const PROFILE_FIELD_LABEL: Record<string, string> = {
   occasion: '场合',
 }
 
+/**
+ * 资料字段的中文标签。
+ *
+ * 未知字段**不许原样返回英文键**（审计 §8.4 点名的「反向锁死」测试就是这条）：
+ * 这个函数的返回值是资产详情抽屉里 `Descriptions.Item` 的**标签**，
+ * 也就是用户不展开任何折叠就能看见的**主区**，回退成 `custom_field` 这种英文键
+ * 等于把后端字段名印在主区（模式 2）。所以未登记时给中文兜底。
+ */
 export function profileFieldLabel(key: string): string {
-  return PROFILE_FIELD_LABEL[String(key ?? '')] ?? String(key ?? '')
+  return PROFILE_FIELD_LABEL[String(key ?? '')] ?? '其他资料项'
 }

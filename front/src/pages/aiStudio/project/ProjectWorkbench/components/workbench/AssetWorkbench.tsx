@@ -10,7 +10,7 @@
  *   └ 结果区：既有出图机制的结果卡片网格（采纳 / 设为定版 / 重新生成）              ┘
  *
  * 数据全部来自一个新后端接口（契约冻结，见 `assetWorkbenchContract.ts`）；
- * 接口没落地时**如实说"等待后端契约"**，并用既有接口拼一个降级视图，绝不伪造数据。
+ * 资料还没齐时**如实说"资料还在准备中"**，并用既有接口拼一份可用视图，绝不伪造数据。
  *
  * 复用而不是重写（用户点名）：
  *   - 出图计划 / 提交 / 轮询 / 结果 / 采纳 / 定版 / 提示词生成与保存 / 质量拦截：
@@ -59,7 +59,7 @@ import {
 import { fetchAssetWorkbench } from './assetWorkbenchApi.ts'
 import { describeSkippedPromptPanelAssets, selectPromptPanelAssets } from './promptPanelAssets.ts'
 import { runChapterAnalysis } from './chapterAnalysis.ts'
-import { WORKBENCH_CONTRACT_PENDING_NOTE } from './assetWorkbenchContract.ts'
+import { WORKBENCH_CONTRACT_PENDING_NOTE, WORKBENCH_CONTRACT_PENDING_RETRY, WORKBENCH_CONTRACT_PENDING_TITLE } from './assetWorkbenchContract.ts'
 
 import { WorkbenchCommandBar } from './WorkbenchCommandBar.tsx'
 import { AssetCardGrid } from './AssetCardGrid.tsx'
@@ -397,15 +397,24 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
         hasPendingReview={pendingReview.length > 0}
       />
 
-      {/* 降级说明：接口没落地时如实说清，不用假数据糊过去 */}
+      {/* 资料还没齐时的说明：用用户语言说清「现在能看到什么、什么时候补齐」，不用假数据糊过去 */}
       {source === 'degraded' ? (
         <Alert
           type="warning"
           showIcon
-          message="等待后端契约：本章资产资料接口还没有就绪"
+          /* 审计 §4.2（本行 + assetWorkbenchContract.ts:373,377,467）：
+             原文是「等待后端契约：本章资产资料接口还没有就绪」——「契约 / 接口 / 就绪」
+             都是开发术语，用户既看不懂也不知道该做什么。这里只说用户该知道的事。 */
+          message={WORKBENCH_CONTRACT_PENDING_TITLE}
           description={
-            /* 原始读取失败原文只进「技术详情」，主界面这句只说用户该知道的事 */
+            /* 读取失败原文有唯一落点：技术详情折叠区的「读取失败原因」行 */
             <span className="text-xs">{WORKBENCH_CONTRACT_PENDING_NOTE}</span>
+          }
+          action={
+            /* 用户要求的**重试入口**：资料补齐后不必刷新整页，点一下重新读取即可 */
+            <Button size="small" loading={reloading} onClick={() => void loadWorkbench()}>
+              {WORKBENCH_CONTRACT_PENDING_RETRY}
+            </Button>
           }
           data-testid="contract-pending-banner"
         />

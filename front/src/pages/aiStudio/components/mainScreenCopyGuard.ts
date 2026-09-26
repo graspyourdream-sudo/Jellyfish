@@ -271,6 +271,15 @@ export const MAIN_SCREEN_FORBIDDEN_PATTERNS: readonly ForbiddenPattern[] = [
   },
   { name: '模式4 环境变量名', pattern: /JELLYFISH_[A-Z_]+/ },
   { name: '模式4 仓库文件路径', pattern: /\bbackend\/\.env\b|docs\/real-run-mode\.md|SIX_STEP_ACCEPTANCE\.md/ },
+  {
+    /* 「候选」的细分口径（审计 §9 第 5 项 + 用户拍板）：
+       **禁**「候选条数 / 聚合 N 组 / 候选状态 / 候选 id」这类后端概念，
+       **放行**「待确认候选」这类用户能懂的业务说法 —— 否则会出现
+       「为避开一个词改 30 处文案」的过度整改。 */
+    name: '模式2 候选计数/后端概念',
+    pattern:
+      /候选\s*(?:条数|数量|状态|id|ID|编号)|\d+\s*(?:条|组|项|个)\s*候选|候选\s*\d+\s*(?:条|组|项|个)/,
+  },
 ]
 
 /**
@@ -283,8 +292,7 @@ export const MAIN_SCREEN_FORBIDDEN_PATTERNS: readonly ForbiddenPattern[] = [
  * 它们由上面的正则负责，且只在出现于**用户可见字符串**时才判定。
  */
 export const MAIN_SCREEN_FORBIDDEN_TERMS: readonly string[] = [
-  // 既有基准（12 词）
-  '候选',
+  // 既有基准（12 词）——注意「候选」按细分口径走上面的正则，不在这里整词禁
   '聚合',
   '检查中',
   '槽位',
@@ -300,7 +308,6 @@ export const MAIN_SCREEN_FORBIDDEN_TERMS: readonly string[] = [
   '门禁',
   'DRY_RUN',
   'provider_id',
-  '提示词质量未知',
 ]
 
 /** 逐字禁词去重后的最终表。 */
@@ -399,16 +406,28 @@ export function formatLeakHits(file: string, hits: readonly LeakHit[]): string[]
  * @returns 没有抓到任何命中时返回 `false`（调用方据此让测试失败）
  */
 export function scannerSelfCheck(source: string): boolean {
-  const probe = `${source}\nconst __probe__ = () => <div title="供应商 file_id 9f3c1a2b-0000-4000-8000-000000000001">候选 partial_failed</div>\n`
+  const probe = `${source}\nconst __probe__ = () => <div title="供应商 file_id 9f3c1a2b-0000-4000-8000-000000000001">候选 12 条 partial_failed</div>\n`
   const hits = findMainScreenLeaks(probe)
   const terms = new Set(hits.map((hit) => hit.term))
   return (
     terms.has('供应商') &&
-    terms.has('候选') &&
+    terms.has('模式2 候选计数/后端概念') &&
     terms.has('partial_failed') &&
     hits.some((hit) => hit.term === '模式1 UUID') &&
     hits.some((hit) => hit.term === '模式2 内部字段名')
   )
+}
+
+/**
+ * 「待确认候选」这类**放行**的业务说法（审计 §9 第 5 项）必须**不被**判成泄漏，
+ * 否则细分口径就退化成「整词禁候选」，会出现过度整改。
+ *
+ * 与 `scannerSelfCheck` 配对使用：一个证明扫描器能抓到，一个证明扫描器不过度抓。
+ */
+export function scannerNegativeSelfCheck(): boolean {
+  const probe =
+    '本集还有 3 项待确认候选；请确认这些待确认候选后继续。这一步已核对完成。'
+  return findMainScreenLeaks(`const __probe__ = () => <div>${probe}</div>`).length === 0
 }
 
 /** 扫描面数量（用于断言「确实提取到了东西」）。 */

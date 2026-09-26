@@ -368,13 +368,28 @@ export type WorkbenchLoadResult = {
   note: string
 }
 
-/** 降级说明：接口没落地时页面照实说，不用假数据糊过去。 */
+/**
+ * 资料还没齐时的说明（**用户语言**）。
+ *
+ * 审计 §4.2（`AssetWorkbench.tsx:405` + 本文件 `:373,377,467`）点名这一条是
+ * 主区最大面积的一处泄漏：原文写的是「等待后端契约」「接口还没有就绪（后端正在按契约实现）」
+ * 「降级视图」—— 全是**开发术语**，用户既看不懂也不知道该做什么。
+ *
+ * 新口径（用户拍板）：只说「资料还在准备中」+ 现在能看到什么 + 什么时候会补齐。
+ * 「契约 / 降级视图 / 后端」这些词**不出现在主区**；技术细节在默认收起的「技术详情」里。
+ */
 export const WORKBENCH_CONTRACT_PENDING_NOTE =
-  '本章资产资料接口还没有就绪（后端正在按契约实现）：下面是按既有数据拼出的降级视图，' +
-  '只显示资产名称、图片与提示词的有无；资料摘要、剧本关系、待处理项等待接口就绪后出现。'
+  '本章资产资料还在准备中：先按下面已有的数据查看资产与图片状态。' +
+  '资料摘要、剧本关系、待处理项会在资料齐备后自动出现。'
 
-/** 降级视图里顶部那行提示（比上面的说明短一句，避免同一段话在屏幕上出现两遍）。 */
-export const WORKBENCH_CONTRACT_PENDING_HINT = '等待后端契约：先按下面的降级视图查看已有资产与图片状态。'
+/** 同一件事在顶部那行提示里的**短句**（避免同一段话在屏幕上出现两遍）。 */
+export const WORKBENCH_CONTRACT_PENDING_HINT = '本章资产资料还在准备中：先按下面已有的数据查看资产与图片状态。'
+
+/** 「资料还在准备中」时顶部的标题（用户语言；状态标签也用它）。 */
+export const WORKBENCH_CONTRACT_PENDING_TITLE = '本章资产资料还在准备中'
+
+/** 重试入口的按钮文案。 */
+export const WORKBENCH_CONTRACT_PENDING_RETRY = '重新读取资料'
 
 /* ---------------------------------------------------------------- 降级视图 */
 
@@ -464,7 +479,7 @@ export function buildDegradedWorkbench(input: DegradedWorkbenchInput): Workbench
       // 降级视图**不假装分析过**：后端没给这个字段就不说"已生成"
       generated: false,
       status: 'not_generated',
-      status_label: '等待后端契约',
+      status_label: WORKBENCH_CONTRACT_PENDING_TITLE,
       content_changed: false,
       records_total: 0,
       generated_at: null,
@@ -497,6 +512,14 @@ export function buildDegradedWorkbench(input: DegradedWorkbenchInput): Workbench
   return {
     source: 'degraded',
     data,
-    note: input.reason ? `${WORKBENCH_CONTRACT_PENDING_NOTE}（读取失败原因：${input.reason}）` : WORKBENCH_CONTRACT_PENDING_NOTE,
+    /**
+     * ⚠️ `note` 只给**技术详情层**用，不许直接进主区。
+     *
+     * 它原来是「主区说明 + 后端读取失败原文」拼在一起（`（读取失败原因：…）`），
+     * 一旦有人把它渲到 Alert 上就把后端原文漏出去了。读取失败原文现在有**唯一**落点：
+     * `TechnicalDetailCollapse` 的「读取失败原因」行（由 `technicalView.loadError` 承接），
+     * 所以这里只留用户语言的说明。
+     */
+    note: WORKBENCH_CONTRACT_PENDING_NOTE,
   }
 }
