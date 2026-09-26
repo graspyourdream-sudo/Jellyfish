@@ -343,3 +343,90 @@ $shots
 集数：$episode_id
 """.strip()
 )
+
+
+# ---------------------------------------------------------------------------
+# 广告剧情流程：剧情策划（DramaPlan）
+# ---------------------------------------------------------------------------
+# 配方来源：外部参考项目的最小策划内核（用户 2026-09-25/09-26 拍板移植）。
+# 只保留"有主见"的创作规则，**不搬**它的云平台与浏览器端合成。
+# 硬约束（用户口径，改这条模板前先确认）：
+#   1 开场 3 秒必须有可拍摄的动作冲突；
+#   2 卖点不许念参数，必须转成人物欲望 / 冲突 / 破功瞬间；
+#   3 结构是起势—升级—反转；
+#   4 商品至少出现在一半镜头；
+#   5 结尾反转 + 自然购买暗示（不要硬 CTA）；
+#   6 每镜必须给出角色、动作、台词、时长、商品是否出现。
+# 变量用 $name（string.Template），禁用 str.format——JSON 示例里的花括号会被它误解析。
+
+DRAMA_PLAN_TEMPLATE = Template(
+    """
+你是顶级短剧编剧 + 广告导演。任务：根据商品信息与本章剧本，产出**一整集的剧情广告方案**。
+
+【商品与导演要求】
+$brief_text
+
+【本章剧本】
+标题：$chapter_title
+$chapter_text
+
+【项目风格】$style_hint
+【镜头数】$shot_count 个镜头
+【整片时长】约 $duration_hint 秒
+【每镜时长只能取】$allowed_durations（整数秒，不要写别的值）
+
+【创作硬要求】
+1. **开场 3 秒**必须是**可拍摄的动作冲突**（有人在做一件有张力的事），不要用旁白或环境描写开场。
+2. **卖点不许直接念参数**。每个卖点必须转成：人物的欲望、人物之间的冲突，或者"当场破功"的瞬间。
+   例：不要写"含有 3% 烟酰胺"，要写"她当着所有人的面把瓶子拍在桌上"。
+3. 结构必须是**起势 → 升级 → 反转**：前段建立处境，中段把冲突推高，后段反转收口。
+4. **商品至少出现在一半镜头里**（$shot_count 个镜头里至少一半 product_present 为 true），
+   且商品出现的方式要自然（被人使用、被抢、被摔、被特写），不要摆拍式展示。
+5. 结尾要有**反转 + 自然的购买暗示**，不要生硬的"点击链接购买"。
+6. 每个镜头必须给出：**出场角色**（characters 数组）、动作、台词、时长、本镜是否出现商品。
+7. 角色名、场景名要具体可复用（"女主"不合格，"林小满"合格）；同一角色在所有镜头里名字必须逐字一致。
+8. 台词要短、能演、有信息量；不要写舞台说明混在台词里。
+
+【输出格式】只输出一个 JSON 对象，不要任何解释或 Markdown 代码围栏：
+{
+  "title": "本集标题",
+  "logline": "一句话主线（含商品与冲突）",
+  "sellingPoints": ["被剧情化之后的卖点表述"],
+  "characters": [
+    {"name": "角色名", "profile": {"appearance": "外貌", "identity": "身份"}, "shot_indexes": [1, 2]}
+  ],
+  "scenes": [
+    {"name": "场景名", "profile": {"era_location": "时代地点", "spatial_structure": "空间结构"}, "shot_indexes": [1]}
+  ],
+  "product": {
+    "name": "商品名",
+    "description": "商品外观描述（必须来自上面的商品信息，不要改包装与颜色）",
+    "profile": {"package": "包装", "logo": "Logo与品牌标识", "selling_points": "关联卖点"},
+    "shot_indexes": [1, 3]
+  },
+  "shots": [
+    {
+      "index": 1,
+      "title": "镜头标题",
+      "characters": ["本镜出场角色名"],
+      "script_excerpt": "本镜的剧本摘录",
+      "description": "画面整体描述",
+      "duration": 8,
+      "camera_shot": "MS",
+      "angle": "EYE_LEVEL",
+      "movement": "STATIC",
+      "action_beats": ["按时间顺序的动作拍点"],
+      "dialogue": [{"speaker": "角色名", "text": "台词", "mode": "DIALOGUE"}],
+      "product_present": true
+    }
+  ],
+  "climax": "结尾的反转与购买暗示"
+}
+
+补充约束：
+- camera_shot 只能取 ECU/CU/MCU/MS/MLS/LS/ELS；angle 只能取 EYE_LEVEL/HIGH_ANGLE/LOW_ANGLE/BIRD_EYE/DUTCH/OVER_SHOULDER；
+  movement 只能取 STATIC/PAN/TILT/DOLLY_IN/DOLLY_OUT/TRACK/CRANE/HANDHELD/STEADICAM/ZOOM_IN/ZOOM_OUT。
+- dialogue 的 speaker 必须是 characters 里出现过的名字（不要写"旁白"，旁白请用 mode=VOICE_OVER 并给 speaker）。
+- 镜头序号从 1 开始、连续、不重复。
+""".strip()
+)

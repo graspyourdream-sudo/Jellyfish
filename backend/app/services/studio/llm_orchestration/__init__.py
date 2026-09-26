@@ -87,6 +87,14 @@ from app.services.studio.llm_orchestration.video_prompt import (
     preview_video_prompt,
     strip_forbidden_refs,
 )
+from app.services.studio.llm_orchestration.drama_plan import (
+    ALLOWED_DURATIONS,
+    MAX_SHOT_COUNT,
+    build_drama_plan_prompt,
+    postprocess_plan,
+    preview_drama_plan,
+    render_brief_text,
+)
 
 __all__ = [
     # 守卫
@@ -154,4 +162,11 @@ __all__ = [
     "parse_binding_response",
     "preview_asset_binding",
     "reconcile_with_heuristic",
+    # 广告剧情流程：剧情策划（一次调用产出整份草稿）
+    "ALLOWED_DURATIONS",
+    "MAX_SHOT_COUNT",
+    "build_drama_plan_prompt",
+    "postprocess_plan",
+    "preview_drama_plan",
+    "render_brief_text",
 ]
