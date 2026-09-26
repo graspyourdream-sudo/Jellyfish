@@ -65,6 +65,20 @@ class ShotVideoPromptDraftStatus(str, Enum):
     failed = "failed"    # 生成失败，带原因
 
 
+class DramaPlanDraftStatus(str, Enum):
+    """剧情方案草稿状态（``drama_plan_drafts.status``）。
+
+    与 :class:`ShotVideoPromptDraftStatus` 有**一处有意偏离**：那个表的「未开始」不落行，
+    而剧情方案的草稿行由**免费的 brief 保存**创建（用户填一半也要能存下来），
+    所以需要 ``none``（空串）表达"行已经有了，但从来没生成过"。
+    """
+
+    none = ""            # 行已存在（brief 已保存），但从未生成过
+    running = "running"  # 已抢占生成中（带租约，超时自动释放）
+    ok = "ok"            # 生成成功，plan 里有归一化后的草稿
+    failed = "failed"    # 生成失败，error 里带原因
+
+
 class ShotCandidateType(str, Enum):
     """镜头提取候选类型。"""
 
