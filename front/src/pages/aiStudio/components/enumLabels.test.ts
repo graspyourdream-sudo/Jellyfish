@@ -13,6 +13,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync, readdirSync } from 'node:fs'
+import { dirname, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   ALL_ENUM_SPECS,
@@ -32,8 +35,45 @@ import {
   partialFailureHeadline,
   textModelBusinessName,
   videoModelBusinessName,
+  videoPromptSourceLabel,
   type EnumSpec,
 } from './enumLabels.ts'
+
+/** `components/` → `src/`：别名守卫要扫全仓源码。 */
+const SRC_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+
+/**
+ * 只判**代码**、不判**注释**：历史沿革的注释里必然要提到旧写法（本仓库的规矩是
+ * 「把踩过的坑写在注释里」），否则守卫会逼着后人删掉最有价值的那段说明。
+ *
+ * 实现是**逐行**的，不用「正则去块注释」那种写法：前几批实测过
+ * `accept="…,image/*"` 这类字符串里的 `/*` 会让朴素实现吞掉几百行代码（假绿/假红）。
+ * 逐行的代价是：**单行里的 `//` 之后会被当成注释截掉**（例如 URL 里带 `//`）。
+ * 对本守卫无影响：要判的是「显示名有没有别名」，别名不会只出现在 URL 后半段。
+ */
+function stripCommentsForAliasScan(source: string): string {
+  const out: string[] = []
+  let inBlockComment = false
+  for (const line of source.split('\n')) {
+    const trimmed = line.trim()
+    if (inBlockComment) {
+      if (trimmed.includes('*/')) inBlockComment = false
+      out.push('')
+      continue
+    }
+    if (trimmed.startsWith('/*')) {
+      if (!trimmed.includes('*/')) inBlockComment = true
+      out.push('')
+      continue
+    }
+    if (trimmed.startsWith('//') || trimmed.startsWith('*')) {
+      out.push('')
+      continue
+    }
+    out.push(line.replace(/\/\/.*$/, ''))
+  }
+  return out.join('\n')
+}
 
 /* ------------------------------------------- ② 覆盖文档列出的全部原值（用户点名） */
 
@@ -291,4 +331,68 @@ test('模型原始名不得出现在业务说法里（原始名只进技术详�
     })
   })
   assert.deepEqual(offenders, [], offenders.join('\n'))
+})
+
+/* ------------------------------------------------ 外部工具显示名的「别名漂移」守卫 */
+
+/**
+ * 用户 2026-09-26 拍板：外部导入工具名全站统一用「巨日禄导入」，**不许再起别名**。
+ *
+ * 为什么要有这条守卫（真实发生过）：同一条文案在三个阶段里出现过**三种**写法 ——
+ * `ProjectStudioStepPanel` 曾写「巨量导入」、本文件曾写「剧立方导入」、其余位置写「巨日禄导入」。
+ * 结果**同一屏**里来源行与说明句互相打架，用户会以为自己在看两个不同的来源。
+ *
+ * 判定口径（只判**显示名**，不判枚举原值 `jurilu` —— 原值照旧只在技术详情层出现）：
+ *   1. 非测试源码里，两种历史别名一个字都不许出现；
+ *   2. 「巨日禄」这个工具名本身必须真实存在于源码里（防止守卫因为「词没了」而变成空跑）；
+ *   3. 纯函数口径：`videoPromptSourceLabel('jurilu')` 必须等于统一显示名。
+ */
+test('外部工具显示名不许再起别名（全站只能有一种写法）', () => {
+  const display = '巨日禄导入'
+  /* 历史别名：字符串按字符拼，避免本守卫文件自己命中扫描（本文件是测试文件，本来也不在扫描面里，
+     但拼出来更稳：以后有人改扫描面也不会因为守卫自身而假红）。 */
+  const staleAliases = [`巨${'量'}导入`, `剧${'立方'}导入`]
+
+  const files: string[] = []
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = resolve(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (entry.name === 'generated' || entry.name === 'node_modules') continue
+        walk(full)
+      } else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) {
+        files.push(full)
+      }
+    }
+  }
+  walk(SRC_ROOT)
+  /* 扫描面守卫：文件数下限 + **关键目录必须都被走到**（只判下限会因为遍历被收窄而假绿）。 */
+  assert.ok(files.length >= 150, `扫描面太小（${files.length} 个文件），守卫可能没在正确目录上跑`)
+  const visited = files.map((file) => relative(SRC_ROOT, file).replace(/\\/g, '/'))
+  for (const dir of ['pages/aiStudio/chapter/', 'pages/aiStudio/project/', 'pages/aiStudio/components/', 'pages/aiStudio/promptFlow/']) {
+    assert.ok(
+      visited.some((file) => file.includes(dir)),
+      `扫描面没覆盖 ${dir} —— 遍历被收窄了，守卫会变成空跑`,
+    )
+  }
+
+  const offenders: string[] = []
+  let unifiedCount = 0
+  for (const file of files) {
+    const text = stripCommentsForAliasScan(readFileSync(file, 'utf8'))
+    const rel = relative(SRC_ROOT, file)
+    for (const alias of staleAliases) {
+      if (text.includes(alias)) offenders.push(`${rel} ｜ 出现了历史别名「${alias}」`)
+    }
+    const hits = text.split(display).length - 1
+    unifiedCount += hits
+  }
+  assert.deepEqual(offenders, [], `显示名别名漂移（只允许「${display}」）：\n${offenders.join('\n')}`)
+  assert.ok(
+    unifiedCount >= 8,
+    `全仓只找到 ${unifiedCount} 处「${display}」—— 少于预期，可能工具名被改掉了或守卫扫错了目录`,
+  )
+
+  assert.equal(videoPromptSourceLabel('jurilu'), display, '来源显示名必须与全站统一写法一致')
+  assert.doesNotMatch(videoPromptSourceLabel('jurilu'), /jurilu/, '显示名里不许带枚举原值')
 })

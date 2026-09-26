@@ -277,7 +277,17 @@ export const VIDEO_PROMPT_SOURCE = enumSpec(
   'videoPromptSource',
   ['jurilu', 'skill', 'llm', 'manual', 'manual_workspace', 'internal', 'shot_description'],
   {
-    jurilu: '剧立方导入',
+    /* ⚠️ 全站唯一名字，不许再起别名（用户 2026-09-26 拍板）。
+     *
+     * `jurilu` 是**外部导入工具名**，不是模型供应商，也不是 6 类泄漏模式里的任何一类：
+     * 它是本项目的业务流程名词（导航「提示词导入/交付」、抓取面板标题、审计 §4.5 的建议口径
+     * 「来源：巨日禄导入」都在用它）。要隐藏的是**枚举原名 `jurilu`**，不是这个工具名。
+     *
+     * 历史上同一条文案出现过三种写法（本文件的「剧立方导入」、`ProjectStudioStepPanel` 的
+     * 「巨量导入」、其余位置的「巨日禄导入」），同一屏里互相打架。
+     * **别名漂移会导致用户以为自己在看不同的来源** —— `enumLabels.test.ts` 有一条守卫会扫全仓，
+     * 再出现第二种写法即测试失败。 */
+    jurilu: '巨日禄导入',
     skill: '技能生成',
     llm: '由大模型生成',
     manual: '人工编辑',

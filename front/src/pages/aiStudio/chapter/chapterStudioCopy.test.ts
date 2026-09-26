@@ -652,7 +652,7 @@ test('同一字段同口径：已保存提示词来源在「① 工作区」与�
     `只有 ${mapped.length} 处「来源：…」接了映射 —— 工作区 ① 与提示词预览弹窗必须都接（审计点名 :6366 与 :7465）`,
   )
   // 纯函数级：来源码与模型原名一个都不许回显
-  assert.equal(videoPromptSourceLabel('jurilu'), '剧立方导入')
+  assert.equal(videoPromptSourceLabel('jurilu'), '巨日禄导入')
   assert.equal(videoPromptSourceLabel('manual_workspace'), '人工编辑')
   const unknownSource = videoPromptSourceLabel('brand_new_source')
   assert.ok(CJK_RE.test(unknownSource), `未登记来源码的兜底必须含中文：${unknownSource}`)
