@@ -161,7 +161,10 @@ def test_deterministic_prompt_uses_profile_card_subject() -> None:
         name="林晓", asset_type="character", description="清冷法务，黑色西装"
     )
     assert prompt.startswith("林晓（角色）：清冷法务，黑色西装")
-    assert "clean white background" in prompt  # 角色槽位的风格规则被追加
+    # 需求清单第 2 条：角色的版式词改成「角色设定图」那一套（左面部大特写 + 右全身三视图），
+    # 不再是旧的「clean white background + 单张全身图」口径
+    assert "pure white seamless studio background" in prompt
+    assert "right panel contains full-body three-view turnaround" in prompt
 
 
 # ---------------------------------------------------------------------------

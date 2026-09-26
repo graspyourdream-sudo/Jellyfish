@@ -355,7 +355,8 @@ async def test_submit_plan_dispatches_template_and_kind_per_type(
 
     # 模板确实按类型选：确定性提示词里必须出现**该类型**的动作姿态提示词
     hint_by_type = {
-        "character": "正面全身参考图",
+        # 需求清单第 2 条：人物版式由「正面全身参考图」改为「角色设定图（左面部大特写 + 右全身三视图）」
+        "character": "16:9 横版角色设定图，画面分左右两块",
         "scene": "广角建立镜头，空间结构清晰",
         # 道具的**正式槽位**已补进 llm_orchestration.registry（PromptCategory.prop_image_front），
         # 所以这里取的是槽位规格里的 view_hint，不再走 asset_strategies 的兜底文案。

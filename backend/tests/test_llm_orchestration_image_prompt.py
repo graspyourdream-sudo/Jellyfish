@@ -109,7 +109,11 @@ def test_build_slot_negative_prompt_merges_and_dedupes() -> None:
         global_negative="low quality, 自定义负面词",
     )
     assert "自定义负面词" in negative
-    assert "half body" in negative  # 角色槽位特有规则
+    # 需求清单第 2 条：角色版式改成设定图后，旧负面词 "half body" / "cropped body"
+    # 与新版式**直接冲突**（左区本来就是面部裁切特写），已换成设定图专属负面词
+    assert "different people" in negative  # 角色槽位特有规则（同一个人出现四次，禁的是"不同的人"）
+    assert "portrait grid" in negative
+    assert "half body" not in negative
     assert negative.count("low quality") == 1  # 与默认规则去重
 
 

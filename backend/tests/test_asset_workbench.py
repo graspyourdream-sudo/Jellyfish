@@ -392,7 +392,9 @@ def test_record_with_good_prompt_is_ready_and_batch_eligible() -> None:
     assert item["profile_source"] == "chapter_record"
     assert "身份：侯府嫡长女" in item["profile_digest"]
     assert item["prompt"]["slot"] == "character_image_front"
-    assert item["prompt"]["slot_label"] == "角色正面图片"
+    # 需求清单第 2 条：人物资产由「单张全身图」改为「角色设定图（左面部大特写 + 右全身三视图）」，
+    # 槽位中文名随之从「角色正面图片」改为「角色设定图（正面）」
+    assert item["prompt"]["slot_label"] == "角色设定图（正面）"
     assert item["script_relation"]["shot_refs"], "有出场镜头时必须给出剧本依据"
     # 另一个角色没有资料也没有提示词 → 不许跟着说"可以生成图片"
     other = next(entry for entry in payload["items"] if entry["name"] == "叶老夫人")

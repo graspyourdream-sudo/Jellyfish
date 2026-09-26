@@ -82,16 +82,23 @@ class ImagePromptSlotSpec:
 IMAGE_PROMPT_SLOT_SPECS: tuple[ImagePromptSlotSpec, ...] = (
     ImagePromptSlotSpec(
         category=PromptCategory.character_image_front,
-        label="角色正面图片",
+        label="角色设定图（正面）",
         entity_type="character",
-        view_hint="正面全身参考图",
+        view_hint=(
+            "16:9 横版角色设定图，画面分左右两块："
+            "左侧只有一个大幅面部特写（单个人头，从头顶裁到锁骨附近，脸部占左区 75%-85%）；"
+            "右侧是同一个人物的全身三视图——正面、侧面、背面，简单中性站姿、脚部完整"
+        ),
         subject_source="角色画像卡",
     ),
     ImagePromptSlotSpec(
         category=PromptCategory.character_image_other,
-        label="角色侧面/背面图片",
+        label="角色设定图（同套设定的侧背细节）",
         entity_type="character",
-        view_hint="侧面与背面视角保持同一人同一造型",
+        view_hint=(
+            "沿用同一张角色设定图的版式（左面部大特写 + 右全身三视图），"
+            "重点交代侧面与背面的发型、头饰与衣摆结构，保持同一人同一造型"
+        ),
         subject_source="角色画像卡",
     ),
     ImagePromptSlotSpec(
@@ -273,10 +280,62 @@ DEFAULT_NEGATIVE_PROMPT = (
     "text, watermark, logo, subtitles"
 )
 
+# ---------------------------------------------------------------------------
+# 「角色设定图」版式（左面部大特写 + 右全身三视图）
+# ---------------------------------------------------------------------------
+#
+# 需求清单第 2 条的硬口径：人物资产**不再生成"单张全身图"**，改为生成
+# **角色设定图 / 人物参考图**，版式固定为：
+#   左：面部大特写（单个人头，裁到锁骨附近，脸占左区 75%-85%）
+#   右：同一人物的全身三视图（正面 / 侧面 / 背面）
+#
+# 配方来源：``/Users/apple/Documents/人物及场景生产项目`` 的
+# ``src/server.js`` → ``buildCharacterReferenceSheet`` 与
+# ``buildCharacterFirstReferencePrompt``（**只读参考**：按用户要求只把提示词文本
+# port 过来，**不 import、不在运行时依赖该项目**，也不复制它的其它逻辑）。
+#
+# 这些词进 ``SLOT_STYLE_RULES``（风格/版式层），由 ``build_slot_layers`` 逐字补齐 ——
+# 模型改写版式词会被"缺失就补回"的规则纠正，所以版式是**确定性**的。
+CHARACTER_REFERENCE_SHEET_LAYOUT: tuple[str, ...] = (
+    "16:9 horizontal character reference sheet",
+    "the layout has two clear sections",
+    "left panel contains exactly one large face close-up only, one single head, "
+    "cropped from top of head to collarbone",
+    "face occupies 75 to 85 percent of the left panel",
+    "clear facial features, clear face shape, clear hairline, clear eyes and gaze, neutral expression",
+    "right panel contains full-body three-view turnaround: front view, side view, back view",
+    "same face, same hairstyle, same skin tone, same outfit, same body proportions in every view",
+    "simple neutral standing pose, feet visible",
+    "pure white seamless studio background",
+)
+
+#: 角色设定图的**专属负面词**。
+#:
+#: 与旧口径的关键差别（旧口径在这里是**反的**）：旧负面词里有 ``half body`` /
+#: ``cropped body``，那是在要求"单张全身图"；新版式的左区**本来就是面部裁切特写**，
+#: 留着这两条会把左区逼回全身，版式直接做不出来。
+#: ``multiple people`` 同理要改写成"不许是**不同**的人"：
+#: 三视图里同一个人本来就出现四次，写 ``multiple people`` 会让模型把版式压成单人。
+CHARACTER_REFERENCE_SHEET_NEGATIVE: tuple[str, ...] = (
+    "different people",
+    "extra people",
+    "duplicated face in the close-up area",
+    "multiple close-up portraits",
+    "stacked portraits",
+    "portrait grid",
+    "headshot collage",
+    "extra heads",
+    "second head",
+    "exaggerated pose",
+    "environmental background",
+    "scene background",
+    "bag, handbag, luggage or held props",
+)
+
 # 每个槽位的画质/风格补充（沿用中控台 ASSET_PROFILE 的"必须逐字包含"规则）。
 SLOT_STYLE_RULES: dict[str, tuple[str, ...]] = {
-    "character_image_front": ("full body character reference sheet", "clean white background"),
-    "character_image_other": ("full body character reference sheet", "clean white background"),
+    "character_image_front": CHARACTER_REFERENCE_SHEET_LAYOUT,
+    "character_image_other": CHARACTER_REFERENCE_SHEET_LAYOUT,
     "scene_image_front": ("cinematic live-action environment", "wide establishing shot", "empty scene, no people"),
     "scene_image_other": ("cinematic live-action environment", "empty scene, no people"),
     "costume_image_front": ("isolated costume reference", "flat lay or mannequin display"),
@@ -290,8 +349,10 @@ SLOT_STYLE_RULES: dict[str, tuple[str, ...]] = {
 }
 
 SLOT_NEGATIVE_EXTRA: dict[str, tuple[str, ...]] = {
-    "character_image_front": ("half body", "cropped body", "exaggerated pose", "multiple people"),
-    "character_image_other": ("half body", "cropped body", "exaggerated pose", "multiple people"),
+    # 角色：见 CHARACTER_REFERENCE_SHEET_NEGATIVE 的说明（旧口径的 half body /
+    # cropped body / multiple people 与新版式直接冲突，已替换）
+    "character_image_front": CHARACTER_REFERENCE_SHEET_NEGATIVE,
+    "character_image_other": CHARACTER_REFERENCE_SHEET_NEGATIVE,
     "scene_image_front": ("isolated object", "product photo", "floating object", "white background"),
     "scene_image_other": ("isolated object", "product photo", "white background"),
     # 道具槽位专属负面词：道具图要的是「干净背景上的单件物品」，反面是人物/场景串味
