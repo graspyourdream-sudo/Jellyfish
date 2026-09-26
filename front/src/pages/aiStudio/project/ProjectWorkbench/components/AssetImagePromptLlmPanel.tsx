@@ -26,6 +26,8 @@ import { Alert, Button, Checkbox, Collapse, Input, Modal, Space, Table, Tag, Too
 import { ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { StudioEntitiesApi } from '../../../../../services/studioEntities'
 import { StudioProjectsService } from '../../../../../services/generated'
+// 阶段 B ①：技术详情折叠壳全仓唯一实现（三处自建折叠区已合并到它）
+import { TechnicalDetailSection } from './workbench/TechnicalDetailCollapse'
 import {
   fetchImagePromptSlots,
   getAssetImagePrompts,
@@ -944,23 +946,15 @@ export function AssetImagePromptLlmPanel({
           description={<span className="text-xs">{draftNote}</span>}
         />
       ) : null}
-      <Collapse
-        size="small"
-        ghost
-        items={[
-          {
-            key: 'prompt-gen-tech',
-            label: '技术详情：这一屏怎么工作的',
-            children: (
-              <div className="space-y-1 text-[11px] leading-5 text-slate-500">
-                <div>提示词生成走后端 LLM 编排接口（`POST /studio/llm/image-prompt/preview`），每项一次调用。</div>
-                <div>保存后「生图计划预览」会把提示词来源标成「已保存提示词」—— 用它可当场验证保存内容真的被生图使用。</div>
-                <div>失败即停、不自动重试；被质量拦截的提示词不会保存。</div>
-              </div>
-            ),
-          },
-        ]}
-      />
+      {/* 阶段 B ①：折叠壳统一到 workbench/TechnicalDetailCollapse.tsx（不再各页自建折叠区） */}
+      <TechnicalDetailSection hint="这一屏怎么工作的（每项资产一次调用、一次计费）">
+        <div className="space-y-1 text-[11px] leading-5 text-slate-500">
+          <div>提示词由后台的大模型生成，每项资产一次调用、一次计费。</div>
+          <div>保存后「生图计划预览」会把提示词来源标成「已保存提示词」—— 用它可当场验证保存内容真的被生图使用。</div>
+          <div>失败即停、不自动重试；被质量拦截的提示词不会保存。</div>
+          <div className="text-gray-400">调用走的是提示词生成服务：POST /studio/llm/image-prompt/preview。</div>
+        </div>
+      </TechnicalDetailSection>
 
       <Space wrap size={12} align="center">
         <Checkbox checked={onlyMissing} onChange={(event) => setOnlyMissing(event.target.checked)}>
@@ -1010,7 +1004,7 @@ export function AssetImagePromptLlmPanel({
             key: 'prompt-diffs',
             label: (
               <span className="text-xs text-slate-600">
-                {`⑤ 最终提示词及差异（${promptDifferences.filter((row) => row.prompt).length} 条有内容）`}
+                {`本次真正会用的提示词与差异（${promptDifferences.filter((row) => row.prompt).length} 条有内容）`}
               </span>
             ),
             children: (

@@ -13,12 +13,15 @@
  * 文案口径（用户要求）：本模块产出的**每一句面向用户的文字**都不含内部字段
  * （`status` / `file_id` / 任务号 / 模型名 / 供应商名 / 「门禁」这类开发术语）。
  * `collectUserFacingTexts()` 把所有静态文案汇总出来，供测试做黑名单断言；
- * 后端回传的动态文本统一走 `maskInternalIds()` 再展示。
+ * 后端回传的动态文本统一走三级管道展示：`maskInternalIds()`（去 ID）→
+ * `sanitizeUserText()`（去内部术语）→ `humanizeBackendMessage()`（业务化改写），
+ * 见 `components/userFacingMessage.ts`。
  */
 
 // 带 `.ts` 后缀：本模块要能被 `node --test` 直接加载（Node ESM 不猜扩展名），
 // tsconfig 已开 allowImportingTsExtensions，Vite 也照常解析。
-import { maskInternalIds } from '../../../components/maskInternalIds.ts'
+// 阶段 B ①：不再只做 ID 掩码——掩码之后还要去内部术语 + 业务化改写
+import { toUserFacingText } from '../../../components/userFacingMessage.ts'
 import {
   BATCH_REFERENCE_FLOW_LABEL,
   IMAGE_ASSET_TYPE_ORDER,
@@ -40,6 +43,13 @@ import {
   RESULT_NOUN_BY_ASSET_TYPE,
   type ImageAssetType,
 } from './assetResultKind.ts'
+
+/**
+ * 单条失败的**主区兜底句**（审计 §6.3 表「单条结果」口径）。
+ *
+ * 三级管道都过不干净时用它 —— 宁可少说一句，也不把后端原文摆给用户看。
+ */
+export const FALLBACK_FAILURE_TEXT = '生成失败（图片没成功保存，暂时不能采纳）'
 
 /* ------------------------------------------- 按资产类型的生产口径（用户点名要有） */
 
@@ -1129,7 +1139,8 @@ export function isPubliclyReachableUrl(url: string): boolean {
 /** 失败原因：优先上游真话，其次按归一化口径给出可执行的说明；一律屏蔽内部标识。 */
 export function describeFailureReason(result: Pick<SubmitResultLike, 'error_message' | 'message' | 'outcome'>): string {
   const text = String(result.error_message || result.message || '').trim()
-  if (text) return maskInternalIds(text)
+  // 三级管道（§7.1-6）：① 去 ID → ② 去内部术语 → ③ 业务化改写 → 中文兜底
+  if (text) return toUserFacingText(text, FALLBACK_FAILURE_TEXT)
   if (String(result.outcome || '') === 'partial_failed') {
     return '图片已经生成，但没有完成长期存储，因此暂时不可用；可以稍后刷新这一项，或重新生成。'
   }
@@ -1507,7 +1518,7 @@ export function collectMisleadingCopy(texts: readonly string[]): string[] {
 /**
  * 汇总本模块产出的所有静态用户文案（测试用）。
  *
- * 动态文案（后端错误原文）不在这里 —— 它们统一经 `maskInternalIds()` 处理。
+ * 动态文案（后端错误原文）不在这里 —— 它们统一经三级管道处理（见 `describeFailureReason`）。
  */
 export function collectUserFacingTexts(): string[] {
   const assets: ProductionAsset[] = [

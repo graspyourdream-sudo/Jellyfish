@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Button, Collapse, Descriptions, Tag } from 'antd'
+import { Button, Descriptions, Tag } from 'antd'
 import { OpenAPI } from '../../../../../services/generated'
 import { useGenerationGate } from '../../../components/generationGate'
 import type { GenerationOutlet } from '../../../components/generationGate'
 import type { ProjectStepInput, ProjectStepResolution } from '../projectSteps'
 import type { ProjectStepSignalDetail } from '../hooks/useProjectStepSignals'
+import {
+  TechnicalDetailSection,
+  TechnicalIdBlock,
+  TechnicalModelProviderBlock,
+} from './workbench/TechnicalDetailCollapse'
 
 const SIGNAL_ENDPOINTS = [
   ['章节与原文', 'GET /api/v1/studio/chapters?project_id=…（字段 shot_count / raw_text）'],
@@ -62,7 +67,7 @@ type ProjectDevInfoProps = {
 type ModelRow = { id: string; name: string; category: string; providerId: string }
 type ProviderRow = { id: string; name: string; status: string }
 
-/** 只读取数：模型设置 / 模型表 / 供应商表（不写库、不触网付费、不打印任何密钥）。 */
+/** 只读取数：模型设置 / 模型表 / 生成服务表（不写库、不触网付费、不打印任何密钥）。 */
 async function fetchJson(path: string): Promise<Record<string, unknown>> {
   const response = await fetch(`${OpenAPI.BASE}${path}`)
   const text = await response.text()
@@ -95,10 +100,10 @@ function readText(source: Record<string, unknown>, key: string): string {
  * 「技术详情」折叠区（原名「开发信息」，默认收起）。
  *
  * 普通页面上只留用户能看懂的状态（能不能做、下一步做什么、失败原因、费用提示）；
- * 接口路径、字段口径、判定优先级、**模型与供应商、原始状态值、任务编号 / 文件编号**
+ * 接口路径、字段口径、判定优先级、**模型与生成服务、原始状态值、任务编号 / 文件编号**
  * 一律收进这里，用户想排查时再展开，不干扰正常流程。
  *
- * 安全口径：这里只显示模型名 / 供应商名 / 状态值这类**标识性**字段，
+ * 安全口径：这里只显示模型名 / 生成服务名 / 状态值这类**标识性**字段，
  * 任何密钥、令牌、Authorization 头都不取、不存、不显示。
  */
 export function ProjectDevInfo({ detail, model, resolution, onReload, technical }: ProjectDevInfoProps) {
@@ -142,7 +147,7 @@ export function ProjectDevInfo({ detail, model, resolution, onReload, technical 
         setModelLoadError('')
       } catch (error) {
         if (cancelled) return
-        setModelLoadError((error as Error)?.message || '模型与供应商信息读取失败')
+        setModelLoadError((error as Error)?.message || '模型与生成服务信息读取失败')
       }
     }
     void load()
@@ -151,7 +156,7 @@ export function ProjectDevInfo({ detail, model, resolution, onReload, technical 
     }
   }, [])
 
-  /** 出口 → 默认模型 / 供应商 / 页面状态条给出的原始状态值。 */
+  /** 出口 → 默认模型 / 生成服务 / 页面状态条给出的原始状态值。 */
   const modelRows = useMemo(
     () =>
       (Object.keys(DEFAULT_MODEL_KEYS) as GenerationOutlet[]).map((outlet) => {
@@ -175,104 +180,70 @@ export function ProjectDevInfo({ detail, model, resolution, onReload, technical 
   const taskIds = technical?.taskIds ?? []
   const fileIds = technical?.fileIds ?? []
 
+  /**
+   * 技术详情里「模型 / 生成服务 / 原始状态值」那一组的数据。
+   *
+   * 注意：**标签文案不在这里** ——「模型与生成服务」「原始状态值」这类内部说法
+   * 统一由 `workbench/TechnicalDetailCollapse.tsx` 渲染（阶段 B ①：三处自建
+   * 折叠区合并到那一个文件，源码级禁词测试只给那一个文件开口子）。
+   * 本组件只负责把数据取出来。
+   */
+  const modelRowData = modelRows.map((row) => ({
+    outletLabel: row.outletLabel,
+    modelName: row.modelName,
+    modelId: row.modelId,
+    providerName: row.providerName,
+    providerStatus: row.providerStatus,
+    rawState: row.rawState,
+    rawReason: row.rawReason,
+  }))
+
   return (
-    <Collapse
-      ghost
-      size="small"
-      items={[
-        {
-          key: 'dev',
-          label: <span className="text-xs text-gray-500">技术详情</span>,
-          children: (
-            <div className="space-y-3 text-xs text-gray-600">
-              <div className="text-gray-500">
-                这里放的是排查问题用的内部信息；普通流程不需要看，默认收起，不影响操作。
-              </div>
+    <TechnicalDetailSection
+      testId="project-dev-info"
+      hint="这里放的是排查问题用的内部信息；普通流程不需要看，默认收起，不影响操作。"
+    >
+      <div className="space-y-3 text-xs text-gray-600">
+        <TechnicalModelProviderBlock rows={modelRowData} loadError={modelLoadError} />
 
-              {/* —— 模型、供应商与原始状态值：普通页面上一律不显示 —— */}
-              <div>
-                <div className="mb-1 font-medium text-gray-500">模型与供应商（内部标识）</div>
-                {modelLoadError ? (
-                  <div className="text-amber-600">
-                    {modelLoadError}（读不到时不影响上面的步骤判定与操作）
-                  </div>
-                ) : (
-                  <div className="space-y-0.5">
-                    {modelRows.map((row) => (
-                      <div key={row.outlet} className="flex flex-wrap items-center gap-1">
-                        <span className="text-gray-500">{row.outletLabel}：</span>
-                        <code>{row.modelName}</code>
-                        {row.modelId ? <span className="text-gray-400">（id={row.modelId}）</span> : null}
-                        <span className="text-gray-500">供应商：</span>
-                        <code>{row.providerName}</code>
-                        {row.providerStatus ? (
-                          <Tag
-                            bordered={false}
-                            color={row.providerStatus.toLowerCase() === 'disabled' ? 'red' : 'green'}
-                            className="mr-0"
-                          >
-                            {row.providerStatus}
-                          </Tag>
-                        ) : null}
-                        <span className="text-gray-500">原始状态值：</span>
-                        <code>{row.rawState}</code>
-                        {row.rawReason ? <span className="text-gray-400">（{row.rawReason}）</span> : null}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <div className="mt-1 text-gray-400">出于安全，这里不取、不存、不显示任何密钥或令牌。</div>
-              </div>
+        <TechnicalIdBlock taskIds={taskIds} fileIds={fileIds} />
 
-              {/* —— 任务编号 / 文件编号：只在技术详情里出现 —— */}
-              <div>
-                <div className="mb-1 font-medium text-gray-500">任务编号与文件编号</div>
-                <div>
-                  <span className="text-gray-500">任务编号：</span>
-                  {taskIds.length > 0 ? <code>{taskIds.join('、')}</code> : <span className="text-gray-400">本页暂无</span>}
-                </div>
-                <div>
-                  <span className="text-gray-500">文件编号：</span>
-                  {fileIds.length > 0 ? <code>{fileIds.join('、')}</code> : <span className="text-gray-400">本页暂无</span>}
-                </div>
-              </div>
+          <Descriptions size="small" column={2} bordered={false} colon={false}>
+            <Descriptions.Item label="章节数">{detail.chapterCount}</Descriptions.Item>
+            <Descriptions.Item label="已有原文章节">{detail.chaptersWithTextCount}</Descriptions.Item>
+            <Descriptions.Item label="判定用当前集分镜数">
+              {detail.focusChapterShotCount}
+              {detail.focusChapterId ? `（chapter=${detail.focusChapterId}）` : '（未选定当前集）'}
+            </Descriptions.Item>
+            <Descriptions.Item label="当前集已填视频提示词">{detail.focusChapterShotsWithPrompt}</Descriptions.Item>
+            <Descriptions.Item label="当前集已关联资产镜头">
+              {detail.focusChapterShotsWithLinks}
+              {detail.bindingSampleSize > 0 ? `（角色绑定按前 ${detail.bindingSampleSize} 个镜头抽样）` : ''}
+            </Descriptions.Item>
+            <Descriptions.Item label="项目镜头总数 / 已填提示词">
+              {detail.projectShotCount} / {detail.projectShotsWithPrompt}
+            </Descriptions.Item>
+            <Descriptions.Item label="资产数量（角色/场景/道具/服装）">
+              {assetCounts.characters} / {assetCounts.scenes} / {assetCounts.props} / {assetCounts.costumes}
+            </Descriptions.Item>
+            <Descriptions.Item label="已有参考图片资产数">{detail.assetImageCount}</Descriptions.Item>
+            <Descriptions.Item label="已保存图片提示词资产数">
+              {detail.assetsWithImagePromptCount === null
+                ? '暂时读不到这一项（内部字段名见下方「信号来源接口」）'
+                : detail.assetsWithImagePromptCount}
+            </Descriptions.Item>
+          </Descriptions>
 
-              <Descriptions size="small" column={2} bordered={false} colon={false}>
-                <Descriptions.Item label="章节数">{detail.chapterCount}</Descriptions.Item>
-                <Descriptions.Item label="已有原文章节">{detail.chaptersWithTextCount}</Descriptions.Item>
-                <Descriptions.Item label="判定用当前集分镜数">
-                  {detail.focusChapterShotCount}
-                  {detail.focusChapterId ? `（chapter=${detail.focusChapterId}）` : '（未选定当前集）'}
-                </Descriptions.Item>
-                <Descriptions.Item label="当前集已填视频提示词">{detail.focusChapterShotsWithPrompt}</Descriptions.Item>
-                <Descriptions.Item label="当前集已关联资产镜头">
-                  {detail.focusChapterShotsWithLinks}
-                  {detail.bindingSampleSize > 0 ? `（角色绑定按前 ${detail.bindingSampleSize} 个镜头抽样）` : ''}
-                </Descriptions.Item>
-                <Descriptions.Item label="项目镜头总数 / 已填提示词">
-                  {detail.projectShotCount} / {detail.projectShotsWithPrompt}
-                </Descriptions.Item>
-                <Descriptions.Item label="资产数量（角色/场景/道具/服装）">
-                  {assetCounts.characters} / {assetCounts.scenes} / {assetCounts.props} / {assetCounts.costumes}
-                </Descriptions.Item>
-                <Descriptions.Item label="已有参考图片资产数">{detail.assetImageCount}</Descriptions.Item>
-                <Descriptions.Item label="已保存图片提示词资产数">
-                  {detail.assetsWithImagePromptCount === null
-                    ? '无法判定（当前接口载荷未暴露 image_prompts）'
-                    : detail.assetsWithImagePromptCount}
-                </Descriptions.Item>
-              </Descriptions>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <span>判定结果：</span>
-                <Tag color="blue" className="mr-0">
-                  {resolution.step}
-                </Tag>
-                <span>{resolution.reason}</span>
-                <Button size="small" type="link" className="px-1" onClick={onReload}>
-                  重新判定
-                </Button>
-              </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span>判定结果：</span>
+            <Tag color="blue" className="mr-0">
+              {resolution.step}
+            </Tag>
+            <span>{resolution.reason}</span>
+            <Button size="small" type="link" className="px-1" onClick={onReload}>
+              重新判定
+            </Button>
+          </div>
 
               <div>
                 <div className="mb-1 font-medium text-gray-500">resolveProjectStep 入参（原始计数）</div>
@@ -308,10 +279,7 @@ export function ProjectDevInfo({ detail, model, resolution, onReload, technical 
               ) : (
                 <div className="text-emerald-600">全部信号抓取成功。</div>
               )}
-            </div>
-          ),
-        },
-      ]}
-    />
+      </div>
+    </TechnicalDetailSection>
   )
 }

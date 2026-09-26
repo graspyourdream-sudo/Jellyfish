@@ -62,6 +62,8 @@ import { classifyGenerationFailure, failureText } from '../../../components/gene
 import type { ProjectSignalAsset } from '../hooks/useProjectStepSignals'
 import { getProjectSignalAssetTypeLabel } from '../hooks/useProjectStepSignals'
 import { assetPrepInputFromReadiness, resolveAssetPrepStatus } from '../assetPrepStatus'
+// 阶段 B ①：技术详情折叠壳全仓唯一实现（三处自建折叠区已合并到它）
+import { TechnicalDetailSection } from './workbench/TechnicalDetailCollapse'
 import {
   ASSET_TYPE_LABEL,
   ASSET_TYPE_ORDER,
@@ -2279,7 +2281,7 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
                 key: 'prompt-diffs',
                 label: (
                   <span className="text-xs text-slate-600">
-                    ⑤ 最终提示词与差异（本页签 {tabPromptDifferences.length} 条）
+                    本次真正会用的提示词与差异（本页签 {tabPromptDifferences.length} 条）
                   </span>
                 ),
                 children: (
@@ -2653,23 +2655,13 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
               }}
               caption={`针对「${promptEditorAsset.name}」`}
             />
-            {/* 请求字段的技术细节（默认收起，主界面不出现字段名） */}
-            <Collapse
-              ghost
-              size="small"
-              items={[
-                {
-                  key: 'prompt-request',
-                  label: <span className="text-[11px] text-gray-500">技术详情：本次请求带上了哪些字段</span>,
-                  children: (
-                    <div className="space-y-1 text-[11px] text-gray-500">
-                      <div>{describePromptRequestFields(promptRequestSupport)}</div>
-                      <div>{`项目整体风格（读到的）：${projectStyleHint || '（项目还没有设置风格）'}`}</div>
-                    </div>
-                  ),
-                },
-              ]}
-            />
+            {/* 请求字段的技术细节（默认收起，主界面不出现字段名）。阶段 B ①：折叠壳统一到共享组件 */}
+            <TechnicalDetailSection testId="technical-detail-prompt-request" hint="本次请求带上了哪些字段">
+              <div className="space-y-1 text-[11px] text-gray-500">
+                <div>{describePromptRequestFields(promptRequestSupport)}</div>
+                <div>{`项目整体风格（读到的）：${projectStyleHint || '（项目还没有设置风格）'}`}</div>
+              </div>
+            </TechnicalDetailSection>
           </div>
         ) : null}
       </Modal>
@@ -2715,14 +2707,8 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
               payload={detailTask.promptBasis}
               caption={`结果「${detailTask.assetName}」`}
             />
-            <Collapse
-              size="small"
-              items={[
-                {
-                  key: 'raw',
-                  label: <span className="text-xs text-gray-500">技术详情（接口返回的原始字段）</span>,
-                  children: (
-                    <pre className="m-0 max-h-[320px] overflow-auto rounded bg-gray-50 p-2 text-[11px] leading-5">
+            <TechnicalDetailSection testId="technical-detail-raw-fields" hint="接口返回的原始字段">
+              <pre className="m-0 max-h-[320px] overflow-auto rounded bg-gray-50 p-2 text-[11px] leading-5">
                       {JSON.stringify(
                         {
                           status: detailTask.status,
@@ -2743,11 +2729,8 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
                         null,
                         2,
                       )}
-                    </pre>
-                  ),
-                },
-              ]}
-            />
+              </pre>
+            </TechnicalDetailSection>
           </div>
         ) : null}
       </Modal>
@@ -2758,14 +2741,7 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
         两块重复的折叠区会让用户以为有两套计划。
       */}
       {!embedded ? (
-      <Collapse
-        ghost
-        size="small"
-        items={[
-          {
-            key: 'plan',
-            label: <span className="text-xs text-gray-500">技术详情：本次出图计划（只读，不触网、不花钱）</span>,
-            children: (
+      <TechnicalDetailSection testId="technical-detail-plan" hint="本次出图计划（只读，不触网、不花钱）" className="mb-2">
               <div className="space-y-2 text-xs text-gray-600">
                 <Space size={6} wrap>
                   <Tag bordered={false}>{`当前页签 ${ASSET_TYPE_LABEL[tab]}`}</Tag>
@@ -2795,11 +2771,8 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
                 <Typography.Text type="secondary" className="text-[11px]">
                   同项目 + 同资产 + 同提示词 = 同一把幂等键：重复提交会被出图服务识别为同一个任务，不会重复生成；每个资产在提交中也不会被重复提交。
                 </Typography.Text>
-              </div>
-            ),
-          },
-        ]}
-      />
+      </div>
+      </TechnicalDetailSection>
       ) : null}
     </div>
   )

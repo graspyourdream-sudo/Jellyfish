@@ -13,7 +13,10 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+import { scannerSelfCheck } from '../../../../components/mainScreenCopyGuard.ts'
 
 import {
   MAIN_SCREEN_FORBIDDEN_SOURCE_TERMS,
@@ -442,30 +445,88 @@ test('主界面派生出的全部静态文案都不含禁词', () => {
  * 模型名 / 供应商 / 任务号 / `file_id` 这些放在默认收起的「技术详情」里，
  * 所以那个文件的职责就是显示它们。
  */
-test('主界面组件源码里不出现禁词（技术详情组件除外）', () => {
-  const files = [
-    'AssetWorkbench.tsx',
-    'WorkbenchCommandBar.tsx',
-    'AssetCardGrid.tsx',
-    'AssetDetailDrawer.tsx',
-    'PendingReviewDrawer.tsx',
-    'ScriptTextPanel.tsx',
-  ]
+/**
+ * 主界面组件源码里的禁词扫描。
+ *
+ * 阶段 B ① 的升级（审计 §8.1 区域 2「由硬编码 6 个文件扩到全目录遍历」）：
+ *   - 扫描对象从**硬编码 6 个文件名**改成 `components/workbench/**` 的**.tsx 目录遍历**；
+ *   - 另加 `ProjectDevInfo.tsx` —— 它原本是**第二套技术详情实现**（审计 §9 第 2 项），
+ *     本批次已合并到唯一实现，所以必须进入扫描范围，否则等于豁免范围失控；
+ *   - **豁免文件只有一个**：`TechnicalDetailCollapse.tsx`（它就是「技术详情」本身）。
+ *
+ * 为什么按 `.tsx` 过滤：渲染面 = 能产出 JSX 的文件。纯 `.ts`（`technicalView.ts` /
+ * `assetWorkbenchContract.ts` / `workbenchState.ts` 等）是**第三层文本的生产者与词表定义处**，
+ * 它们读契约字段名属正常（审计 §8.1 明说「这些在契约里就带」），
+ * 不构成本文件要扫的「主区文案」。这条过滤是机械判据，不是人工豁免。
+ */
+const TECHNICAL_DETAIL_WAIVER = 'TechnicalDetailCollapse.tsx'
+const TABLES_AND_TYPES_EXTRA_FILES = ['ProjectDevInfo.tsx']
+
+function workbenchDir(): string {
+  return dirname(fileURLToPath(import.meta.url))
+}
+
+function renderSurfaceFiles(): string[] {
+  const dir = workbenchDir()
+  const local = readdirSync(dir)
+    .filter((name) => name.endsWith('.tsx') && !name.endsWith('.test.tsx'))
+    .filter((name) => statSync(join(dir, name)).isFile())
+  const extra = TABLES_AND_TYPES_EXTRA_FILES.map((name) => `../${name}`).filter((name) =>
+    statSync(join(dir, name)).isFile(),
+  )
+  return [...local, ...extra].sort()
+}
+
+test('主界面组件源码里不出现禁词（唯一豁免：技术详情组件本身）', () => {
+  const files = renderSurfaceFiles()
+  assert.ok(files.length >= 6, `扫描范围只有 ${files.length} 个文件，目录遍历可能失效了`)
   const offenders: string[] = []
   files.forEach((file) => {
     let source = ''
     try {
-      source = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8')
+      source = readFileSync(join(workbenchDir(), file), 'utf8')
     } catch {
-      // 文件还没建出来时直接判失败（避免"文件不存在＝干净"这种假绿）
+      // 文件读不到时直接判失败（避免"文件不存在＝干净"这种假绿）
       offenders.push(`${file}：文件不存在`)
       return
     }
+    if (file === TECHNICAL_DETAIL_WAIVER || file.endsWith(`/${TECHNICAL_DETAIL_WAIVER}`)) return
     MAIN_SCREEN_FORBIDDEN_SOURCE_TERMS.forEach((term) => {
       if (source.includes(term)) offenders.push(`${file}：命中「${term}」`)
     })
   })
   assert.deepEqual(offenders, [])
+})
+
+test('豁免只有一个文件：技术详情折叠壳只在本目录的一个文件里实现', () => {
+  const dir = workbenchDir()
+  const sources = renderSurfaceFiles().map((file) => ({ file, source: readFileSync(join(dir, file), 'utf8') }))
+  const waivers = sources.filter((item) => item.file.includes(TECHNICAL_DETAIL_WAIVER))
+  assert.equal(waivers.length, 1, `豁免必须且只能有一个文件，实际：${waivers.map((item) => item.file).join('、')}`)
+  // 唯一的那个文件必须真的导出统一折叠壳（否则「合并」只是名义上的）
+  const waiver = waivers[0].source
+  assert.ok(waiver.includes('export function TechnicalDetailSection'), '技术详情组件必须导出统一折叠壳')
+  // 其它文件若渲染技术详情，必须引用统一实现，不许自建折叠标签
+  const selfBuilt = sources
+    .filter((item) => !item.file.includes(TECHNICAL_DETAIL_WAIVER))
+    .filter((item) => item.source.includes('TechnicalDetailSection'))
+    .filter((item) => !item.source.includes('TechnicalDetailCollapse'))
+  assert.deepEqual(
+    selfBuilt.map((item) => item.file),
+    [],
+    '引用统一折叠壳时必须从 TechnicalDetailCollapse 导入，不能另立一套',
+  )
+})
+
+test('扫描范围自检：词表与扫描器都真的在跑（防假绿）', () => {
+  // ① 词表非空
+  assert.ok(MAIN_SCREEN_FORBIDDEN_SOURCE_TERMS.length >= 12, '源码级禁词表不应少于 12 词')
+  // ② 扫描器注入探针必须能命中（扫描器自身有效）
+  const waiverPath = join(workbenchDir(), TECHNICAL_DETAIL_WAIVER)
+  const waiverSource = readFileSync(waiverPath, 'utf8')
+  assert.ok(scannerSelfCheck(waiverSource), '扫描器自检失败：注入的禁词没被抓到')
+  // ③ 目录遍历真的列到了文件（不是空数组假装干净）
+  assert.ok(renderSurfaceFiles().length >= 6, '目录遍历没列到文件')
 })
 
 test('工作台组件目录里不放技术详情以外的内部字段（技术详情单独一个文件）', () => {

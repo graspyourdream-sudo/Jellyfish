@@ -139,7 +139,8 @@ import {
   type ShotReadiness,
 } from './components/shotReadiness'
 import { TASK_COPY } from '../components/taskCopy'
-import { maskInternalIds } from '../components/maskInternalIds'
+// 阶段 B ①：后端原文 → 主区的中文结论（掩码 → 洗句 → 业务化改写三级管道）
+import { toUserFacingText } from '../components/userFacingMessage'
 import { classifyGenerationFailure, failureText } from '../components/generationGate'
 import { ChapterStudioBatchToolbar } from './components/ChapterStudioBatchToolbar'
 import { ChapterStudioMaintenancePanel } from './components/ChapterStudioMaintenancePanel'
@@ -6448,7 +6449,7 @@ function Inspector(props: {
                                   <span className="text-[11px] text-gray-500">{frame.usable ? '本次请求会使用' : '本次请求用不了'}</span>
                                   {frame.reason ? (
                                     <div className="mt-0.5 max-w-[520px] text-[10px] leading-4 text-orange-600">
-                                      {maskInternalIds(frame.reason)}
+                                      {toUserFacingText(frame.reason, '这一帧这次用不了：可以重新生成或换一张参考图')}
                                     </div>
                                   ) : null}
                                 </div>
@@ -6474,7 +6475,7 @@ function Inspector(props: {
                             {/* 绑了但用不上：计划阶段就把原因与修法写出来（不等到提交失败） */}
                             {requestPlan.plan.audio?.included === false && requestPlan.plan.audio?.file_id ? (
                               <div className="mt-1 max-w-[560px] text-[10px] leading-4 text-orange-600">
-                                <div>{maskInternalIds(String(requestPlan.plan.audio.excluded_reason || ''))}</div>
+                                <div>{toUserFacingText(String(requestPlan.plan.audio.excluded_reason || ''), '这条声音这次送不出去：生成服务取不到它')}</div>
                                 {requestPlan.plan.audio.how_to_fix ? (
                                   <div className="text-slate-500">怎么修：{requestPlan.plan.audio.how_to_fix}</div>
                                 ) : null}
@@ -6572,7 +6573,7 @@ function Inspector(props: {
                           description={
                             <ul className="list-disc pl-4 text-[11px]">
                               {requestPlan.plan.warnings.slice(0, 4).map((warning: string, index: number) => (
-                                <li key={`plan-warning-${index}`}>{maskInternalIds(warning)}</li>
+                                <li key={`plan-warning-${index}`}>{toUserFacingText(warning, '这一步有需要注意的地方')}</li>
                               ))}
                             </ul>
                           }

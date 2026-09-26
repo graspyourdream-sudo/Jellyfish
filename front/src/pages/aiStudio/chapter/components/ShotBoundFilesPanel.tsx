@@ -15,7 +15,8 @@ import { Alert, Button, Space, Tag, Tooltip, Typography } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { previewPromptDelivery } from '../../../../services/llmPipelineApi'
 import { buildFileDownloadUrl, resolveAssetUrl } from '../../assets/utils'
-import { maskInternalIds } from '../../components/maskInternalIds'
+// 阶段 B ①：后端原文 → 主区的中文结论（掩码 → 洗句 → 业务化改写三级管道）
+import { toUserFacingText } from '../../components/userFacingMessage'
 
 type BoundFileRow = {
   slot: string
@@ -128,7 +129,7 @@ export function ShotBoundFilesPanel({ projectId, chapterId, shotId }: ShotBoundF
                     {`${row.slot_label || row.slot} · ${row.file_id ? '文件已就绪' : '（无文件）'}（内部 ID 见「技术详情」）`}
                   </div>
                   {row.warnings?.length ? (
-                    <div className="text-[10px] text-amber-600">{maskInternalIds(row.warnings[0])}</div>
+                    <div className="text-[10px] text-amber-600">{toUserFacingText(row.warnings[0], '这一项有需要注意的地方')}</div>
                   ) : null}
                 </div>
               </div>

@@ -27,6 +27,135 @@ export type TechnicalDetailCollapseProps = {
   onOpenLegacyExtractConfirm?: () => void
 }
 
+/* --------------------------------------------------------------- 统一的折叠壳 */
+
+/**
+ * 全仓**唯一**的「技术详情」折叠壳（阶段 B ①：三处自建折叠区合并到这里）。
+ *
+ * 为什么要有这个壳（审计 §9 第 2 项）：改版前一共有 3 处自建折叠区
+ * （`ProjectDevInfo.tsx:179`、`AssetImagePromptLlmPanel.tsx`、
+ * `AssetProductionArea.tsx`），而源码级禁词测试**只能给一个文件开口子**——
+ * 多套实现等于「技术详情」的豁免范围失控，谁都能自己写一个折叠块把内部字段放进去。
+ * 合并后：**折叠壳与本文件里的技术层标签都只在本文件出现**，
+ * 调用方只传数据，不传任何内部字段名。
+ *
+ * 口径（审计 §2.1 判定铁律）：折叠区的标题在**收起状态下也可见**，
+ * 所以标题文案本身必须干净 —— 因此这里把标题写死成
+ * 「技术详情（默认收起）」，不开放 `title` 参数，从结构上杜绝
+ * 「某个调用方自己在标题里写内部字段名」（旧实现里 `提示词来源`、
+ * `本次请求带上了哪些字段` 这类标题就是各页自己拼的）。
+ */
+export type TechnicalDetailSectionProps = {
+  children: ReactNode
+  /**
+   * 收起态可见的补充说明。
+   *
+   * ⚠️ 这里的内容**用户不展开也看得见**，所以只允许写业务说法，
+   * 不许写字段名 / 模型名 / 供应商名 / 任务号。
+   */
+  hint?: ReactNode
+  /** 便于测试与排障定位是哪一块（不是用户可见文案） */
+  testId?: string
+  /** 外层追加 class（默认样式来自本组件） */
+  className?: string
+}
+
+export function TechnicalDetailSection(props: TechnicalDetailSectionProps) {
+  const { children, hint, testId = 'technical-detail', className } = props
+  return (
+    <details
+      className={`rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 ${className ?? ''}`.trim()}
+      data-testid={testId}
+    >
+      <summary className="cursor-pointer text-[11px] text-gray-500">技术详情（默认收起）</summary>
+      <div className="mt-2 space-y-3">
+        {hint ? <div className="text-[11px] leading-5 text-slate-500">{hint}</div> : null}
+        {children}
+      </div>
+    </details>
+  )
+}
+
+/* ------------------------------------- 技术层的可复用块（内部字段名只在本文件） */
+
+export type TechnicalModelRow = {
+  /** 出口的业务名（例如「图片（出图）」） */
+  outletLabel: string
+  /** 原始模型名（技术层允许） */
+  modelName: string
+  /** 模型内部 id（技术层允许） */
+  modelId: string
+  /** 生成服务的原始名字（技术层允许） */
+  providerName: string
+  /** 生成服务的原始状态值（技术层允许） */
+  providerStatus: string
+  /** 页面状态条给出的原始状态值（技术层允许） */
+  rawState: string
+  /** 原始状态值附带的原因（技术层允许） */
+  rawReason: string
+}
+
+/**
+ * 技术详情：模型、生成服务与原始状态值。
+ *
+ * 「模型与供应商」「原始状态值」这些字样**只能出现在本文件**；
+ * 调用方（例如 `ProjectDevInfo.tsx`）只负责把数据取出来传进来。
+ */
+export function TechnicalModelProviderBlock(props: { rows: TechnicalModelRow[]; loadError?: string }) {
+  const { rows, loadError } = props
+  return (
+    <div>
+      <div className="mb-1 font-medium text-gray-500">模型与供应商（内部标识）</div>
+      {loadError ? (
+        <div className="text-amber-600">{loadError}（读不到时不影响上面的步骤判定与操作）</div>
+      ) : (
+        <div className="space-y-0.5">
+          {rows.map((row) => (
+            <div key={row.outletLabel} className="flex flex-wrap items-center gap-1">
+              <span className="text-gray-500">{row.outletLabel}：</span>
+              <code>{row.modelName}</code>
+              {row.modelId ? <span className="text-gray-400">（id={row.modelId}）</span> : null}
+              <span className="text-gray-500">供应商：</span>
+              <code>{row.providerName}</code>
+              {row.providerStatus ? (
+                <Tag
+                  bordered={false}
+                  color={row.providerStatus.toLowerCase() === 'disabled' ? 'red' : 'green'}
+                  className="mr-0"
+                >
+                  {row.providerStatus}
+                </Tag>
+              ) : null}
+              <span className="text-gray-500">原始状态值：</span>
+              <code>{row.rawState}</code>
+              {row.rawReason ? <span className="text-gray-400">（{row.rawReason}）</span> : null}
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="mt-1 text-gray-400">出于安全，这里不取、不存、不显示任何密钥或令牌。</div>
+    </div>
+  )
+}
+
+/** 技术详情：任务号 / 文件编号（审计 §6.1 唯一允许出现的第一种形态）。 */
+export function TechnicalIdBlock(props: { taskIds: readonly string[]; fileIds: readonly string[] }) {
+  const { taskIds, fileIds } = props
+  return (
+    <div>
+      <div className="mb-1 font-medium text-gray-500">任务编号与文件编号</div>
+      <div>
+        <span className="text-gray-500">任务编号：</span>
+        {taskIds.length > 0 ? <code>{taskIds.join('、')}</code> : <span className="text-gray-400">本页暂无</span>}
+      </div>
+      <div>
+        <span className="text-gray-500">文件编号：</span>
+        {fileIds.length > 0 ? <code>{fileIds.join('、')}</code> : <span className="text-gray-400">本页暂无</span>}
+      </div>
+    </div>
+  )
+}
+
 function renderLines(lines: string[]): ReactNode {
   if (lines.length === 0) return <span className="text-[11px] text-gray-400">（后端没有给出内容）</span>
   return (
@@ -42,15 +171,13 @@ export function TechnicalDetailCollapse(props: TechnicalDetailCollapseProps) {
   const { input, gateBanner, onOpenLegacyExtractConfirm } = props
   const view: TechnicalView = assembleTechnicalView(input)
   return (
-    <details className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2" data-testid="technical-detail">
-      <summary className="cursor-pointer text-[11px] text-gray-500">
-        技术详情（默认收起）
-      </summary>
-      <div className="mt-2 space-y-3">
-        {/* 默认收起：内部维度清单放在这里，不放在收起时可见的标题上 */}
-        <div className="text-[11px] text-slate-500">
-          接口名、候选条数、聚合组、匹配诊断、字段名、模型 / 供应商 / 任务号 / 文件编号
-        </div>
+    <TechnicalDetailSection
+      hint={
+        /* 默认收起：内部维度清单放在这里，不放在收起时可见的标题上 */
+        <>接口名、候选条数、聚合组、匹配诊断、字段名、模型 / 供应商 / 任务号 / 文件编号</>
+      }
+    >
+      <div className="space-y-3">
         {gateBanner}
 
         <Descriptions size="small" column={1} bordered>
@@ -120,7 +247,7 @@ export function TechnicalDetailCollapse(props: TechnicalDetailCollapseProps) {
           这一块默认收起：日常操作（选资产 → 生成 → 看进度 → 采纳 → 定版）不需要看它。
         </Typography.Text>
       </div>
-    </details>
+    </TechnicalDetailSection>
   )
 }
 
