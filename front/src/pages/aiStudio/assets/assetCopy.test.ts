@@ -97,6 +97,7 @@ const REGISTERED_FILES: readonly string[] = [
   'PropAssetEditPage.tsx',
   'SceneAssetEditPage.tsx',
   'assetAdapters.ts',
+  'assetDescriptionCopy.ts',
   'assetResultSummary.ts',
   'components/ActorEntityFormModal.tsx',
   'components/AssetEditPageBase.tsx',
@@ -950,54 +951,91 @@ test('阶段B插批豁免守卫：`assets/**` 里不许出现第二套「技术�
 
 /* ------------------------------------------- ⑤ 手工核对登记（扫描器看不见的） */
 
-test('阶段B插批手工核对登记：`assets/**` 里**已知的、本批未处理**的动态插值渲染点（不许悄悄增加）', () => {
+test('第6批手工核对登记：`assets/**` 的**已知未处理**动态插值渲染点（不许悄悄增加 / 减少）', () => {
   /**
-   * 静态扫描**原理上**看不见「把后端值插进 JSX」（§5.6：泄漏的主因）。
-   * 本批逐条手工核对过 `assets/**`，把**不属于本批范围**（审计 §4.6 模式 1 的其它条目，
-   * 需要改信息结构而不是换文案）的落点登记在这里：
+   * 静态扫描**原理上**看不见「把后端值插进 JSX」（§5.6：泄漏的主因），
+   * 所以每批都要逐条手工核对并登记。第 6 批的登记表分两段：
+   *
+   * ## ① 上一批的登记项：本批已修（**不许回潮**）
+   *
+   * | 上一批登记（未修） | 本批改成 |
+   * |---|---|
+   * | 工具栏「资产类型：`{assetNavigateRelationType}`」（`scene` 原值） | 走 `labelFor(ASSET_TYPE, …)` → 「场景」 |
+   * | 工具栏「项目作用域：`{resolvedProjectId}`」（UUID） | 「所属项目：<项目名>」（名称读不到时给中文占位，**不回显编号**） |
+   * | 角度卡片 `ID {slot.image.id}`（「ID 23」） | 主区给「已出图」，编号进页级「技术详情」 |
+   * | 备选图标题 `` `图片 ${candidate.id}` `` | 「历史生成图（第 N 张）」 |
+   * | 资产标题旁 `{asset.id ? <Tag>{asset.id}</Tag> : null}` | 删除主区 Tag，编号进页级「技术详情」 |
+   *
+   * ## ② 仍然未处理（**逐条写明为什么不属本批可写范围**）
    *
    * | 落点 | 现状 | 为什么本批不改 |
    * |---|---|---|
-   * | `:1662` 工具栏「资产类型：`{assetNavigateRelationType}` / 项目作用域：`{resolvedProjectId}` | 枚举原值 + UUID 直渲 | §4.6 模式 1；正确修法是「资产类型走中文映射 + 显示项目名而不是 UUID」，要接项目名查询，属结构改动 |
-   * | `:1694` 角度卡片 `ID {slot.image.id}` | 数字 ID 直渲 | §4.6 模式 1；需要给卡片加第三层折叠位，属结构改动 |
-   * | `:1791` 备选图标题 `图片 {candidate.id}` | 数字 ID 直渲 | §4.6 模式 1；同上 |
-   * | `:1505` 资产标题旁的 `{asset.id}` Tag | 内部 ID 直渲 | §4.6 模式 1；同上 |
+   * | `describePromptSaveFailure(error)` 的 `message` / `fix` 直上 toast（`handleSaveImagePrompts`） | 后端结构化错误原文出口 | 该函数在 `project/ProjectWorkbench/components/assetPromptQuality.ts`（**区域 2/5 的可写范围**），按「不许跨目录改」只登记 |
+   * | `PromptQualityAlert` 的 `verdict.reason` | 同上（`assetPromptQuality.ts` 产出） | 同上 |
+   * | 全局资产写入确认弹窗的 `writeScope.lines` | 同上（`assetWriteScope.ts` 产出） | 同上 |
+   * | 名称 / 描述输入框：**展示层**已转述（`stripAssetNamePrefix` / `describeAssetDescription`），但保存仍写原始值 | 可编辑字段 | 在可编辑字段上直接改写并保存 = 替用户改数据（改名 / 改描述），属数据变更、不属文案治理；已用「展示层转述 + 原名进技术详情」覆盖主区 |
    *
-   * 这条用例的作用不是「放行」，而是**上锁**：这些行一旦被改动（修好或改坏），
-   * 断言会失败，逼着下一个人回来更新这张登记表 —— 不会出现「没人知道还有哪些动态渲染点」。
+   * 这条用例的作用不是「放行」，而是**上锁**：登记项一旦被改动（修好或改坏），
+   * 断言会失败，逼着下一个人回来更新这张表。
    */
   const code = stripComments(readScan(ASSET_EDIT_BASE))
-  const knownUnfixed: readonly { readonly marker: string; readonly note: string }[] = [
+  // ① 上一批登记项：修好的形态一个字都不许回来
+  const resurrected: readonly { readonly marker: string; readonly note: string }[] = [
     {
       marker: '`资产类型：${assetNavigateRelationType}`',
-      note: '工具栏「资产类型：scene」枚举原值直渲（§4.6 模式 1，运行时实拍可见）',
+      note: '工具栏「资产类型：scene」枚举原值直渲（§4.6 模式 1）回潮了',
     },
     {
       marker: '`项目作用域：${resolvedProjectId}`',
-      note: '工具栏「项目作用域：<UUID>」直渲（§4.6 模式 1）',
+      note: '工具栏「项目作用域：<UUID>」直渲（§4.6 模式 1）回潮了',
     },
-    { marker: 'ID {slot.image.id}', note: '角度卡片「ID 23」数字 ID 直渲（§4.6 模式 1，运行时实拍可见）' },
-    { marker: '`图片 ${candidate.id}`', note: '备选图标题数字 ID 直渲（§4.6 模式 1）' },
-    { marker: '{asset?.id ? <Tag>{asset.id}</Tag> : null}', note: '资产标题旁内部 ID Tag 直渲（§4.6 模式 1）' },
+    { marker: 'ID {slot.image.id}', note: '角度卡片「ID 23」数字 ID 直渲（§4.6 模式 1）回潮了' },
+    { marker: '`图片 ${candidate.id}`', note: '备选图标题数字 ID 直渲（§4.6 模式 1）回潮了' },
+    { marker: '{asset?.id ? <Tag>{asset.id}</Tag> : null}', note: '资产标题旁内部 ID Tag 直渲（§4.6 模式 1）回潮了' },
+    { marker: '项目作用域：请先从项目工作台', note: '「项目作用域」这条内部实现口径（§5.5-E）回潮了' },
+    { marker: '生成客户端代码后重试', note: '把开发命令 `openapi:update` 给终端用户看（§4.6 模式 4）回潮了' },
   ]
-  const missing = knownUnfixed.filter((entry) => !code.includes(entry.marker))
+  const back = resurrected.filter((entry) => code.includes(entry.marker))
+  assert.deepEqual(
+    back.map((entry) => entry.note),
+    [],
+    `本批已修好的渲染点又回来了：\n${back.map((entry) => entry.note).join('\n')}`,
+  )
+  // ② 登记在册的「仍未处理」出口必须还在（否则说明它被改动了，登记表要同步）
+  const stillThere: readonly { readonly marker: string; readonly note: string }[] = [
+    { marker: 'describePromptSaveFailure(error)', note: '结构化保存失败的原文出口（属 ProjectWorkbench 可写范围，只登记）' },
+    { marker: 'writeScope.lines.map', note: '全局资产写入确认弹窗的行（文案由 assetWriteScope.ts 产出，只登记）' },
+  ]
+  const missing = stillThere.filter((entry) => !code.includes(entry.marker))
   assert.deepEqual(
     missing.map((entry) => entry.note),
     [],
-    '这些登记在册的「本批未处理」渲染点找不到了 —— 要么被修好了（请更新本登记表），要么被改名了（请核对）',
+    `登记在册的「仍未处理」出口找不到了 —— 要么被处理了（请更新登记表），要么被改名了：\n${missing
+      .map((entry) => entry.note)
+      .join('\n')}`,
   )
-  // 反向：本批**已经处理**的那一类一个字都不许回潮（工具栏那行以外的结果面板口径）
+  // ③ 本批新增的第三层出口必须真的在（不是靠删信息过关）：页级技术详情含编号与原始取值
+  const folds = findFoldContents(code)
+  assert.ok(
+    folds.some((fold) => fold.includes('资产编号：') && fold.includes('资产类型（原始取值）：')),
+    '页级「技术详情」必须承载资产编号与资产类型原始取值（否则就是删信息而不是收起来）',
+  )
+  assert.ok(
+    folds.some((fold) => fold.includes('已出图角度的图片编号：')),
+    '角度图片编号必须保留在默认收起的技术详情里（§4.6 模式 1 要求收起来、不是删掉）',
+  )
+  // ④ §5.5-C 已修的那一类同样不许回潮（沿用上一批的断言，**不放宽**）
   const { batch, single } = resultPanelRegions()
   ;[batch, single].forEach((region) => {
     assert.equal(
       /阶段：reference_batch/.test(region),
       false,
-      '结果面板顶部的内部提交类型码又回到了主区（本批已把它收进「技术详情」）',
+      '结果面板顶部的内部提交类型码又回到了主区（插批已把它收进「技术详情」）',
     )
     assert.equal(
       /资产：\{assetId/.test(region),
       false,
-      '结果面板顶部的资产 UUID 又回到了主区（本批已把它收进「技术详情」）',
+      '结果面板顶部的资产 UUID 又回到了主区（插批已把它收进「技术详情」）',
     )
     assert.equal(
       /oss_url：|项目作用域：\{resolvedProjectId\}/.test(region),

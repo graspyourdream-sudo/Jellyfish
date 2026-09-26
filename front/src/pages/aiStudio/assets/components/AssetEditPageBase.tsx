@@ -40,7 +40,14 @@ import {
   type ImagePromptPreviewResult,
 } from '../../../../services/llmPipelineApi'
 import { listTaskLinksNormalized } from '../../../../services/filmTaskLinks'
-import { buildFileDownloadUrl } from '../utils'
+import { buildFileDownloadUrl, isLocalAssetAddress } from '../utils'
+import { describeAssetDescription, stripAssetNamePrefix } from '../assetDescriptionCopy'
+/* 中文化出口一律用共享管道（审计 §7.1-4：枚举映射全仓一份）：
+   - `labelFor(ASSET_TYPE, …)`：资产类型原值 → 中文（本页运行时曾显示「资产类型：scene」）；
+   - `showUserError`：后端原文只进「技术详情」，主区只出中文结论（审计 §7.1-5）。 */
+import { ASSET_TYPE, labelFor } from '../../components/enumLabels'
+import { showUserConclusion, showUserError, toUserFacingText } from '../../components/userFacingMessage'
+import { maskInternalIds } from '../../components/maskInternalIds'
 // 结果类型口径（前端唯一一份）：按类型取词/取标签，避免场景、道具被说成「参考图」
 import {
   BATCH_REFERENCE_FLOW_LABEL,
@@ -82,7 +89,7 @@ import { TechnicalDetailSection } from '../../project/ProjectWorkbench/component
 import { DisplayImageCard } from './DisplayImageCard'
 import { ProjectVisualStyleAndStyleFields } from '../../project/ProjectVisualStyleAndStyleFields'
 import { useProjectStyleOptions } from '../../project/useProjectStyleOptions'
-import { defaultTaskActionErrorMessage, executeTaskCancel } from '../../components/taskActionHelpers'
+import { executeTaskCancel, readRawErrorMessage } from '../../components/taskActionHelpers'
 import { handleTaskResultSafely } from '../../components/taskResultHelpers'
 import { useRelationTaskNotification } from '../../components/taskNotificationHelpers'
 import { useTaskPageContext } from '../../components/taskPageContext'
@@ -325,7 +332,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       // resolvedProjectId 可能还没重新渲染，读旧值会再次弹出选择框。
       const projectId = (activeGenerateProjectIdRef.current || resolvedProjectId).trim()
       if (!projectId) {
-        throw new Error('缺少项目作用域：请从项目工作台进入本页，或先选择项目')
+        throw new Error('还不知道这个资产属于哪个项目：请从项目工作台进入本页，或先选择项目')
       }
       // 为什么改走 P3 直提端点：老的 `/studio/image-tasks/...` 只建一条 Celery 任务行，
       // 本机没有 broker/worker（且 DRY_RUN 下建行前就被守卫拦住），表现为"点了生成没反应"。
@@ -464,7 +471,9 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         applySmartDetectResultValue(resultValue)
       },
       onFailed: (errorMessage) => {
-        message.error(errorMessage)
+        /* 审计 §4.6 模式 6：任务结果里的 `data.error` 是后端原文。
+           主区只出中文结论，原文经掩码后进「技术详情」（`showUserError` 的固定契约）。 */
+        void showUserError(errorMessage, '智能检测失败', '智能检测')
       },
       onReadError: () => {
         message.error('读取智能检测结果失败')
@@ -691,9 +700,10 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       const maybeAny = error as { response?: { status?: number }; status?: number }
       const status = maybeAny?.response?.status ?? maybeAny?.status
       if (status === 404) {
-        message.error('接口未找到：请运行 `pnpm run openapi:update` 生成客户端代码后重试')
+        // 审计 §4.6 模式 4：原来这里把开发命令（`pnpm run openapi:update`）给终端用户看。
+        message.error('页面与服务端版本不一致，请刷新页面后重试；若仍然失败，请联系管理员')
       } else {
-        message.error(defaultTaskActionErrorMessage(error, '智能检测失败'))
+        void showUserError(error, '智能检测失败', '智能检测')
       }
     } finally {
       setSmartDetectLoading(false)
@@ -795,12 +805,9 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         dryRun: submitted?.dryRun,
       })
       if (!url && !roundSummary.hasFailure) {
-        // 既没有可采纳地址、也没有任何失败证据（例如后端什么都没返回）：
-        // 不再输出 status=unknown 这种空话，有后端 message 就用它，没有就把后端状态原样带上。
-        message.error(
-          submitted?.message ||
-            `出图没有返回可用图片地址（后端返回状态：${submitted?.status || '未提供'}）`,
-        )
+        /* 审计 §4.6 模式 2/3：原来这里拼「后端返回状态：<枚举原值>」并把后端 message 直渲。
+           现在主区给产品自己写的中文结论，后端原文经掩码后进「技术详情」。 */
+        void showUserError(submitted?.message, '出图没有返回可用的图片地址，请稍后重试', '单张出图')
         return
       }
       setSingleGenResult({
@@ -819,9 +826,11 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         message.warning('本次出图没有拿到可采纳的图片地址，真实原因见弹出的结果窗口。')
       }
     } catch (error) {
-      // 真实原因照原样显示：缺项目作用域 / 被 DRY_RUN 拦住 / 参数缺失 / 服务错误都能一眼看出。
+      /* 真实原因照原样显示：缺项目 / 演练模式拦住 / 参数缺失 / 服务错误都能一眼看出。
+         主区的这句由 `generationStatusCore.failureText` 产出（内部已过脱敏管道），
+         后端原文另经掩码后进「技术详情」（审计 §4.6 模式 6）。 */
       const failure = classifyGenerationFailure(error, 'image')
-      message.error(failureText(failure))
+      void showUserConclusion('error', failureText(failure), readRawErrorMessage(error), '单张出图')
     } finally {
       setGeneratingByImageId((prev) => ({ ...prev, [promptPreviewImage.id]: false }))
     }
@@ -900,7 +909,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       setSingleGenResult(null)
       await loadData()
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '采纳失败')
+      void showUserError(error, '采纳失败', '采纳结果')
     } finally {
       setSingleGenAdopting('')
     }
@@ -1032,10 +1041,21 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       })
       setImagePromptDraftByCategory(nextDraft)
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '生成图片提示词失败')
+      void showUserError(error, '生成图片提示词失败', '生成图片提示词')
     } finally {
       setImagePromptLoading(false)
     }
+  }
+
+  /**
+   * 角度类别原值 → 中文名。
+   *
+   * 后端给的中文标签优先；**未登记时给中文兜底，绝不回显类别原值**
+   * （`MAP[k] ?? k` 是本项目反复踩的模式 3 兜底坑）。
+   */
+  const angleDisplayName = (category: string): string => {
+    const hit = (imagePromptResult?.slots ?? []).find((slot) => slot.category === category)
+    return String(hit?.label ?? '').trim() || '该角度'
   }
 
   /** T2：把确认后的槽位提示词合并写入资产 `image_prompts`（不覆盖其它已保存类别）。 */
@@ -1050,7 +1070,9 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       // 判定不可用的槽位**不许存进资产**（否则它会被出图当成可用提示词）
       const verdict = resolvePromptQuality({ prompt: text, assetName: asset?.name || formName || '' })
       if (verdict.status === 'unusable') {
-        blocked.push(`${category}：${verdict.reason}`)
+        /* 审计 §4.6 模式 2/3：原来这里把后端类别原值（`scene_image_front`）直接拼进提示。
+           主区用中文角度名；类别原值仍在上面的「技术详情」里可查。 */
+        blocked.push(`${angleDisplayName(category)}：${verdict.reason}`)
         return
       }
       edited[category] = text
@@ -1179,7 +1201,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       message.success('已设为定版')
       await loadData()
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '设为定版失败')
+      void showUserError(error, '设为定版失败', '设为定版')
     } finally {
       setSettingPrimaryImageId(null)
     }
@@ -1215,7 +1237,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       message.success('已上传并写入该角度')
       await loadData()
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '图片上传失败')
+      void showUserError(error, '图片上传失败', '上传图片')
     } finally {
       setUploadingImageId(null)
     }
@@ -1244,7 +1266,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       setReferenceBatchResult(data)
       setReferenceBatchOpen(true)
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '提交批量出图失败')
+      void showUserError(error, '提交批量出图失败', '批量出图')
     } finally {
       setReferenceBatchLoading(false)
     }
@@ -1258,7 +1280,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       // 场景/道具/服装的读模型没有 project_id，从资产库直接打开时也拿不到 URL 线索
       requireProjectScope(
         (picked) => runReferenceBatch(picked),
-        '批量出图需要项目作用域：请先选择项目',
+        '批量出图需要先知道这个资产属于哪个项目：请先选择项目',
       )
       return
     }
@@ -1306,6 +1328,39 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
   }, [projectIdModalOpen, loadProjectOptions, projectOptions.length])
 
   /**
+   * 当前项目的**名称**（审计 §4.6 模式 1：主区显示项目名，不显示项目 UUID）。
+   *
+   * 只有在「已经知道项目、但还不知道它叫什么」时才去读一次项目列表（只读 GET）；
+   * 用 ref 保证只尝试一次 —— 读不到就维持「名称待读取」，绝不因为读不到而反复请求，
+   * 也绝不退回显示编号。
+   */
+  const projectNameLookupRef = useRef(false)
+  useEffect(() => {
+    if (projectNameLookupRef.current) return
+    if (!resolvedProjectId.trim()) return
+    projectNameLookupRef.current = true
+    if (projectOptions.length === 0) void loadProjectOptions()
+  }, [resolvedProjectId, projectOptions.length, loadProjectOptions])
+
+  const resolvedProjectName = useMemo(() => {
+    const id = resolvedProjectId.trim()
+    if (!id) return ''
+    const hit = projectOptions.find((option) => option.value === id)
+    return String(hit?.label ?? '').trim()
+  }, [projectOptions, resolvedProjectId])
+
+  /** 任意项目编号 → 项目名（取不到时给中文占位，**绝不回落显示编号**）。 */
+  const projectDisplayName = useCallback(
+    (projectId?: string | null): string => {
+      const id = String(projectId ?? '').trim()
+      if (!id) return ''
+      const hit = projectOptions.find((option) => option.value === id)
+      return String(hit?.label ?? '').trim() || '已选定（名称待读取）'
+    },
+    [projectOptions],
+  )
+
+  /**
    * 记住「是哪个动作触发了选项目」。
    *
    * 只有在用户从某个具体生成动作（单张生成 / 批量出图）触发时才会被赋值；
@@ -1335,7 +1390,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       await action(next)
       return
     }
-    message.success('已设置项目作用域，出图按钮现在可用')
+    message.success('已选择项目，出图按钮现在可用')
   }
 
   /**
@@ -1414,7 +1469,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
       message.success('已采纳到资产并设为定版，刷新后仍在')
       await loadData()
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '采纳失败')
+      void showUserError(error, '采纳失败', '采纳结果')
     } finally {
       setAdoptingKey(null)
     }
@@ -1526,13 +1581,37 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             <Typography.Title level={5} style={{ margin: 0 }}>
               {assetDisplayName}资产编辑
             </Typography.Title>
-            {asset?.id ? <Tag>{asset.id}</Tag> : null}
           </Space>
           <Button icon={<ReloadOutlined />} onClick={() => void loadData()} loading={loading}>
             刷新
           </Button>
         </div>
       </Card>
+
+      {/* 第三层（默认收起）：内部编号与原始枚举值。
+          审计 §4.6 模式 1/3 —— 资产标题旁的 `{asset.id}`、角度卡上的 `ID {slot.image.id}`、
+          「资产类型：scene」「项目作用域：<UUID>」都属这一层。
+          信息一条都没删，只是不再摆在主区（主区给「已出图」「项目名」这类结论）。 */}
+      <TechnicalDetailSection
+        testId="asset-identity-technical-detail"
+        hint="这一页涉及的内部编号与原始取值，只用于核对与排查问题。"
+      >
+        <div className="space-y-0.5">
+          <div>资产编号：{asset?.id ?? assetId ?? '未提供'}</div>
+          <div>资产原名：{asset?.name ?? '未提供'}</div>
+          <div>资产类型（原始取值）：{assetNavigateRelationType ?? '未识别'}</div>
+          <div>所属项目编号：{resolvedProjectId || '未识别'}</div>
+          {slotItems.some((slot) => slot.image) ? (
+            <div>
+              已出图角度的图片编号：
+              {slotItems
+                .filter((slot) => slot.image)
+                .map((slot) => `${ANGLE_LABEL_MAP[slot.angle]}：${slot.image?.id ?? ''}`)
+                .join('；')}
+            </div>
+          ) : null}
+        </div>
+      </TechnicalDetailSection>
 
       <Collapse
         defaultActiveKey={['base', 'views']}
@@ -1548,7 +1627,13 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
               <div className="space-y-3">
                 <div>
                   <div className="text-gray-600 text-sm mb-1">名称</div>
-                  <Input value={formName} onChange={(e) => setFormName(e.target.value)} disabled={smartDetectBusy || savingBase} />
+                  {/* 审计 §4.6 模式 1（数据侧）：`SCENE_` / `CHAR_` 这类系统前缀在展示层剥离，
+                      输入框里编辑的仍是原值（保存不会因此改名 —— 数据变更不属文案治理）。 */}
+                  <Input
+                    value={stripAssetNamePrefix(formName)}
+                    onChange={(e) => setFormName(e.target.value)}
+                    disabled={smartDetectBusy || savingBase}
+                  />
                 </div>
                 <div>
                     <div className="flex items-center justify-between gap-2 mb-1">
@@ -1583,12 +1668,24 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                         </>
                       ) : null}
                     </div>
+                  {/* 审计 §4.6 模式 2：后端按剧本自动生成的描述含英文字段名（运行时实测
+                      `已根据该资产出现的 \`segments\`、\`shots\` …生成`）。展示层转述成中文；
+                      保存仍按输入框内容（未编辑时就是原值）。原文见下方「技术详情」。 */}
                   <Input.TextArea
                     rows={4}
-                    value={formDesc}
+                    value={describeAssetDescription(formDesc)}
                     onChange={(e) => setFormDesc(e.target.value)}
                     disabled={smartDetectBusy || savingBase}
                   />
+                  {asset?.description && describeAssetDescription(asset.description) !== asset.description ? (
+                    <TechnicalDetailSection
+                      className="mt-2"
+                      testId="asset-description-technical-detail"
+                      hint="这段描述同时带回了系统内部的原始写法，只用于核对。"
+                    >
+                      <div className="whitespace-pre-wrap">{asset.description}</div>
+                    </TechnicalDetailSection>
+                  ) : null}
                 </div>
                 <div>
                   <div className="text-gray-600 text-sm mb-1">标签（逗号分隔）</div>
@@ -1657,9 +1754,15 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                     </Tooltip>
                   </Space>
                   <div className="text-xs text-gray-500">
-                    <span>{assetNavigateRelationType ? `资产类型：${assetNavigateRelationType}` : '资产类型：未知'}</span>
+                    <span>
+                      {assetNavigateRelationType
+                        ? `资产类型：${labelFor(ASSET_TYPE, assetNavigateRelationType)}`
+                        : '资产类型：未知'}
+                    </span>
                     <span className="ml-3">
-                      {resolvedProjectId ? `项目作用域：${resolvedProjectId}` : '项目作用域：未识别'}
+                      {resolvedProjectId
+                        ? `所属项目：${resolvedProjectName || '已选定（名称待读取）'}`
+                        : '所属项目：未识别'}
                     </span>
                     {referenceBatchAllowed && !hasPrimaryImage ? (
                       <span className="ml-3 text-orange-500">未设置定版（会退回用正面视角的图片）</span>
@@ -1701,7 +1804,8 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                       <DisplayImageCard
                         title={`照片角度：${ANGLE_LABEL_MAP[slot.angle]}`}
                         imageUrl={slot.imageUrl}
-                        imageAlt={slot.angle}
+                        /* `alt` 也是用户能听到/看到的文案（无障碍通道），不写枚举原值 */
+                        imageAlt={ANGLE_LABEL_MAP[slot.angle]}
                         placeholder="暂无图片"
                         hoverable={false}
                         imageHeightClassName="h-44"
@@ -1709,7 +1813,13 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                           slot.image ? (
                             <Space size={4}>
                               {slot.image.is_primary ? <Tag color="gold">定版</Tag> : null}
-                              <Tag color="blue">ID {slot.image.id}</Tag>
+                              {/* 审计 §4.6 模式 1：原来这里直渲 `ID {slot.image.id}`。
+                                  主区给「已出图」这个结论，图片编号收进上面的「技术详情」。
+                                  另按审计 §4.6 模式 4 的建议，地址只在本机可用时如实说明。 */}
+                              <Tag color="blue">已出图</Tag>
+                              {isLocalAssetAddress(slot.imageUrl) ? (
+                                <Tag color="orange">长期地址未就绪</Tag>
+                              ) : null}
                             </Space>
                           ) : null
                         }
@@ -1719,7 +1829,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                               title={
                                 resolvedProjectId
                                   ? undefined
-                                  : '缺少项目作用域：请先从项目工作台第 2 步「资产准备」进入，或在页面顶部选择项目'
+                                  : '还不知道这个资产属于哪个项目：请从项目工作台第 2 步「资产准备」进入，或在页面顶部选择项目'
                               }
                             >
                               <span>
@@ -1808,12 +1918,20 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
           <Empty description="暂无可用历史图片" />
         ) : (
           <Row gutter={[16, 16]}>
-            {historyCandidates.map((candidate) => (
+            {historyCandidates.map((candidate, candidateIndex) => (
               <Col xs={24} sm={12} md={8} key={candidate.id}>
                 <DisplayImageCard
-                  title={candidate.view_angle ? `角度：${ANGLE_LABEL_MAP[candidate.view_angle] ?? candidate.view_angle}` : candidate.source === 'task-link' ? '任务产物' : `图片 ${candidate.id}`}
+                  /* 审计 §4.6 模式 1：原来兜底标题是 `图片 ${candidate.id}`（数字 ID 直渲）。
+                     现在按序号说「第 N 张」，数字 ID 只出现在画面外层（不是文案）。 */
+                  title={
+                    candidate.view_angle
+                      ? `角度：${ANGLE_LABEL_MAP[candidate.view_angle] ?? '其他角度'}`
+                      : candidate.source === 'task-link'
+                        ? '任务产物'
+                        : `历史生成图（第 ${candidateIndex + 1} 张）`
+                  }
                   imageUrl={buildFileDownloadUrl(candidate.file_id)}
-                  imageAlt={candidate.id}
+                  imageAlt="历史生成图片"
                   placeholder="无缩略图"
                   hoverable={false}
                   imageHeightClassName="h-44"
@@ -1867,11 +1985,14 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
               showIcon
               message={
                 <span className="text-xs">
-                  出图目标：项目作用域{' '}
+                  出图目标：项目{' '}
                   <Typography.Text code>
-                    {activeGenerateProjectIdRef.current || resolvedProjectId || '（未设置，提交前必须先选择项目）'}
+                    {projectDisplayName(activeGenerateProjectIdRef.current || resolvedProjectId) ||
+                      '（未设置，提交前必须先选择项目）'}
                   </Typography.Text>
-                  {assetNavigateRelationType ? ` · 资产 ${assetNavigateRelationType} ${assetId ?? ''}` : ''}
+                  {assetNavigateRelationType
+                    ? ` · ${labelFor(ASSET_TYPE, assetNavigateRelationType)}：${formName || asset?.name || '该资产'}`
+                    : ''}
                 </span>
               }
             />
@@ -2005,9 +2126,14 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                 showIcon
                 message="当前是演练模式：以下提示词由占位逻辑拼装，没有真实调用大模型"
                 description={
-                  imagePromptDryRunReason
-                    ? `拦截原因：${imagePromptDryRunReason}`
-                    : '演练关闭后这里显示的才是模型真实生成的内容，请勿把占位内容当作最终结果使用。'
+                  /* 审计 §4.6 模式 6：「拦截原因」是内部口径（守门逻辑的位置），
+                     用户只需要知道「这是演练，没有真实调用」；后端给的原因经脱敏后另置一行。 */
+                  <div className="space-y-1">
+                    <div>演练关闭后这里显示的才是模型真实生成的内容，请勿把占位内容当作最终结果使用。</div>
+                    {imagePromptDryRunReason ? (
+                      <div className="text-[11px] text-gray-500">{toUserFacingText(imagePromptDryRunReason, '服务端没有给出更多说明')}</div>
+                    ) : null}
+                  </div>
                 }
               />
             ) : null}
@@ -2018,8 +2144,9 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                 message={`提示（${imagePromptWarnings.length}）`}
                 description={
                   <ul className="pl-4 list-disc space-y-1">
+                    {/* 审计 §4.6 模式 6：后端 warnings 先掩内部标识再上屏 */}
                     {imagePromptWarnings.map((warning, idx) => (
-                      <li key={`${idx}_${warning}`}>{warning}</li>
+                      <li key={`${idx}_${warning}`}>{maskInternalIds(warning)}</li>
                     ))}
                   </ul>
                 }
@@ -2061,8 +2188,10 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
               imagePromptSlots.map((slot) => (
                 <div key={slot.category} className="rounded-md border border-gray-200 p-3 space-y-2">
                   <div className="flex flex-wrap items-center gap-2">
-                    <Tag color="blue">{slot.label || slot.category}</Tag>
-                    <span className="text-xs text-gray-500">{slot.category}</span>
+                    {/* 审计 §4.6 模式 2：原来这里既显示中文标签、又在旁边把后端类别原值
+                        （`scene_image_front` 这类）打了一遍。主区只留中文标签，
+                        原始取值与分层结构的字段名一起收进下面的「技术详情」。 */}
+                    <Tag color="blue">{slot.label || '未命名角度'}</Tag>
                     {slot.entity_name ? <Tag>主体：{slot.entity_name}</Tag> : null}
                     {savedPromptMap[slot.category] ? <Tag color="green">已保存</Tag> : null}
                   </div>
@@ -2087,25 +2216,36 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
                       setImagePromptDraftByCategory((prev) => ({ ...prev, [slot.category]: e.target.value }))
                     }
                   />
-                  {Object.keys(slot.layers ?? {}).length > 0 ? (
-                    <div className="rounded bg-gray-50 p-2 space-y-1">
-                      <div className="text-xs text-gray-500">分层结构</div>
-                      {Object.entries(slot.layers).map(([layerKey, layerValue]) => (
-                        <div key={layerKey} className="text-xs text-gray-600">
-                          <span className="text-gray-400">{layerKey}：</span>
-                          {layerValue}
-                        </div>
-                      ))}
+                  <TechnicalDetailSection
+                    testId="image-prompt-slot-technical-detail"
+                    className="bg-white"
+                    hint="这个角度的原始取值与提示词分层结构，只用于排查问题时对照。"
+                  >
+                    <div>
+                      <span className="text-slate-500">角度原始取值：</span>
+                      <span className="font-mono">{slot.category}</span>
                     </div>
-                  ) : null}
+                    {Object.keys(slot.layers ?? {}).length > 0 ? (
+                      <div className="space-y-1">
+                        <div className="text-slate-500">提示词分层（原始结构）</div>
+                        {Object.entries(slot.layers).map(([layerKey, layerValue]) => (
+                          <div key={layerKey} className="text-xs text-gray-600">
+                            <span className="text-slate-500">{layerKey}：</span>
+                            {layerValue}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </TechnicalDetailSection>
                   {slot.negative_prompt ? (
                     <div className="text-xs text-gray-500">负面提示词：{slot.negative_prompt}</div>
                   ) : null}
                   {slot.warnings && slot.warnings.length > 0 ? (
                     <div className="space-y-1">
+                      {/* 审计 §4.6 模式 6：后端逐条 warnings 先掩内部标识再上屏 */}
                       {slot.warnings.map((warning, idx) => (
                         <div key={`${slot.category}_${idx}`} className="text-xs text-red-500">
-                          {warning}
+                          {maskInternalIds(warning)}
                         </div>
                       ))}
                     </div>
@@ -2320,8 +2460,9 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
               message={`警告（${referenceBatchWarnings.length}）`}
               description={
                 <ul className="pl-4 list-disc space-y-1">
+                  {/* 审计 §4.6 模式 6：后端 warnings 先掩内部标识再上屏 */}
                   {referenceBatchWarnings.map((warning, idx) => (
-                    <li key={`${idx}_${warning}`}>{warning}</li>
+                    <li key={`${idx}_${warning}`}>{maskInternalIds(warning)}</li>
                   ))}
                 </ul>
               }
