@@ -53,8 +53,11 @@ const PANEL_PARAM = 'panel'
 const LEGACY_EXTRACT_PANEL = 'legacy_extract'
 
 /**
- * 旧 `?tab=` 深链 → 六步映射。其它页面（MainLayout / ChapterPrep / ChapterStudio /
+ * 旧 `?tab=` 深链 → 六步映射。其它页面（MainLayout / ChapterStudio /
  * ChapterShotsPage / ProjectLobby / RoleDetailPage）都在用这些链接，必须继续可用：
+ *
+ * （`ChapterPrep` 已删除：它不可达、且有 40+ 处 `（Mock）` 用户可见文案，
+ *   审计 §9 第 3 项建议直接删页；两个 prep 路由在 `App.tsx` 里已重定向到 `../shots`。）
  *   `?tab=chapters`（含 create/edit）            → 第 1 步 剧本
  *   `?tab=roles|scenes|props|costumes|actors`    → 第 2 步 提取资产（并选中对应子页签）
  */
