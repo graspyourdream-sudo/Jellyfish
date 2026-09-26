@@ -551,6 +551,39 @@ def test_generate_returns_blocked_envelope_when_guard_trips(
     assert error["outlet"] == "llm"
 
 
+def test_generate_with_broken_json_is_422_and_writes_no_draft(
+    routed_client: tuple[TestClient, async_sessionmaker[AsyncSession]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """模型返回不是 JSON → 422，且草稿列**保持为空**（不写半成品），并把失败原因如实记下。"""
+    from app.services.studio.llm_orchestration import drama_plan as orchestration
+    from app.services.studio.llm_orchestration.support import raise_parse_failure
+    from app.services.studio.llm_orchestration.json_utils import JSONParseError
+
+    client, factory = routed_client
+    assert client.put(f"{BASE}/brief", json=BRIEF_BODY).status_code == 200
+
+    async def broken(*_args: Any, **_kwargs: Any) -> Any:
+        # 真实路径里解析失败就是这么抛的（support.raise_parse_failure → 422 + 结构化明细）
+        raise_parse_failure(JSONParseError("模型返回的 JSON 顶层必须是对象。", raw_text="抱歉，我不能完成这个请求。"))
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    monkeypatch.setattr(orchestration, "preview_drama_plan", broken)
+
+    resp = client.post(f"{BASE}/generate")
+    assert resp.status_code == 422
+    detail = resp.json()["meta"]["error"]
+    assert detail["code"] == "llm_json_parse_failed"
+
+    row = asyncio.run(_fetch_one(factory, DramaPlanDraft, chapter_id=CHAPTER_ID))
+    assert row is not None
+    assert row.plan == {}, "解析失败绝不允许写半成品草稿"
+    assert row.status == "failed"
+    assert "JSON" in row.error
+    assert row.claim_token is None, "失败后租约必须释放，否则会卡住 5 分钟"
+    # 正式产物一行都没有
+    assert asyncio.run(_fetch_all(factory, Shot, chapter_id=CHAPTER_ID)) == []
+
+
 # ---------------------------------------------------------------------------
 # 6) 项目级入口：找 / 建可用空章节
 # ---------------------------------------------------------------------------
