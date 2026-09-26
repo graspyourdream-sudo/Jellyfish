@@ -75,6 +75,7 @@ import {
 } from '../components/mainScreenCopyGuard.ts'
 import {
   CUSTOM_INTEGRATION_TEXT,
+  PROVIDER_STATUS_MAP,
   INVALID_ADDRESS_TEXT,
   LOCAL_ONLY_ADDRESS_NOTE,
   SYSTEM_CREATED_TEXT,
@@ -899,6 +900,22 @@ test('阶段B⑦扫描范围守卫：`ModelManagement.tsx` / `SettingsTab.tsx` �
     [],
     `这两页出现了纯英文的用户可见文案（本批只登记了日志级别一条，其余都会回写后端原值说明口径变了）：\n${offenders.join('\n')}`,
   )
+})
+
+test('阶段B⑦词表守卫：模型页的「供应商状态」显示口径与全仓唯一映射表的差异**已登记**（不许悄悄漂移）', () => {
+  /**
+   * 本批**没有**统一这两份口径，原因与代价都写在这里（审计 §4.7 未点名、属「同一出口两种口径」的可收项）：
+   *   - 模型页 `constants.PROVIDER_STATUS_MAP`：活跃 / 测试中 / 禁用（页面自有的配置页说法）；
+   *   - 全仓唯一映射表 `enumLabels.PROVIDER_STATUS`：可用 / 测试中 / 已停用。
+   * 统一会改动模型页的可见文案（活跃→可用、禁用→已停用），超出 §4.7 的点名范围，
+   * 因此**只登记、不改**；这条断言钉住现状，将来谁改都必须同时改这里（不许静默漂移）。
+   */
+  assert.equal(PROVIDER_STATUS_MAP.active.text, '活跃')
+  assert.equal(PROVIDER_STATUS_MAP.testing.text, '测试中')
+  assert.equal(PROVIDER_STATUS_MAP.disabled.text, '禁用')
+  assert.equal(labelFor(PROVIDER_STATUS, 'active'), '可用', '唯一映射表的口径变了 —— 需重新评估是否统一')
+  assert.equal(labelFor(PROVIDER_STATUS, 'disabled'), '已停用')
+  assert.equal(PROVIDER_STATUS_MAP.testing.text, labelFor(PROVIDER_STATUS, 'testing'), '唯一同口径的一项也漂移了')
 })
 
 test('阶段B⑦词表守卫：词源与 `enumLabels` 同源，新增枚举 / 模型会自动纳入', () => {
