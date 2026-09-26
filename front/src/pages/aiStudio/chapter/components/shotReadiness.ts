@@ -109,6 +109,11 @@ export type ShotReadiness = {
    * （`frame_block_reasons`，去内部 ID 后保留措辞）。
    *
    * 与 `missing` 成对：同一件事，主区一句话，原文在这里。
+   *
+   * ⚠️ **本字段当前没有渲染点**（`missing` 也没有：主区「本镜还缺什么」渲染的是
+   * `useShotRequestPlan` 的 `requestPlan.gaps`）。将来谁渲染 `missing`，
+   * 请**一并**渲染本字段（放进默认收起的「技术详情」），否则后端原文就没有屏幕出口。
+   * 这是**结构性收口**（口径与数据就位），不构成实机证据。
    */
   technicalDetails: string[]
   /** 生成就绪（含参考帧要求） */

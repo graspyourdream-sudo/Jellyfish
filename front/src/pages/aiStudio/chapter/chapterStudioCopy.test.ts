@@ -272,6 +272,55 @@ export function technicalLayerLines(source: string): Set<number> {
   return exempt
 }
 
+/**
+ * 去掉 `ChapterStudio.tsx` 里由源码标记圈出的技术详情层区间。
+ *
+ * 用途：断言「原文/地址只在某个 `TechnicalDetailSection` 里」时，
+ * 页面上**既有**的那两块默认收起的技术层（`technical` / `kf_specs`）是合法出口，要排除掉。
+ * 必须在 `stripComments` **之前**用（标记写在注释行上）。
+ */
+function withoutTechnicalLayerRegion(source: string): string {
+  const keep: string[] = []
+  let depth = 0
+  source.split('\n').forEach((line) => {
+    if (line.includes(TECH_LAYER_START)) depth = 1
+    if (depth === 0) keep.push(line)
+    if (line.includes(TECH_LAYER_END)) depth = 0
+  })
+  return keep.join('\n')
+}
+
+/**
+ * 钉住「某个原文/地址的渲染表达式**只**出现在指定的技术详情折叠块里」。
+ *
+ * 为什么两个方向都要断言（审计 §7.1-8）：
+ * - 只断言「主区干净」会放过「直接把信息删掉」——用户再也查不到原文；
+ * - 只断言「折叠块里有」会放过「同时也在主区铺了一遍」。
+ * 所以：块内必须命中，块外必须 0 命中。
+ */
+function assertRenderedOnlyInsideTechnicalDetail(source: string, token: RegExp, testId: string): void {
+  const openTag = `<TechnicalDetailSection testId="${testId}"`
+  const start = source.indexOf(openTag)
+  assert.ok(start !== -1, `找不到技术详情折叠块 ${testId}（原文/地址的屏幕出口）`)
+  const end = source.indexOf('</TechnicalDetailSection>', start)
+  assert.ok(end > start, `${testId} 折叠块没有闭合`)
+  /* 「由同一个 token 把关的条件表达式」也算第三层的一部分：
+     `{原文非空 ? <TechnicalDetailSection …>…` 里的那个条件本身不会把内容渲出来。 */
+  const brace = source.lastIndexOf('{', start)
+  const guard = brace === -1 ? '' : source.slice(brace, start)
+  const guardIsToken = brace !== -1 && new RegExp(`^\\{\\s*${token.source}`).test(guard)
+  const boxStart = guardIsToken ? brace : start
+  const inside = source.slice(boxStart, end)
+  const outside = source.slice(0, boxStart) + source.slice(end)
+  assert.ok(token.test(inside), `${testId} 折叠块里没有渲染预期的原文/地址：${token}`)
+  const leaked = (outside.match(new RegExp(token.source, 'g')) ?? []).length
+  assert.equal(
+    leaked,
+    0,
+    `${token} 在 ${testId} 折叠块之外出现了 ${leaked} 次 —— 原文/地址会铺在主区`,
+  )
+}
+
 /* --------------------------------------------------------------- 护栏自检 */
 
 test('阶段B③护栏：扫描器本身有效，注入已知禁词必须被抓到（防「扫不到＝干净」的假绿）', () => {
@@ -811,6 +860,75 @@ test('任务A：音频准入的地址只进技术详情层，主区一个地址�
   assert.equal(blocked.title, AUDIO_NOT_REACHABLE_TITLE)
   assert.match(blocked.detail, /本机或只是相对路径/)
   assert.ok(!blocked.detail.includes('抓不到'), '主区结论不能是后端句子的改写结果')
+})
+
+test('任务B(a)：provider_notes 原文在屏幕上有出口 —— 只在默认收起的折叠块里（§7.1-6）', () => {
+  const raw = readScan('chapter/ChapterStudio.tsx')
+  const source = stripComments(withoutTechnicalLayerRegion(raw))
+  // 主区：不再把后端原话过管道当主区文案（走 showUserConclusion 给产品结论）
+  assert.ok(!/showUserWarning\(notes\[0\]/.test(source), 'provider_notes 仍在把后端原话当主区文案')
+  assert.ok(/showUserConclusion\(/.test(source), 'provider_notes 的主区必须是产品自己写的中文结论')
+  // 原文必须有**屏幕出口**（不是只写内存日志）：存储 + 渲染 + 掩码，三件都在
+  assert.ok(
+    /lastProviderNotes: result\.provider_notes \?\? \[\]/.test(source),
+    '生成结果必须把 provider_notes 存进卡片状态（否则折叠块没有数据可渲）',
+  )
+  assertRenderedOnlyInsideTechnicalDetail(
+    source,
+    /st\.lastProviderNotes\.map\([\s\S]{0,160}?maskInternalIds\(String\(note\)\)/,
+    'keyframe-provider-note-detail',
+  )
+})
+
+test('任务B(b)：⑥ 生成视频的 plan.warnings 原文只在默认收起的折叠块里（§7.1-6）', () => {
+  const raw = readScan('chapter/ChapterStudio.tsx')
+  const source = stripComments(withoutTechnicalLayerRegion(raw))
+  // 主区：产品自己写的中文结论（带条数），不再逐条渲染后端文本
+  assert.ok(/这次提交计划有 \$\{requestPlan\.plan\.warnings\.length\} 条需要注意的地方/.test(source), '主区缺少产品结论')
+  assert.ok(
+    !/requestPlan\.plan\.warnings\.slice\(0, 4\)/.test(source),
+    '主区还在逐条渲染后端 warnings',
+  )
+  assertRenderedOnlyInsideTechnicalDetail(
+    source,
+    /requestPlan\.plan\.warnings\.map\([\s\S]{0,160}?maskInternalIds\(warning\)/,
+    'video-plan-warning-detail',
+  )
+})
+
+test('任务B(c)：绑定区地址的屏幕出口就是那个折叠块（主区无地址 + 折叠层有地址）', () => {
+  const source = stripComments(readScan('shots/components/ShotAudioBindingSection.tsx'))
+  assertRenderedOnlyInsideTechnicalDetail(
+    source,
+    /admission\.technicalDetail/,
+    'audio-admission-technical-detail',
+  )
+  // 反向：纯函数级确认「有地址时折叠层真的有地址」（防「什么都没渲染」的假绿）
+  const view = describeAudioAdmission({
+    included: true,
+    state: 'asset_ref',
+    url: 'asset://project-1/voice-asset-1',
+  })
+  assert.match(view.technicalDetail, /asset:\/\/project-1\/voice-asset-1/)
+  MAIN_SCREEN_ADDRESS_PATTERNS.forEach((pattern) => {
+    assert.ok(
+      !pattern.test([view.tag, view.title, view.detail, view.fix, view.terminology].join('｜')),
+      `主区出现了地址 / 存储形态：${pattern}`,
+    )
+  })
+})
+
+test('任务B(d)：`ShotReadiness.missing` / `technicalDetails` 的「无渲染点」登记在源码里', () => {
+  // 这句登记写在 /** */ 注释里 → 必须用**原始源码**（`stripComments` 会丢掉块注释正文）
+  const source = readScan('chapter/components/shotReadiness.ts')
+  assert.ok(
+    /technicalDetails: string\[\]/.test(source),
+    '`technicalDetails`（后端原文的技术详情出口）必须保留在结果类型里',
+  )
+  assert.ok(
+    /本字段当前没有渲染点/.test(source),
+    '必须在字段旁写明「当前无渲染点；将来谁渲染 missing，请一并渲染 technicalDetails」',
+  )
 })
 
 test('任务A：音频地址在绑定区有渲染点，且只落在默认收起的「技术详情」折叠壳里（§4.3 模式 4）', () => {

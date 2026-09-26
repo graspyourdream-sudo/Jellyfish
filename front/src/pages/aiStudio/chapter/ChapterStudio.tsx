@@ -5875,6 +5875,19 @@ function Inspector(props: {
                           </Space>
                         </div>
                         <div className="text-xs text-gray-500 min-h-5">{statusText}</div>
+                        {st.lastProviderNotes?.length ? (
+                          /* 第 3 批收尾（审计 §7.1-6 成对文案）：`provider_notes` 是生成服务方的原话。
+                             主区只出产品结论（toast），原话在这里（默认收起的「技术详情」）逐条可查 ——
+                             这份折叠块是它在**屏幕上的唯一出口**（不依赖任何内存日志）。
+                             放在帧卡片上而不是预览弹窗里：生成成功时弹窗会被关掉，卡片是持久落点。 */
+                          <TechnicalDetailSection testId="keyframe-provider-note-detail" hint="生成服务对这次结果的原始说明">
+                            <ul className="list-disc pl-4 text-[11px]">
+                              {st.lastProviderNotes.map((note, index) => (
+                                <li key={`provider-note-${ft}-${index}`}>{maskInternalIds(String(note))}</li>
+                              ))}
+                            </ul>
+                          </TechnicalDetailSection>
+                        ) : null}
                         {st.thumbs.length === 0 ? (
                           <div className="mt-2 h-24 border border-dashed rounded flex items-center justify-center text-xs text-gray-400">暂无图片</div>
                         ) : (
@@ -6662,12 +6675,23 @@ function Inspector(props: {
                            一句**英文后端原文**（`Required frame image is missing: 首帧;please generate it 首帧`）。
                            主区改成产品自己写的中文结论；后端原文在同一页默认收起的
                            「技术详情 → 后端原始提示」里可查。 */
-                        <Alert
-                          type="info"
-                          showIcon
-                          message={`这次提交计划有 ${requestPlan.plan.warnings.length} 条需要注意的地方`}
-                          description="例如：参考图没有全部用上、时长或画幅按默认值提交、参考音频这次不会带上。生成前请核对上面的参考方式 / 画幅 / 参考图数量；生成服务的原始说明见「技术详情 → 后端原始提示」。"
-                        />
+                        <>
+                          <Alert
+                            type="info"
+                            showIcon
+                            message={`这次提交计划有 ${requestPlan.plan.warnings.length} 条需要注意的地方`}
+                            description="例如：参考图没有全部用上、时长或画幅按默认值提交、参考音频这次不会带上。生成前请核对上面的参考方式 / 画幅 / 参考图数量；生成服务的原始说明见下面默认收起的「技术详情」。"
+                          />
+                          {/* 第 3 批收尾（审计 §7.1-6）：原文就地给出口 —— 与工作区「技术详情 → 后端原始提示」
+                              是同一份数据，这里放在提醒旁边，用户不用跳步骤就能展开核对。 */}
+                          <TechnicalDetailSection testId="video-plan-warning-detail" hint="生成服务对这次提交计划的原始说明">
+                            <ul className="list-disc pl-4 text-[11px]">
+                              {requestPlan.plan.warnings.map((warning: string, index: number) => (
+                                <li key={`plan-raw-warning-${index}`}>{maskInternalIds(warning)}</li>
+                              ))}
+                            </ul>
+                          </TechnicalDetailSection>
+                        </>
                       ) : null}
                       {part('gen_ref_videos')}
                     </div>
