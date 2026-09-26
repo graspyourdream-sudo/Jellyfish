@@ -17,8 +17,9 @@
  * 模型原名上主区）。两者扫描面不同、互不覆盖，不许相互替代。
  *
  * ⚠️ 本区域没有行级豁免；第三层内容一律走全仓唯一的 `TechnicalDetailSection`
- * （审计 §8.1.1）。本页当前**没有**折叠块：错误原文进的是内存技术详情日志
- * （`rememberTechnicalDetail`），这一点在文件末尾「诚实清单」用例里如实登记。
+ * （审计 §8.1.1）。本页的第三层出口只有一个：**页级** `prompt-flow-error-technical-detail`
+ * ——18 处错误出口的原文（经 `maskInternalIds`）渲染在那里，默认收起；
+ * 主区只出中文结论。双向断言见「渲染点专项」用例。
  */
 
 import { test } from 'node:test'
@@ -116,6 +117,36 @@ function stripComments(source: string): string {
     out.push(matched ? line.slice(0, matched.index + matched[0].length - 2) : line)
   })
   return out.join('\n')
+}
+
+/** 取出某个 `testId` 的折叠块（含标签本身）；找不到直接失败，不许静默空跑。 */
+function foldBlock(testId: string): string {
+  const code = stripComments(readPage())
+  const start = code.indexOf(`testId="${testId}"`)
+  assert.ok(start >= 0, `${PAGE} 里找不到 testId="${testId}" 的技术详情折叠块 —— 用例必须跟着更新`)
+  const open = code.lastIndexOf('<TechnicalDetailSection', start)
+  const close = code.indexOf('</TechnicalDetailSection>', start)
+  assert.ok(open >= 0 && close > start, `${PAGE} 的 ${testId} 折叠块不闭合`)
+  return code.slice(open, close)
+}
+
+/**
+ * **双向断言**（审计 §9.1-16）：某个 token 必须**只在**技术详情折叠块内出现。
+ *
+ *   ① 折叠块内**必须**命中（原文确实被承载了）；② 块外**必须 0 命中**（主区确实干净了）。
+ * 只断言「主区干净」会放过「直接删掉信息」这种假修。
+ */
+function assertRenderedOnlyInsideTechnicalDetail(token: string, testId: string): void {
+  const code = stripComments(readPage())
+  const block = foldBlock(testId)
+  assert.ok(block.includes(token), `${PAGE}：技术详情块 ${testId} 里没有「${token}」（信息被删掉而不是收起来？）`)
+  const outside = code.split(block).join('')
+  const hits = outside.split('\n').filter((line) => line.includes(token))
+  assert.deepEqual(
+    hits.map((line) => line.trim()),
+    [],
+    `${PAGE}：主区仍然出现「${token}」（第三层内容只允许在默认收起的「技术详情」里）`,
+  )
 }
 
 /* --------------------------------------------------------------- 护栏自检 */
@@ -312,6 +343,75 @@ test('区域6 渲染点专项：模型原始名不进主区，改说「模型方
   assert.ok(!/brand-new-model-x/.test(textModelBusinessName('brand-new-model-x')), '未登记模型名不许回显原值')
 })
 
+test('区域6 渲染点专项：错误原文有**屏幕**出口（页级默认收起折叠块，双向断言）', () => {
+  const code = stripComments(readPage())
+  // ① 双向：原文（经掩码）只在折叠块里出现
+  assertRenderedOnlyInsideTechnicalDetail('maskInternalIds(lastErrorOriginal)', 'prompt-flow-error-technical-detail')
+  // ② 折叠块必须由共享壳渲染（全仓唯一实现），且不带 `open`
+  assert.ok(
+    code.includes(`from '../project/ProjectWorkbench/components/workbench/TechnicalDetailCollapse'`),
+    '必须 import 全仓唯一的折叠壳 `TechnicalDetailSection`（审计 §8.1.1）',
+  )
+  const block = foldBlock('prompt-flow-error-technical-detail')
+  assert.equal(/\bopen\b/.test(block.slice(0, block.indexOf('>'))), false, '错误原文折叠块带了 `open` —— 那就不叫默认收起了')
+  // ③ 屏幕出口必须真的接上：18 处调用点走 `reportError`，三个子面板都有上报回调
+  assert.ok(/const reportError = useCallback\(/.test(code), '页面必须有统一的错误出口 `reportError`')
+  /* 调用点必须全部走 `reportError`：`describeError(error)` 只允许出现在 `reportError`
+     自己的实现里（那里刚上报完原文、返回中文结论）。 */
+  const callSites = (code.match(/reportError\(error\)/g) ?? []).length
+  assert.equal(callSites, 18, `18 处错误出口必须全部走 reportError（实际 ${callSites} 处）`)
+  const stray = code
+    .split('\n')
+    .filter((line) => /describeError\(error\)/.test(line) && !/return describeError\(error\)/.test(line))
+  assert.deepEqual(
+    stray.map((line) => line.trim()),
+    [],
+    `还有调用点直接走 \`describeError(error)\` —— 原文不会被上报到屏幕折叠块（只进内存日志）：\n${stray.join('\n')}`,
+  )
+  const wired = (code.match(/onErrorOriginal=\{setLastErrorOriginal\}/g) ?? []).length
+  assert.equal(wired, 3, `三个子面板都要接上原文上报回调（实际接线 ${wired} 个）`)
+  const reporters = (code.match(/onErrorOriginal\?\.\(describeErrorRaw\(error\)\)/g) ?? []).length
+  assert.equal(reporters, 3, `三个子面板都要在出口上报原文（实际 ${reporters} 个）`)
+  // ④ 主区一个字都不许多：原文相关标识只允许出现在「上报 / 条件 / 定义」这几类位置
+  const outside = code.split(block).join('')
+  const suspicious = outside
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /lastErrorOriginal|describeErrorRaw/.test(line))
+    .filter(
+      (line) =>
+        !/^(?:return describeError\(error\)|const raw = describeErrorRaw\(error\)|const describeErrorRaw = |const \[lastErrorOriginal, setLastErrorOriginal\]|\{lastErrorOriginal \? \()/.test(
+          line,
+        ) &&
+        !/reportError|onErrorOriginal|setLastErrorOriginal/.test(line),
+    )
+  assert.deepEqual(
+    suspicious,
+    [],
+    `原文相关标识出现在折叠块之外的非上报位置，可能把原文漏回主区：\n${suspicious.join('\n')}`,
+  )
+  // 原文**只能**经掩码后渲染一次，且那一次就在折叠块里
+  const rawRenders = code.split('\n').filter((line) => /\{maskInternalIds\(/.test(line))
+  assert.equal(rawRenders.length, 1, '原文只允许在页级折叠块里渲染一次（掩码后）')
+})
+
+test('区域6 渲染点专项：折叠块**默认收起**，且收起态可见的标签是干净的中文', () => {
+  const shell = readFileSync(resolve(AISTUDIO_ROOT, TECHNICAL_DETAIL_WAIVER), 'utf8')
+  const detailsMatch = /<details[^>]*>/.exec(shell)
+  assert.ok(detailsMatch, '共享折叠壳必须用原生 `<details>` 实现（收起态由浏览器保证）')
+  assert.equal(/\bopen\b/.test(detailsMatch[0]), false, '共享壳的 `<details>` 带了 `open`')
+  const block = foldBlock('prompt-flow-error-technical-detail')
+  assert.equal(/\bopen\b/.test(block.slice(0, block.indexOf('>'))), false, '调用点给折叠区加了 `open`')
+  // 收起态可见的只有 summary 文案（共享壳固定）+ `hint` 藏在 <details> 内
+  const hint = /hint="([^"]*)"/.exec(block)
+  assert.ok(hint, '错误原文折叠块必须写一句收起态说明（共享壳的 hint）')
+  assert.deepEqual(
+    findMainScreenLeaks(`const __probe__ = () => <div hint=${JSON.stringify(hint[1])} />`),
+    [],
+    `折叠块的 hint 在收起态也可见，必须干净：${hint[1]}`,
+  )
+})
+
 /* -------------------------------------------------------- ③ 扫描范围守卫 */
 
 test('区域6 /prompt-flow 扫描范围守卫：登记表里的文件真实存在，且都被目录遍历覆盖到', () => {
@@ -368,21 +468,28 @@ test('区域6 /prompt-flow 手工核对登记：本页**已知未处理 / 已判
   )
 })
 
-test('区域6 /prompt-flow 诚实清单：错误原文的出口是**内存技术详情日志**，不是屏幕折叠块', () => {
+test('区域6 /prompt-flow 诚实清单：原文出口是**屏幕折叠块**，内存日志不再被当作出口', () => {
   /**
-   * 本页有 20 处 `message.error(…)`，全部走 `describeError` 这一个咽喉：
-   * 主区只出一句中文，完整原文经 `maskInternalIds` 后写进 `rememberTechnicalDetail`。
+   * 本页 18 处 `message.error/warning(…)` 全部走 `reportError` 这一个咽喉：
+   * - **主区**：一句中文（`describeError` → 只取原文第一行 + `toUserFacingText` 脱敏）；
+   * - **第三层**：原文经 `maskInternalIds` 渲染进页级 `prompt-flow-error-technical-detail`
+   *   （默认收起，展开才看得到）—— 这一条由上面的双向断言钉住。
    *
-   * ⚠️ 如实声明（审计 §9.1-8）：`readTechnicalDetails()` 是**内存日志**，
-   * 本页**没有**把它渲染成一个默认收起的折叠块（上屏需要新增订阅 / 状态，
-   * 属结构改动、收益低于成本）。所以这一条的保证是「主区干净 + 原文可查（内存）」，
-   * **不是**「原文在屏幕上的折叠层里能查到」—— 不许把它写成后者。
+   * ⚠️ 如实声明两点（都是事实，不许写成更强的结论）：
+   *   ① `rememberTechnicalDetail` 的**内存日志仍然存在**（只是不再有人读它），
+   *      页面的屏幕出口**不是**从那份日志渲染的，而是从这里自己的 `lastErrorOriginal` state；
+   *   ② 折叠块只保留**最近一次**失败的原文（与 §9.1-8 的口径一致：就地承载、不新建全局 UI）。
    */
   const code = stripComments(readPage())
-  assert.ok(/rememberTechnicalDetail/.test(code), '原文出口必须存在（内存技术详情日志）')
+  assert.ok(/rememberTechnicalDetail/.test(code), '统一管道仍会把原文记进内存日志（保留，未删）')
   assert.equal(
     /readTechnicalDetails/.test(code),
     false,
-    '本页一旦真的渲染内存日志，必须改用共享折叠壳 TechnicalDetailSection 并同步这条诚实清单',
+    '页面一旦改为渲染内存日志，必须改写这条诚实清单（现在的出口是自己的 state）',
   )
+  assert.ok(
+    /const \[lastErrorOriginal, setLastErrorOriginal\] = useState\(''\)/.test(code),
+    '页级 state `lastErrorOriginal` 是屏幕出口的数据源',
+  )
+  assert.ok(/lastErrorOriginal \? \(/.test(code), '没有失败过时不渲染折叠块（不挂空壳）')
 })

@@ -46,6 +46,8 @@ import {
   StudioShotsService,
 } from '../../../services/generated'
 import { nextChapterIndex } from '../chapter/chapterIndexing'
+/* 「技术详情」折叠壳**全仓只有一份**（审计 §9 第 2 项）：错误原文的屏幕出口走它。 */
+import { TechnicalDetailSection } from '../project/ProjectWorkbench/components/workbench/TechnicalDetailCollapse'
 import {
   deleteShotDrafts,
   fetchPromptBoardDrafts,
@@ -185,6 +187,27 @@ const PromptFlowPage: React.FC = () => {
     const raw = searchParams.get('tab') ?? ''
     return (TAB_KEYS as string[]).includes(raw) ? (raw as TabKey) : 'import'
   })
+  /**
+   * **最近一次失败的原始信息**（审计 §9.1-8 的屏幕出口）。
+   *
+   * 为什么要有它：本页有 18 处错误出口，全部走 `describeError` 这一个咽喉；
+   * 主区只出一句中文（这是对的），但原文过去**只写进 `rememberTechnicalDetail` 的内存日志**
+   * —— 全仓没有任何组件渲染那份日志，等于「屏幕上无处可查」。
+   * 现在把原文经 `maskInternalIds` 渲染进页级默认收起的「技术详情」，
+   * **主区一个字都不多**（折叠区的标题在收起态可见，那是共享壳固定的干净的标签）。
+   *
+   * ⚠️ 这里**不是**订阅机制：只是把每次失败时 `describeError` 已经算出来的原文往 state 里放一份，
+   * 三个子面板通过一个回调 prop 上报（`onErrorOriginal`）。
+   */
+  const [lastErrorOriginal, setLastErrorOriginal] = useState('')
+  /** 本页错误出口：主区一句中文（`describeError` 产出）+ 原文上报给页面级「技术详情」。 */
+  const reportError = useCallback(
+    (error: unknown): string => {
+      setLastErrorOriginal(describeErrorRaw(error))
+      return describeError(error)
+    },
+    [],
+  )
 
   const syncQuery = useCallback(
     (nextProject?: string, nextTab?: TabKey) => {
@@ -228,11 +251,11 @@ const PromptFlowPage: React.FC = () => {
       })
       setProjects(items.map((p) => ({ label: p.name, value: p.id })))
     } catch (error) {
-      message.error(`加载项目失败：${describeError(error)}`)
+      message.error(`加载项目失败：${reportError(error)}`)
     } finally {
       setLoadingProjects(false)
     }
-  }, [])
+  }, [reportError])
 
   useEffect(() => {
     void loadProjects()
@@ -290,10 +313,22 @@ const PromptFlowPage: React.FC = () => {
           ]}
           style={{ marginBottom: 16 }}
         />
-        {tab === 'import' && <JuriluImportPanel projectId={projectId} />}
-        {tab === 'export' && <PromptDeliveryPanel projectId={projectId} />}
-        {tab === 'skill' && <QuickSkillPanel projectId={projectId} />}
+        {tab === 'import' && <JuriluImportPanel projectId={projectId} onErrorOriginal={setLastErrorOriginal} />}
+        {tab === 'export' && <PromptDeliveryPanel projectId={projectId} onErrorOriginal={setLastErrorOriginal} />}
+        {tab === 'skill' && <QuickSkillPanel projectId={projectId} onErrorOriginal={setLastErrorOriginal} />}
       </Card>
+
+      {/* 第三层（默认收起）：最近一次失败的原始信息。
+          主区只给中文结论（见各面板的 `message.*`），原文在这里可查 —— 展开才看得到。
+          没有失败过时不渲染，避免页面上挂一个空壳。 */}
+      {lastErrorOriginal ? (
+        <TechnicalDetailSection
+          testId="prompt-flow-error-technical-detail"
+          hint="最近一次失败的原始信息（含服务端返回的诊断明细），只在排查问题时需要看。"
+        >
+          <div className="whitespace-pre-wrap break-all">{maskInternalIds(lastErrorOriginal)}</div>
+        </TechnicalDetailSection>
+      ) : null}
     </div>
   )
 }
@@ -302,7 +337,18 @@ const PromptFlowPage: React.FC = () => {
 /* 标签页一：巨日禄导入                                                  */
 /* ------------------------------------------------------------------ */
 
-const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
+const JuriluImportPanel: React.FC<{ projectId?: string; onErrorOriginal?: (raw: string) => void }> = ({
+  projectId,
+  onErrorOriginal,
+}) => {
+  /** 本面板错误出口：主区一句中文 + 原文上报给页面级「技术详情」（审计 §9.1-8）。 */
+  const reportError = useCallback(
+    (error: unknown): string => {
+      onErrorOriginal?.(describeErrorRaw(error))
+      return describeError(error)
+    },
+    [onErrorOriginal],
+  )
   const [chapters, setChapters] = useState<ChapterOption[]>([])
   const [chapterId, setChapterId] = useState<string>()
   const [url, setUrl] = useState('')
@@ -398,11 +444,11 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
       setCreateChapterText('')
       await reloadChapters(newId || undefined)
     } catch (error) {
-      message.error(`新建章节失败：${describeError(error)}`)
+      message.error(`新建章节失败：${reportError(error)}`)
     } finally {
       setCreatingChapter(false)
     }
-  }, [chapterRows, createChapterText, createChapterTitle, projectId, reloadChapters])
+  }, [chapterRows, createChapterText, createChapterTitle, projectId, reloadChapters, reportError])
 
   useEffect(() => {
     setChapterId(undefined)
@@ -428,10 +474,10 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
           items.map((c, i) => ({ label: c.title || untitledChapterLabel(c.index ?? i + 1), value: c.id })),
         )
       } catch (error) {
-        message.error(`加载章节失败：${describeError(error)}`)
+        message.error(`加载章节失败：${reportError(error)}`)
       }
     })()
-  }, [projectId])
+  }, [projectId, reportError])
 
   const canSubmit = Boolean(projectId && chapterId && url.trim())
 
@@ -484,7 +530,7 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
       message.success('预览完成，尚未写入数据库')
     } catch (error) {
       setPreview(undefined)
-      message.error(describeError(error), 8)
+      message.error(reportError(error), 8)
     } finally {
       setLoadingPreview(false)
     }
@@ -505,7 +551,7 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
       message.success(`写入完成：更新 ${data?.updated ?? 0} 条，新建镜头 ${data?.created ?? 0} 个`)
       await handlePreview()
     } catch (error) {
-      message.error(describeError(error), 8)
+      message.error(reportError(error), 8)
     } finally {
       setLoadingApply(false)
     }
@@ -892,7 +938,18 @@ function renderBoundAssets(bound?: Record<string, string[]>): React.ReactNode {
   return <Text>{parts.join('；')}</Text>
 }
 
-const PromptDeliveryPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
+const PromptDeliveryPanel: React.FC<{ projectId?: string; onErrorOriginal?: (raw: string) => void }> = ({
+  projectId,
+  onErrorOriginal,
+}) => {
+  /** 本面板错误出口：主区一句中文 + 原文上报给页面级「技术详情」（审计 §9.1-8）。 */
+  const reportError = useCallback(
+    (error: unknown): string => {
+      onErrorOriginal?.(describeErrorRaw(error))
+      return describeError(error)
+    },
+    [onErrorOriginal],
+  )
   const [scope, setScope] = useState<'episodes' | 'episode' | 'current_shot'>('episodes')
   const [chapters, setChapters] = useState<ChapterOption[]>([])
   const [chapterId, setChapterId] = useState<string>()
@@ -929,10 +986,10 @@ const PromptDeliveryPanel: React.FC<{ projectId?: string }> = ({ projectId }) =>
           items.map((c, i) => ({ label: c.title || untitledChapterLabel(c.index ?? i + 1), value: c.id })),
         )
       } catch (error) {
-        message.error(`加载章节失败：${describeError(error)}`)
+        message.error(`加载章节失败：${reportError(error)}`)
       }
     })()
-  }, [projectId])
+  }, [projectId, reportError])
 
   useEffect(() => {
     setShotId(undefined)
@@ -960,10 +1017,10 @@ const PromptDeliveryPanel: React.FC<{ projectId?: string }> = ({ projectId }) =>
           }))
         )
       } catch (error) {
-        message.error(`加载镜头失败：${describeError(error)}`)
+        message.error(`加载镜头失败：${reportError(error)}`)
       }
     })()
-  }, [chapterId, scope])
+  }, [chapterId, scope, reportError])
 
   const query = useMemo(() => {
     const params: { projectId: string; scope: string; chapterId?: string; shotId?: string } = {
@@ -995,7 +1052,7 @@ const PromptDeliveryPanel: React.FC<{ projectId?: string }> = ({ projectId }) =>
       setData(res.data ?? undefined)
     } catch (error) {
       setData(undefined)
-      message.error(describeError(error), 8)
+      message.error(reportError(error), 8)
     } finally {
       setLoading(false)
     }
@@ -1050,7 +1107,7 @@ const PromptDeliveryPanel: React.FC<{ projectId?: string }> = ({ projectId }) =>
       URL.revokeObjectURL(objectUrl)
       message.success(`已下载 ${filename}`)
     } catch (error) {
-      message.error(describeError(error), 8)
+      message.error(reportError(error), 8)
     } finally {
       setDownloading(false)
     }
@@ -1254,7 +1311,18 @@ const PromptDeliveryPanel: React.FC<{ projectId?: string }> = ({ projectId }) =>
 /* 标签页三：一键技能（导演 Skill 生成 + 导出 + 写回镜头）                 */
 /* ------------------------------------------------------------------ */
 
-const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
+const QuickSkillPanel: React.FC<{ projectId?: string; onErrorOriginal?: (raw: string) => void }> = ({
+  projectId,
+  onErrorOriginal,
+}) => {
+  /** 本面板错误出口：主区一句中文 + 原文上报给页面级「技术详情」（审计 §9.1-8）。 */
+  const reportError = useCallback(
+    (error: unknown): string => {
+      onErrorOriginal?.(describeErrorRaw(error))
+      return describeError(error)
+    },
+    [onErrorOriginal],
+  )
   const [skills, setSkills] = useState<QuickSkillItem[]>([])
   const [skillId, setSkillId] = useState<string>()
   const [chapters, setChapters] = useState<ChapterOption[]>([])
@@ -1295,10 +1363,10 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
       } catch (error) {
         /* 审计 §9.1-1 / §9.1-19：枚举原名 `skill` 不进主区，且同一份数据全仓只允许一个名字
            （本页已经在用「导演技能」）—— 原来这里写的是「导演 Skill」，两种说法打架。 */
-        message.error(`加载导演技能失败：${describeError(error)}`)
+        message.error(`加载导演技能失败：${reportError(error)}`)
       }
     })()
-  }, [])
+  }, [reportError])
 
   useEffect(() => {
     setChapterId(undefined)
@@ -1325,10 +1393,10 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
           items.map((c, i) => ({ label: c.title || untitledChapterLabel(c.index ?? i + 1), value: c.id })),
         )
       } catch (error) {
-        message.error(`加载章节失败：${describeError(error)}`)
+        message.error(`加载章节失败：${reportError(error)}`)
       }
     })()
-  }, [projectId])
+  }, [projectId, reportError])
 
   useEffect(() => {
     setShotId(undefined)
@@ -1357,10 +1425,10 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
           }))
         )
       } catch (error) {
-        message.error(`加载镜头失败：${describeError(error)}`)
+        message.error(`加载镜头失败：${reportError(error)}`)
       }
     })()
-  }, [chapterId])
+  }, [chapterId, reportError])
 
   /** 输入框正文镜像：自动恢复时用它判断"用户是不是已经在编辑了"。 */
   useEffect(() => {
@@ -1448,7 +1516,7 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
       await persistDraft(promptDraft)
       message.success('已暂存到服务端草稿（刷新/中断都不丢；正式列仍未被修改）')
     } catch (error) {
-      message.error(`暂存失败：${describeError(error)}`, 8)
+      message.error(`暂存失败：${reportError(error)}`, 8)
     } finally {
       setDraftBusy(false)
     }
@@ -1471,7 +1539,7 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
       setContextText(res.data?.text ?? '')
       message.success('上下文已装配（未调用模型）')
     } catch (error) {
-      message.error(describeError(error), 8)
+      message.error(reportError(error), 8)
     } finally {
       setLoadingContext(false)
     }
@@ -1515,10 +1583,10 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         setWrittenToShot(false)
         message.success('生成完成 · 草稿已暂存服务端（未写正式列）')
       } catch (error) {
-        message.warning(`生成完成，但草稿暂存服务端失败（刷新会丢）：${describeError(error)}`, 10)
+        message.warning(`生成完成，但草稿暂存服务端失败（刷新会丢）：${reportError(error)}`, 10)
       }
     } catch (error) {
-      message.error(describeError(error), 10)
+      message.error(reportError(error), 10)
     } finally {
       setGenerating(false)
     }
@@ -1594,7 +1662,7 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
       URL.revokeObjectURL(objectUrl)
       message.success(`已下载 ${filename}`)
     } catch (error) {
-      message.error(describeError(error), 8)
+      message.error(reportError(error), 8)
     } finally {
       setDownloading(false)
     }
@@ -1635,7 +1703,7 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         message.warning(data?.message || '未写入', 8)
       }
     } catch (error) {
-      message.error(describeError(error), 8)
+      message.error(reportError(error), 8)
     } finally {
       setSaving(false)
     }
