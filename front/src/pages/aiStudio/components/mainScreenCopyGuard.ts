@@ -239,6 +239,12 @@ export function extractScanSurfaces(source: string, options: ExtractOptions = {}
     /* 排除「跨过了代码」的假 JSX 文本：真正的 JSX 文本节点里不会有 `; = [ ] { }`，
        而代码（`const [x, setX] = useState(...)`）一定有 —— 这是区分二者的可靠特征。 */
     if (/[;=[\]{}]/.test(text)) continue
+    /* 再排除一类：`>…<` 之间夹着**对象字面量属性写法**的代码片段。
+       实例（`ChapterStudio.tsx` 批量菜单）：提取出来的是
+       `, label: , disabled: selectedShotIds.length` —— 里面其实一个字的用户文案都没有，
+       但 `disabled` 会被枚举词表命中（`providerStatus` 的原值之一），变成假泄漏。
+       判定：**不含中文** 且形如 `标识符:` / `标识符,`（JSX 文本里不会长这样）。 */
+    if (!CJK_RE.test(text) && /[A-Za-z_$][\w$.]*\s*[,:]/.test(text)) continue
     if (text.length > 400) continue
     const line = blanked.slice(0, match.index).split('\n').length
     surfaces.push({ kind: 'jsx-text', text, line })
