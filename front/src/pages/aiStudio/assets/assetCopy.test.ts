@@ -60,6 +60,12 @@ import {
   scannerSelfCheck,
 } from '../components/mainScreenCopyGuard.ts'
 import {
+  ASSET_AUTO_DESCRIPTION_TEXT,
+  describeAssetDescription,
+  hasInternalFieldToken,
+  stripAssetNamePrefix,
+} from './assetDescriptionCopy.ts'
+import {
   ASSET_RESULT_ADDRESS_DRY_RUN_TEXT,
   ASSET_RESULT_ADDRESS_MISSING_TEXT,
   ASSET_RESULT_ADDRESS_SAVED_TEXT,
@@ -950,6 +956,71 @@ test('阶段B插批豁免守卫：`assets/**` 里不许出现第二套「技术�
 })
 
 /* ------------------------------------------- ⑤ 手工核对登记（扫描器看不见的） */
+
+test('第6批：后端自动生成描述的中文转述 + 资产名系统前缀剥离（纯函数口径）', () => {
+  /* 审计 §4.6 模式 2 的**运行时原文**（真库数据 `SCENE_暗巷地下诊所内外` 的 description）：
+     后端把内部字段名清单直接写进了描述，页面原样上屏。 */
+  const raw =
+    '资产：暗巷地下诊所内外\n资产描述：该场景是暗巷地下诊所的内外环境。, 已根据该资产出现的 segments、shots、台词、visual_focus、continuity_note 和 story_function 生成'
+  const cleaned = describeAssetDescription(raw)
+  assert.ok(
+    cleaned.includes(ASSET_AUTO_DESCRIPTION_TEXT),
+    `后端自动生成句必须换成中文口径：${cleaned}`,
+  )
+  assert.equal(
+    /[a-z]{3,}(?:_[a-z0-9]+)+/.test(cleaned),
+    false,
+    `转述后不许残留 snake_case 形态的字段名：${cleaned}`,
+  )
+  assert.equal(/segments|shots\b/.test(cleaned), false, `转述后不许残留英文字段名清单：${cleaned}`)
+  assert.ok(cleaned.includes('资产：暗巷地下诊所内外'), '同一段描述里的正常内容必须原样保留（不许整段删掉）')
+  // 幂等：已经转述过的文本再跑一次不变（所以它能直接套在会被反复渲染的字段上）
+  assert.equal(describeAssetDescription(cleaned), cleaned, '转述函数必须幂等')
+  // 反向：普通中文描述一个字都不许动
+  assert.equal(describeAssetDescription('走廊尽头有一盏红色的警示灯。'), '走廊尽头有一盏红色的警示灯。')
+  assert.equal(hasInternalFieldToken('走廊尽头有一盏红色的警示灯。'), false)
+
+  /* 名称前缀（审计 §4.6 模式 1 数据侧形态）：真库 id/name 是 `SCENE_星耀疗养院…` */
+  assert.equal(stripAssetNamePrefix('SCENE_星耀疗养院S级特护病房门外'), '星耀疗养院S级特护病房门外')
+  assert.equal(stripAssetNamePrefix('PROP_医用剪刀'), '医用剪刀')
+  assert.equal(stripAssetNamePrefix('CHAR_战凛'), '战凛')
+  assert.equal(stripAssetNamePrefix('星耀疗养院'), '星耀疗养院', '没有前缀的名字必须原样返回')
+  assert.equal(stripAssetNamePrefix('SCENE_'), 'SCENE_', '剥完为空时必须回退原名（不许把名字清空）')
+})
+
+test('第6批渲染点专项：名称 / 描述在**展示层**转述，原文进「技术详情」（双向）', () => {
+  const code = stripComments(readScan(ASSET_EDIT_BASE))
+  // 主区（可编辑字段）走展示层函数：名称剥前缀、描述转述
+  assert.ok(
+    /value=\{stripAssetNamePrefix\(formName\)\}/.test(code),
+    '名称输入框必须显示剥离前缀后的名字（审计 §4.6 模式 1 数据侧）',
+  )
+  assert.ok(
+    /value=\{describeAssetDescription\(formDesc\)\}/.test(code),
+    '描述输入框必须显示转述后的中文（审计 §4.6 模式 2）',
+  )
+  assert.ok(
+    /onChange=\{\(e\) => setFormName\(e\.target\.value\)\}/.test(code),
+    '名称的 onChange 必须仍然写原始值（在可编辑字段上直接改写等于替用户改名 → 数据变更）',
+  )
+  // 折叠区：原文必须真的在默认收起层里（不是删信息）
+  const folds = findFoldContents(code)
+  const descFold = folds.find((fold) => fold.includes('testId="asset-description-technical-detail"'))
+  assert.ok(descFold, '必须有一个承载「描述原文」的技术详情折叠块')
+  assert.ok(
+    descFold.includes('{asset.description}'),
+    '描述折叠块里必须渲染**后端原始描述**（否则就是「把信息删掉」而不是「收起来」）',
+  )
+  assert.ok(
+    folds.some((fold) => fold.includes('资产原名：{asset?.name')),
+    '页级技术详情必须保留资产原名（审计 §4.6 模式 1：「原名进技术详情」）',
+  )
+  assert.equal(
+    /className="font-mono">\{asset\.description\}/.test(code),
+    false,
+    '后端原始描述不许出现在折叠区之外',
+  )
+})
 
 test('第6批手工核对登记：`assets/**` 的**已知未处理**动态插值渲染点（不许悄悄增加 / 减少）', () => {
   /**
