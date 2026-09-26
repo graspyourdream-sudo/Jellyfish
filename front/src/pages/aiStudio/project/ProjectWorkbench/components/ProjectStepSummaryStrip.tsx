@@ -8,6 +8,7 @@ import {
   getPrevProjectStepKey,
   type ProjectStepKey,
   type ProjectStepResolution,
+  buildContinueLabel,
 } from '../projectSteps'
 
 type ProjectStepSummaryStripProps = {
@@ -148,7 +149,7 @@ export function ProjectStepSummaryStrip({
               disabled={Boolean(continueDisabledReason)}
               onClick={onContinue}
             >
-              {continueLabel ?? (isLastStep && onResolvedStep ? '生成与交付' : `继续：${resolution.nextActionLabel}`)}
+              {continueLabel ?? (isLastStep && onResolvedStep ? '生成与交付' : buildContinueLabel(resolution.nextActionLabel))}
             </Button>
           </Tooltip>
         </Space>

@@ -33,6 +33,7 @@ import {
   isStudioProjectStep,
   resolveProjectStep,
   type ProjectStepKey,
+  buildContinueLabel,
 } from './projectSteps'
 import { useProjectStepSignals } from './hooks/useProjectStepSignals'
 import { getDisplayStep, getDisplayStepIndex } from './projectSteps'
@@ -291,7 +292,7 @@ const ProjectWorkbench: React.FC = () => {
     ? '正在判断项目进度'
     : continueAtCurrentStep
       ? `已在本步：${resolvedStepMeta.label}`
-      : `继续：${resolution.nextActionLabel}`
+      : buildContinueLabel(resolution.nextActionLabel)
 
   /** T3「继续」：唯一入口，只按判定结果导航（不再有任何「跳到工作室」的隐式回退）。 */
   const handleContinue = () => {
