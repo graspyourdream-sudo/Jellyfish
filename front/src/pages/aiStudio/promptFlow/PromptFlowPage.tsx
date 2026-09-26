@@ -23,6 +23,11 @@ import {
   message,
 } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
+/* 主区文案出口一律走共享管道（审计 §7.1-5/6）：原文进「技术详情」，主区只出中文结论。 */
+import { maskInternalIds } from '../components/maskInternalIds'
+/* 模型原始名不许进主区（审计 §6.2）：主区只说「模型方案」的业务名 */
+import { textModelBusinessName } from '../components/enumLabels'
+import { rememberTechnicalDetail, toUserFacingText } from '../components/userFacingMessage'
 import {
   CloudDownloadOutlined,
   CloudUploadOutlined,
@@ -101,11 +106,40 @@ const renderEnvelope = (body: unknown, fallback: string): string => {
   return [message, ...warnings, ...lines].join('\n')
 }
 
-const describeError = (error: unknown): string => {
+/**
+ * 后端错误**原文**（含 `meta.diagnostics` / `meta.warnings` 展开）。
+ *
+ * ⚠️ 它只允许进默认收起的「技术详情」层 —— 以前它是**主区**文案的来源
+ * （审计 §4.6 模式 4：`describeError` 的展开结果直接上 toast）。
+ */
+const describeErrorRaw = (error: unknown): string => {
   const err = error as { status?: number; body?: unknown; message?: string }
-  if (err?.body) return renderEnvelope(err.body, err.message ?? '请求失败')
-  return err?.message ?? '请求失败'
+  if (err?.body) return renderEnvelope(err.body, err.message ?? '')
+  return String(err?.message ?? '')
 }
+
+/**
+ * 主区用的错误结论 —— **本页所有错误出口的唯一咽喉**（20 处调用点自动受益，审计 §7.1-5）。
+ *
+ * 三步口径：
+ *   1. 只取原文的**第一行**（后端信封的 `message`）——多行诊断是技术层内容，不上主区；
+ *   2. 过共享管道 `toUserFacingText`（掩码 + 去内部术语 + 业务化改写，脏了退回中文兜底）；
+ *   3. 完整原文（脱敏后）写进「技术详情」可查处（`rememberTechnicalDetail`）。
+ *
+ * 这样主区永远是**一句中文**，而「到底哪一步断了」仍然查得到。
+ */
+const describeError = (error: unknown, fallback = '这一步没有成功，请稍后重试'): string => {
+  const raw = describeErrorRaw(error)
+  const firstLine = raw.split('\n').map((line) => line.trim()).find((line) => line.length > 0) ?? ''
+  const conclusion = toUserFacingText(firstLine, fallback)
+  if (raw.trim()) {
+    rememberTechnicalDetail({ title: conclusion, detail: maskInternalIds(raw), scope: '提示词看板' })
+  }
+  return conclusion
+}
+
+/** 未命名章节的中文占位（审计 §4.6 模式 1：原来回退成章节 UUID）。 */
+const untitledChapterLabel = (index: number): string => `第 ${index > 0 ? index : 1} 章`
 
 /**
  * 后端分页上限是每页 100（`page_size ≤ 100`，传更大会 422），
@@ -311,11 +345,14 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
           maxPage: res.data?.pagination?.max_page ?? 1,
         }
       })
-      const options = items.map((c) => ({ label: c.title || c.id, value: c.id }))
+      const options = items.map((c, i) => ({
+        label: c.title || untitledChapterLabel(c.index ?? i + 1),
+        value: c.id,
+      }))
       setChapterRows(
-        items.map((c) => ({
+        items.map((c, i) => ({
           id: c.id,
-          title: c.title || c.id,
+          title: c.title || untitledChapterLabel(c.index ?? i + 1),
           index: typeof c.index === 'number' && Number.isFinite(c.index) ? c.index : 0,
         })),
       )
@@ -387,7 +424,9 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
             maxPage: res.data?.pagination?.max_page ?? 1,
           }
         })
-        setChapters(items.map((c) => ({ label: c.title || c.id, value: c.id })))
+        setChapters(
+          items.map((c, i) => ({ label: c.title || untitledChapterLabel(c.index ?? i + 1), value: c.id })),
+        )
       } catch (error) {
         message.error(`加载章节失败：${describeError(error)}`)
       }
@@ -577,9 +616,10 @@ const JuriluImportPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         </Col>
         <Col span={12}>
           <Text strong>巨日禄页面 URL</Text>
+          {/* 审计 §4.6 模式 4：placeholder 也在用户可见面（悬停即见），不许带参数名 */}
           <Input
             style={{ marginTop: 4 }}
-            placeholder="https://.../agent?projectId=xxx&clipId=yyy"
+            placeholder="例如：https://…/agent"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             allowClear
@@ -885,7 +925,9 @@ const PromptDeliveryPanel: React.FC<{ projectId?: string }> = ({ projectId }) =>
             maxPage: res.data?.pagination?.max_page ?? 1,
           }
         })
-        setChapters(items.map((c) => ({ label: c.title || c.id, value: c.id })))
+        setChapters(
+          items.map((c, i) => ({ label: c.title || untitledChapterLabel(c.index ?? i + 1), value: c.id })),
+        )
       } catch (error) {
         message.error(`加载章节失败：${describeError(error)}`)
       }
@@ -984,7 +1026,15 @@ const PromptDeliveryPanel: React.FC<{ projectId?: string }> = ({ projectId }) =>
         } catch {
           parsed = undefined
         }
-        throw new Error(renderEnvelope(parsed, text || `下载失败（HTTP ${response.status}）`))
+        /* 审计 §4.6 模式 4：原来抛的是 `renderEnvelope(...)` 的展开结果（含 `meta.diagnostics` /
+           `meta.warnings` / HTTP 状态码），它会被 `message.error` 直接打到主区。
+           现在主区只给一句中文，原文（脱敏后）进「技术详情」。 */
+        rememberTechnicalDetail({
+          title: '下载失败',
+          detail: maskInternalIds(renderEnvelope(parsed, text || '服务端没有返回可读说明')),
+          scope: '导出提示词',
+        })
+        throw new Error('下载失败，请稍后重试')
       }
       const blob = await response.blob()
       const disposition = response.headers.get('Content-Disposition') ?? ''
@@ -1243,7 +1293,9 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         const res = await StudioQuickSkillService.listQuickSkillsApiV1StudioQuickSkillSkillsGet()
         setSkills(res.data?.skills ?? [])
       } catch (error) {
-        message.error(`加载导演 Skill 失败：${describeError(error)}`)
+        /* 审计 §9.1-1 / §9.1-19：枚举原名 `skill` 不进主区，且同一份数据全仓只允许一个名字
+           （本页已经在用「导演技能」）—— 原来这里写的是「导演 Skill」，两种说法打架。 */
+        message.error(`加载导演技能失败：${describeError(error)}`)
       }
     })()
   }, [])
@@ -1269,7 +1321,9 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
             maxPage: res.data?.pagination?.max_page ?? 1,
           }
         })
-        setChapters(items.map((c) => ({ label: c.title || c.id, value: c.id })))
+        setChapters(
+          items.map((c, i) => ({ label: c.title || untitledChapterLabel(c.index ?? i + 1), value: c.id })),
+        )
       } catch (error) {
         message.error(`加载章节失败：${describeError(error)}`)
       }
@@ -1425,7 +1479,7 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
 
   const handleGenerate = async () => {
     if (!canGenerate) {
-      message.warning('请先选择导演 Skill 并写清楚需求')
+      message.warning('请先选择导演技能并写清楚需求')
       return
     }
     setGenerating(true)
@@ -1450,7 +1504,7 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
       if (!chapterId || !shotId) {
         // 没有镜头就无处可放草稿：必须说清楚，别让用户以为已经存好了
         message.warning(
-          `生成完成（模型：${data?.model_used || '默认文字模型'}）。未选镜头：这次结果只在本页内存里，刷新会丢 —— 选中镜头后生成会自动暂存到服务端。`,
+          '生成完成。未选镜头：这次结果只在本页内存里，刷新会丢 —— 选中镜头后生成会自动暂存到服务端。',
           8,
         )
         return
@@ -1459,7 +1513,7 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         // 生成成功立刻落服务端草稿（不写正式列）：这是"刷新不丢"的关键一步
         await persistDraft(body, data?.model_used ?? '')
         setWrittenToShot(false)
-        message.success(`生成完成（模型：${data?.model_used || '默认文字模型'}）· 草稿已暂存服务端（未写正式列）`)
+        message.success('生成完成 · 草稿已暂存服务端（未写正式列）')
       } catch (error) {
         message.warning(`生成完成，但草稿暂存服务端失败（刷新会丢）：${describeError(error)}`, 10)
       }
@@ -1493,14 +1547,15 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         body: JSON.stringify({
           skill_id: skillId,
           project_id: projectId ?? '',
-          title: selectedSkill ? `${selectedSkill.display_name}（${selectedSkill.skill_id}）` : skillId,
+          /* 审计 §4.6 模式 1：原来把 `skill_id` 拼进标题（内部编号上屏）→ 只保留中文名 */
+          title: selectedSkill?.display_name || '提示词生成',
           entries: [
             {
               label: shotId
                 ? `S${String(shots.findIndex((s) => s.value === shotId) + 1).padStart(3, '0')} · ${
                     shots.find((s) => s.value === shotId)?.label ?? shotId
                   }`
-                : selectedSkill?.display_name ?? skillId,
+                : selectedSkill?.display_name ?? '提示词生成',
               prompt: promptDraft,
               note: extraContext ? `附加上下文：${extraContext.slice(0, 120)}` : '',
             },
@@ -1515,7 +1570,15 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         } catch {
           parsed = undefined
         }
-        throw new Error(renderEnvelope(parsed, text || `下载失败（HTTP ${response.status}）`))
+        /* 审计 §4.6 模式 4：原来抛的是 `renderEnvelope(...)` 的展开结果（含 `meta.diagnostics` /
+           `meta.warnings` / HTTP 状态码），它会被 `message.error` 直接打到主区。
+           现在主区只给一句中文，原文（脱敏后）进「技术详情」。 */
+        rememberTechnicalDetail({
+          title: '下载失败',
+          detail: maskInternalIds(renderEnvelope(parsed, text || '服务端没有返回可读说明')),
+          scope: '导出提示词',
+        })
+        throw new Error('下载失败，请稍后重试')
       }
       const blob = await response.blob()
       const disposition = response.headers.get('Content-Disposition') ?? ''
@@ -1582,10 +1645,10 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <Row gutter={16} align="bottom">
         <Col span={8}>
-          <Text strong>导演 Skill</Text>
+          <Text strong>导演技能</Text>
           <Select
             style={{ width: '100%', marginTop: 4 }}
-            placeholder="选择一个导演 Skill"
+            placeholder="选择一个导演技能"
             value={skillId}
             onChange={(value) => {
               setSkillId(value)
@@ -1695,7 +1758,9 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
         </Button>
         {result && (
           <Text type="secondary">
-            模型：{result.model_used || '默认文字模型'} · 结果 {promptDraft.length} 字
+            {/* 审计 §4.6 模式 5 / §6.2：原来直渲后端原始模型名（`deepseek-chat` 这类）。
+                主区只说业务方案名，原始名只留在技术详情层。 */}
+            模型方案：{textModelBusinessName(result.model_used)} · 结果 {promptDraft.length} 字
           </Text>
         )}
         {/* 草稿 vs 已保存：两件事分开显示，不让人误以为"生成了就等于写进镜头了" */}
@@ -1791,7 +1856,7 @@ const QuickSkillPanel: React.FC<{ projectId?: string }> = ({ projectId }) => {
           </Space>
         </>
       ) : (
-        <Empty description="选好 Skill 与镜头、写好需求后点「生成提示词」" />
+        <Empty description="选好导演技能与镜头、写好需求后点「生成提示词」" />
       )}
     </Space>
   )
