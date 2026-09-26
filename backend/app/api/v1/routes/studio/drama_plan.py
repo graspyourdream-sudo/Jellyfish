@@ -2,6 +2,7 @@
 
     GET  /studio/chapters/{chapter_id}/drama-plan            读取草稿（只读，永不付费）
     PUT  /studio/chapters/{chapter_id}/drama-plan/brief      保存商品信息（**免费，绝不触模型**）
+    PUT  /studio/chapters/{chapter_id}/drama-plan/draft      保存手改草稿（免费，只写草稿列）
     POST /studio/chapters/{chapter_id}/drama-plan/generate   生成草稿（**付费出口**，租约防重复）
     POST /studio/chapters/{chapter_id}/drama-plan/confirm    确认落库（materialize，一个事务）
     POST /studio/projects/{project_id}/drama-plan/chapter    项目里找一个可用空章节（没有就建）
@@ -88,6 +89,26 @@ async def put_drama_plan_brief(
     """保存 brief：**绝不触发模型调用**，也不动已生成的草稿。"""
     try:
         data = await service.save_brief(db, chapter_id=chapter_id, brief=body.model_dump())
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code") and hasattr(exc, "detail"):
+            return _error(exc)
+        raise
+    return success_response(DramaPlanRead.model_validate(data))
+
+
+@router.put(
+    "/{chapter_id}/drama-plan/draft",
+    response_model=ApiResponse[DramaPlanRead],
+    summary=f"保存人工编辑后的草稿（只写草稿列）· {OUTLET_FREE}",
+)
+async def put_drama_plan_draft(
+    chapter_id: str,
+    body: dict[str, Any],
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """保存手改的草稿：**免费**，只写 ``drama_plan_drafts.plan``，正式行一行都不碰。"""
+    try:
+        data = await service.save_plan(db, chapter_id=chapter_id, plan=body)
     except Exception as exc:  # noqa: BLE001
         if hasattr(exc, "status_code") and hasattr(exc, "detail"):
             return _error(exc)
