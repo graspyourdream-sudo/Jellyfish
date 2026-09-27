@@ -259,3 +259,56 @@ pr41 实际装 `5.29.3` / `5.9.3`。即 **`pnpm install --frozen-lockfile` 装�
 ⑤ 需要上游配合的最小改动集：健康检查增加"可写性"探测（探针或最小写删自检）＋把 403 原文归类为可读原因。
 需总控侧同步的接口字段：`VideoSubmitRequest.attempt`、`VideoSubmitRead.{attempt,deduplicated,source_task_id,task_id}`
 （**本分支未重新生成 OpenAPI**）。
+
+---
+
+## 追加（第 12 轮）：图片闭环推进 ①②，并给出上游 403 的实测证据
+
+### 已落地（2 项，均已提交）
+
+- **`6fd6c4d` S001-IMG-PARTIAL｜「图出来了、存储失败」判成部分成功**
+  `normalize_outcome` 新增 `recoverable_artifact`：**状态失败 + 有可恢复产物 + 失败原因是存储**
+  → `partial_failed`（部分成功），并在 `detail` 里给 `recoverable` / `recoverable_hint`（中文）；
+  没有产物、或失败原因不是存储（例如模型拒绝）→ 仍然是 failed（不粉饰）。
+  新增 `tests/test_image_partial_recoverable.py` 6 项（含两条反向控制）。
+
+- **`55736ce` S001-IMG-STORAGE-PRECHECK｜出图前的免费存储预检**
+  新增 `storage_precheck.py`：`writable` 放行；`not_configured` / `not_writable`（**明确否定证据**，
+  后者正是那次真实故障的形态）→ 结构化 409 + 中文修法 + `paid_call_made: false`；
+  `configured_unverified`（当前上游形态）→ 降级放行但如实告知残留风险；
+  `unreachable` → 降级放行并写进 warnings（连不上时建任务本身也会失败、不会花钱，
+  且这层抢报错会盖掉守卫该报的错）。接线在 `submit_channel_groups` 进组循环前，
+  **一次请求只探一次**、且只在上游通道确实有目标时探。
+  新增 `tests/test_image_storage_precheck.py` 10 项；既有相关套件 376 项通过。
+
+### 本轮新增的实测证据（免费、只读）
+
+启动上游出图服务后读它的健康返回（真实返回，非构造）：
+
+```json
+{"configured": true, "missing": [], "public_base_url": "https://ai-shortdrama-assets.oss-cn-beijing.aliyuncs.com"}
+```
+
+把它喂给 `evaluate_storage_readiness` 得到的结论（见
+`~/Desktop/jellyfish-flow-evidence/62-storage-precheck-real-upstream.txt`）：
+
+```
+ok = True | state = configured_unverified
+message  = 长期存储已配置，但出图服务目前只回报「配没配」、不回报「写不写得进去」。
+needs_upstream = 上游健康检查需要增加长期存储「可写性」探测（探针或最小写删自检）。
+```
+
+**这正是关键结论**：上游现在的健康检查**报不出**那次 403（因为它压根不说"写得进去吗"）。
+所以本轮把这一点如实记为"降级放行 + 明示残留风险"，而不是假装验过。
+
+### 仍未完成（下一轮，均为免费改动）
+
+- ③ 页面从结果卡片里**恢复/采纳/设为主图**（不靠手工调接口、不读对方库）；
+- ④ 定版图**不可公网访问时在页面上显式标记为"不可用于后续生成"**（当前它只是本地 `storage_key`，
+  页面没有把它和"长期资产"区分开）；
+- ⑤ 需要上游配合的最小改动集（已给出）：健康检查增加可写性探测 + 把 403 归类成可读原因。
+
+### 环境注意事项
+
+为取证据启动了上游出图服务（`人物及场景生产项目`，`node src/server.js`，127.0.0.1:4173），
+**只读**用了它的 `/api/service/health`；没有提交任何出图任务、没有动它的代码或数据。
