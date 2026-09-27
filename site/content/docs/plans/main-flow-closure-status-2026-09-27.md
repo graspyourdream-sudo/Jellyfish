@@ -649,3 +649,34 @@ mode = dry_run ｜ is_real_mode = False ｜ outlets = {llm:False, image:False, v
 
 **对 ③ 的影响**：免费路径走不通（演练模式下拿不到可采纳的卡；要拿真卡必须让真实出口打开，
 而那是付费调用，需要授权）。③ 仍待一次被授权的真实出图，或等上游修好 OSS 写权限。
+
+### 第 23 轮：用**受控桩上游**验证 ②（成功），并定位 ③ 仍未通的最后一环
+
+为了在**不花钱**的前提下验证页面闭环，我搭了一个受控的"出图服务"桩（本机 4317，只返回数据、
+不生成任何图、不产生任何费用），把后端指过去（`IMAGE_TOOL_SERVICE_URL`，真实模式但只放行 image 出口），
+刻意复刻真实上游那次的行为：create 返回 `partial_failed`，detail 里带一张可取回的本机图。
+
+**验证结果（② 通过）**：走**产品自己的代码路径**（`build_channel_groups` → `submit_channel_groups`），
+页面实际会收到的单条结果现在是这样：
+
+```
+outcome = partial_failed ｜ ok = False ｜ oss_ready = False
+image_url = http://127.0.0.1:4317/images/stub-artifact.png     ← 图片可取回
+error_message = 出图成功但 OSS 上传失败：…403 AccessDenied…（桩）
+detail.recoverable = True ｜ detail.artifact_state = recoverable ｜ detail.local_path = （同上）
+```
+
+这正是用户要求的「部分成功 + 可恢复信息」——**第 20 轮那次"不等待也查一次详情"的修复是有效的**，
+它把"图已生成、只是存不下来"如实还原了出来。
+
+**③ 仍未通的最后一环（本轮定位，未修完）**：即使后端返回了 `partial_failed` + 可取回的 `image_url`，
+页面的结果区**依旧没有出现「采纳」按钮**（`71-stub-loop-*` 证据）。第 21 轮给
+`AssetResultCard` 加的 `canAdoptResult` 条件本身没错（`adoptedImageId` 默认是 `null`，不会挡住），
+所以缺口在**更前面**：批量出图这条链路上，结果卡片拿到的 `imageUrl` / `outcome`
+与后端回包之间还需要再对一次（很可能该视图的结果卡片不是 `AssetResultCard`，或该区域的
+结果数据没带上 `image_url`）。下一轮继续用**桩上游**（免费）把这一环定位并修掉——
+这条路已经证明可以在不花钱的情况下把 ③ 验完。
+
+**收尾（本轮已完成）**：桩已停；后端恢复 `dry_run`（四出口全 blocked）；隔离库完好
+（`files=140`、`projects=19`）。本轮**没有真实出图、没有任何真实计费**。
+另：第 22 轮那处 `health.queue.total` 696→697 的计数差异仍未解释，以任务记录为准。
