@@ -7,11 +7,17 @@
  * 3. 自定义不覆盖任何字段；
  * 4. 起点决定新建后的落点（提示词起步直接进整集提示词看板）；
  * 5. 第三种起点「剧情广告」：请求体带 `kind=ad` + `ad_*` 两段，
- *    落点是**剧情策划页**并带上响应里的 `chapter_id`（不是工作台步骤）。
+ *    落点是**剧情策划页**并带上响应里的 `chapter_id`（不是工作台步骤）；
+ * 6. **UI 起点 ≠ 后端 `start_mode`**：`drama_ad` 在 `start_mode` 上必须是 `script`
+ *    （真实事故：`start_mode: startMode as any` 把这条映射错误吞到运行时才 422，
+ *    第 1 步整条链断掉）。这里既有纯函数用例，也有**源码级守卫**钉住创建请求那一行。
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   AD_DEFAULT_SHOT_COUNT,
@@ -28,7 +34,10 @@ import {
   resolveOverallStyleFields,
   resolveProjectVideoRatio,
   resolveStartLandingPath,
+  toBackendStartMode,
 } from './projectStartPresets.ts'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
 
 test('五个整体风格预设齐全（含其他自定义）', () => {
   assert.deepEqual(
@@ -198,6 +207,60 @@ test('剧情广告创建后的落点是剧情策划页，且带上 chapter_id', 
   /* 其余起点的落点一个字都没变。 */
   assert.equal(resolveStartLandingPath('script', 'p1', 'c1'), '/projects/p1?step=script')
   assert.equal(resolveStartLandingPath('prompts', 'p1', 'c1'), '/projects/p1?step=video_prompt')
+})
+
+/* ---------------------- UI 起点 → 后端 start_mode（真实事故的回归） ---------------------- */
+
+test('后端 start_mode 只有两个取值：UI 起点必须显式换算（drama_ad → script）', () => {
+  /* 后端 `ProjectStartMode` = script | prompts；"剧情广告"由新列 `kind` 表达。
+     这条用例就是那个 422 的回归：三个 UI 起点里**没有任何一个**能直接当 start_mode 用。 */
+  assert.equal(toBackendStartMode('script'), 'script')
+  assert.equal(toBackendStartMode('prompts'), 'prompts')
+  assert.equal(toBackendStartMode('drama_ad'), 'script', '剧情广告在 start_mode 上就是 script')
+  for (const choice of ['script', 'prompts', 'drama_ad'] as const) {
+    assert.ok(
+      ['script', 'prompts'].includes(toBackendStartMode(choice)),
+      `${choice} 换算出了后端不接受的 start_mode`,
+    )
+  }
+})
+
+test('未登记 / 空值的起点一律落到 script（与后端默认值一致，不猜成 prompts）', () => {
+  assert.equal(toBackendStartMode(undefined), 'script')
+  assert.equal(toBackendStartMode(null), 'script')
+  assert.equal(toBackendStartMode(''), 'script')
+  assert.equal(toBackendStartMode('brand_new_mode'), 'script')
+  assert.equal(toBackendStartMode('PROMPTS'), 'script', '大小写不匹配时按 script 兜底，不猜')
+})
+
+test('源码级守卫：创建项目的请求里 start_mode 只能是 script / prompts（不许把 UI 起点直接发出去）', () => {
+  const source = readFileSync(resolve(HERE, 'ProjectLobby.tsx'), 'utf8')
+  /* 去注释：注释里正提到过这条坑，不能拿注释当"证据"。 */
+  const code = source
+    .split('\n')
+    .filter((line) => {
+      const trimmed = line.trim()
+      return !(trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed.startsWith('//'))
+    })
+    .join('\n')
+
+  const assignments = code.match(/start_mode\s*:[^,\n]*/g) ?? []
+  assert.ok(assignments.length > 0, 'ProjectLobby 里找不到 start_mode 的赋值（守卫会变成空跑）')
+  const offenders = assignments.filter((line) => {
+    const value = line.replace(/^start_mode\s*:/, '').trim()
+    /* 只允许两种写法：走显式换算函数，或直接写字面量 'script' / 'prompts'。 */
+    return !(
+      /^toBackendStartMode\(/.test(value) ||
+      value === "'script'" ||
+      value === "'prompts'"
+    )
+  })
+  assert.deepEqual(offenders, [], `start_mode 的赋值不合法（UI 起点直接发出去会 422）：\n${offenders.join('\n')}`)
+
+  /* 显式钉住那条真实事故的写法：`start_mode: startMode as any` */
+  assert.ok(!/start_mode\s*:\s*startMode\b/.test(code), 'start_mode 又把 UI 起点原样发出去了')
+  assert.ok(!/start_mode[^\n]*as any/.test(code), 'start_mode 上又出现了 as any（会把类型错误吞到运行时）')
+  assert.ok(/toBackendStartMode/.test(code), '创建请求没有走 toBackendStartMode 这个唯一换算处')
 })
 
 test('确认策划后的第 2 步入口：step=extract_assets 且 chapter 做 URL 编码', () => {

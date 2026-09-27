@@ -52,6 +52,7 @@ import {
   resolveStartLandingPath,
   START_MODE_OPTIONS,
   resolveOverallStyleFields,
+  toBackendStartMode,
   type AdProductSourceChoice,
   type OverallStyleKey,
   type ProjectStartModeChoice,
@@ -622,11 +623,19 @@ const ProjectLobby: React.FC = () => {
           name: values.name,
           description: values.description ?? '',
           style: preset?.style ?? values.style,
+          /* ⚠️ 这里的 `as any` 与 `start_mode` 那条**不是同一类问题**：
+             生成客户端里的 `ProjectVisualStyle` 是过期的（只有 '现实' 一个字面量），
+             而项目实际支持「现实 / 动漫」。要不要重新生成 OpenAPI 由总控决定，
+             本批不动生成物（见 `services/dramaPlanApi.ts` 文件头的同一条说明）。 */
           visual_style: (preset?.visual_style ?? values.visual_style) as any,
           unify_style: values.unifyStyle,
           // 方案 B（2026-09-23）：预设只负责「自动填入默认值」，用户手填的优先
           default_video_ratio: resolveProjectVideoRatio(values.overallStyle, values.default_video_ratio),
-          start_mode: startMode as any,
+          /* UI 起点（script / prompts / **drama_ad**）≠ 后端 `start_mode`（只有 script / prompts）。
+             `drama_ad` 在这里就是 script；"这是剧情广告项目"由下面的 `kind: 'ad'` 表达。
+             换算只走 `toBackendStartMode`：**不要在这里写回 `as any`** ——
+             真实事故就是它把「drama_ad 被当成 start_mode 发出去」的类型错误吞到了运行时（422）。 */
+          start_mode: toBackendStartMode(startMode),
           progress: 0,
           ...(adFields ?? {}),
         },

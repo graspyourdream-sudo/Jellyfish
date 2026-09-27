@@ -20,6 +20,38 @@
 
 export type ProjectStartModeChoice = 'script' | 'prompts' | 'drama_ad'
 
+/**
+ * 后端 `projects.start_mode` 的取值域（`app/models/types.py` 的 `ProjectStartMode`）。
+ *
+ * ⚠️ 它**只有两个值**，和上面那份 UI 起点**不是同一个东西**：
+ *   - `start_mode` 表达「从哪开始生产」：`script`（从剧本开始）/ `prompts`（从视频提示词开始）；
+ *   - 「这是剧情广告项目」由**新列 `kind`** 表达（`kind: 'ad'` + `ad_product_source` /
+ *     `ad_requirements`），见契约 §二「项目」。
+ */
+export type BackendStartMode = 'script' | 'prompts'
+
+/**
+ * UI 起点 → 后端 `start_mode`（**唯一的换算处**）。
+ *
+ * `drama_ad` 在 `start_mode` 上就是 `script`：剧情广告同样"先从剧本/策划开始"，
+ * 它与其他项目的差别由 `kind=ad` 表达；创建后的落点另由 :func:`resolveStartLandingPath`
+ * 决定（剧情广告 → 剧情策划页）。
+ *
+ * 为什么必须走这个函数、而不是就地写 `'script'`：
+ * 真实事故（浏览器验收第 1 步直接 422）——页面把 UI 起点**原样**当成 `start_mode` 发出去，
+ * 又用 `as any` 把类型错误吞掉了，于是 `tsc --noEmit` 全绿、运行时才被后端拒绝
+ * （`start_mode: Input should be 'script' or 'prompts'`）。
+ * 有了它，类型系统能真的拦住这件事：把 `ProjectStartModeChoice` 直接赋给
+ * `start_mode` 会立刻编译失败（'drama_ad' 不在 `BackendStartMode` 里）。
+ *
+ * 未登记的值一律落到 `script`（= 与后端默认值一致的安全兜底，不猜成 prompts）。
+ */
+export function toBackendStartMode(
+  choice: ProjectStartModeChoice | string | null | undefined,
+): BackendStartMode {
+  return choice === 'prompts' ? 'prompts' : 'script'
+}
+
 export type OverallStyleKey = 'live_portrait' | 'live_landscape' | 'anime_2d' | 'anime_3d' | 'custom'
 
 export type OverallStylePreset = {
