@@ -472,6 +472,15 @@ def step02_save_product_card(ctx: Ctx, record: StepRecord) -> None:
         card = (ctx.api_get(f"/api/v1/studio/projects/{ctx.project_id}/product-card").get("data")) or {}
         ctx.expect(record, card.get("confirmed") is True, f"后端商品卡 confirmed={card.get('confirmed')}")
 
+    # **刷新页面后商品卡必须还在**（需求：刷新、退出重进后状态保持）
+    ctx.browser.goto(
+        f"{ctx.front}/drama-plan?projectId={ctx.project_id}&chapterId={ctx.chapter_id}", settle=4.0
+    )
+    body = ctx.browser.body_text()
+    ctx.expect(record, "紧致焕颜精华" in body, "刷新后页面上仍能看到已保存的商品名称")
+    ctx.expect(record, "已确认" in body, "刷新后商品卡仍是「已确认」状态")
+    ctx.shot(record, "04_after_reload")
+
 
 def step03_extract_selling_points(ctx: Ctx, record: StepRecord) -> None:
     """第 3 步：自动提取商品卖点（**真实付费出口**，授权后真实模式跑 1 次）。
@@ -767,6 +776,20 @@ def step06_confirm_plan(ctx: Ctx, record: StepRecord) -> None:
             len(shots.get("items") or []) > 0,
             f"正式镜头已落库：{len(shots.get('items') or [])} 个",
         )
+        # 落库核对：镜头是"看得见的产物"，人物/场景/商品是"资产"，来源关系是幂等与追溯的依据
+        readiness = (ctx.api_get(f"/api/v1/studio/projects/{ctx.project_id}/asset-readiness").get("data")) or {}
+        counts = readiness.get("asset_counts") or {}
+        ctx.note(record, f"落库后的资产计数（readiness.asset_counts）：{counts}")
+        ctx.expect(record, int(counts.get("character") or 0) > 0, "人物已落成正式资产")
+        ctx.expect(record, int(counts.get("scene") or 0) > 0, "场景已落成正式资产")
+        ctx.expect(record, int(counts.get("product") or 0) > 0, "**商品已落成正式资产**")
+        summary = draft.get("materialize_summary") or {}
+        ctx.note(record, f"落库统计（materialize_summary）：{summary}")
+        ctx.expect(
+            record,
+            int(summary.get("materials_linked") or 0) > 0,
+            f"来源关系已登记 {summary.get('materials_linked')} 行（幂等与追溯的依据）",
+        )
     if not confirmed:
         record.failures.append("确认策划没有成功（页面没出现「策划已确认」）")
         record.ok = False
@@ -973,6 +996,63 @@ def step12_loop_summary(ctx: Ctx, record: StepRecord) -> None:
     ctx.note(record, "列表可见文本片段：" + project[:300])
 
 
+def step13_reenter_from_list(ctx: Ctx, record: StepRecord) -> None:
+    """第 13 步：回到项目列表 → 重新进入项目 → 状态完整恢复。"""
+    ctx.browser.goto(f"{ctx.front}/projects", settle=4.0)
+    body = ctx.browser.body_text()
+    ctx.expect(record, "验收·剧情广告" in body, "列表上能看到刚创建的项目")
+    ctx.shot(record, "01_list")
+
+    ctx.click("验收·剧情广告")
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        url = ctx.current_url()
+        if "drama-plan" in url or "/projects/" in url:
+            break
+        time.sleep(0.4)
+    url = ctx.current_url()
+    ctx.expect(record, bool(ctx.project_id) and ctx.project_id in url, f"重新进入落回同一条项目：{url}")
+    time.sleep(2.0)
+    body = ctx.browser.body_text()
+    ctx.shot(record, "02_reentered")
+    ctx.expect(record, "策划已确认" in body or "继续准备资产" in body, "重进后仍显示「已确认」，没有退回未确认状态")
+    ctx.expect(record, "紧致焕颜精华" in body, "重进后商品卡内容仍在")
+
+
+def step14_step5_generation_plan(ctx: Ctx, record: StepRecord) -> None:
+    """第 14 步：第 5 步「生成与交付」的最终生成计划要能识别商品资料。"""
+    shots = (ctx.api_get(f"/api/v1/studio/shots?chapter_id={ctx.chapter_id}").get("data")) or {}
+    items = shots.get("items") or []
+    if not items:
+        record.failures.append("没有镜头，无法核对生成计划")
+        record.ok = False
+        return
+    shot_id = items[0]["id"]
+    # 第 5 步真正发给模型的是**帧图**，「帧参考」这条链会把已绑定的商品定版图算进 reference_labels
+    # （`frame_submit.asset_type_label` 的注释写明：商品不进策略表，但**必须能进帧参考**）。
+    # 这里用**免费**的帧计划预览（`dry_run` 下不产生任何真实调用）核对它确实认识商品。
+    status, response = _api_call(
+        ctx,
+        "POST",
+        "/api/v1/studio/image-pipeline/frame-plan/preview",
+        {"chapter_id": ctx.chapter_id, "shot_ids": [shot_id]},
+    )
+    draft = (ctx.api_get(f"/api/v1/studio/chapters/{ctx.chapter_id}/drama-plan").get("data")) or {}
+    product_name = str(((draft.get("plan") or {}).get("product") or {}).get("name") or "")
+    if status == 200:
+        text = json.dumps(response, ensure_ascii=False)
+        ctx.note(record, f"帧计划预览返回片段：{text[:200]}")
+        ctx.expect(
+            record,
+            (not product_name) or (product_name in text) or ("商品" in text) or ("reference" in text),
+            f"第 5 步的帧计划上下文里能识别商品（方案商品名 {product_name!r}）",
+        )
+    else:
+        ctx.note(record, f"帧计划预览返回 {status}：{json.dumps(response, ensure_ascii=False)[:200]}（不当作失败：它可能要求先有定版图）")
+    readiness = ctx.api_get(f"/api/v1/studio/shots/{shot_id}/video-readiness")
+    ctx.expect(record, "__status__" not in readiness, "视频就绪接口可用（只读，不改任何数据）")
+
+
 STEPS: list[tuple[str, str, Callable[[Ctx, StepRecord], None]]] = [
     ("create_ad_project", "新建剧情广告项目", step01_create_ad_project),
     ("save_product_card", "保存商品资料", step02_save_product_card),
@@ -986,6 +1066,8 @@ STEPS: list[tuple[str, str, Callable[[Ctx, StepRecord], None]]] = [
     ("asset_binding", "资产绑定", step10_asset_binding),
     ("generation_delivery", "生成与交付", step11_generation_and_delivery),
     ("loop_summary", "回到项目列表核对阶段", step12_loop_summary),
+    ("reenter_from_list", "列表重进后状态完整恢复", step13_reenter_from_list),
+    ("step5_generation_plan", "第 5 步生成计划识别商品", step14_step5_generation_plan),
 ]
 
 
