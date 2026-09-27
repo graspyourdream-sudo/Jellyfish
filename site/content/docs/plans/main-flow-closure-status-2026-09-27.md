@@ -1057,3 +1057,42 @@ id=227  scene_id=asset_1790138604722_scene  chapter_id=33696d3f-…  shot_id=e76
 - 这也再次印证那条教训：**先把真实数据/真实 DOM 看清楚再下结论**，别用"重复"这种含糊词下判断。
 
 **收尾**：守卫保持 `dry_run`（四出口 blocked）、无真实调用、未删除任何数据。
+
+### 第 38 轮（续）：重复装配的修复**实测生效**（并发现"改了没重启"的坑）
+
+同一个计划预览接口，改前/改后（**注意：第一次查询用的还是旧进程，所以仍显示 2 条**）：
+
+| 查询 | 改前（旧进程） | 改后（重启后） |
+|---|---|---|
+| `scene`（1 个资产、2 行关联） | targets = **2**（同一资产两遍） | targets = **1** ✅ |
+| `prop`（6 个资产、3 个各有 2 行关联） | targets = **9**（6 唯一） | targets = **6** ✅ |
+
+这条也留个教训：**改完后端必须重启再验证**，否则会把"旧进程"的结果当成"修复无效"。
+
+### ⑤ 最小上游改动集（可直接交给出图服务那边执行）
+
+目标：让"存不进去"在**提交之前**就能被免费发现，从而不再出现"图出了、钱花了、资产拿不到"。
+
+1. **`src/ossUploader.js`｜新增可写性探测** `probeOssWritable(env)`：
+   - 用最小写删自检：`PUT` 一个极小对象（如 `jellyfish/health/write-probe-<ts>.txt`，几十字节），
+     成功后再 `DELETE` 删掉；返回 `{ writable: boolean, blocked_reason: string }`；
+   - 明确区分"**没配置**"（缺环境变量，现有 `configured/missing` 已覆盖）与"**配了但写不进去**"
+     （403 / AccessDenied / bucket acl）——这两种的修法完全不同；
+   - 结果缓存若干秒（例如 60s），避免每次健康检查都真的写一个对象。
+2. **`src/server.js`｜`handleServiceHealth` 补两个字段**：
+   `oss.writable`（true/false，探测失败给 null）与 `oss.blocked_reason`（建议放 OSS 返回的
+   `<Code>` 与关键 `<Message>`，**不要放** AccessKey/签名等敏感信息），并可加 `oss.probe_at`。
+   既有字段（`configured` / `missing` / `public_base_url`）保持不动，向后兼容。
+3. **`uploadImageToOss` 的错误结构化**：把 403 的 XML 归类成
+   `{ error_code: "oss_access_denied", http_status: 403, message: <原文摘要> }` 再抛，
+   让调用方不用正则抠 XML。
+4. **（可选但很有用）create 回包里就带上产物地址**：目前地址只在
+   `GET /api/service/asset-image-tasks/{id}` 里，客户端必须再查一次才能拿到；
+   若 create 直接回 `images[].oss_url` / `local_path`，可以少一次查询（我们这边已经做了兜底补查）。
+
+**验收口径**：把出图服务的账号改成只读（或指向不可写的桶）后，`GET /api/service/health` 必须
+返回 `oss.writable=false` 且给出可读原因；此时 Jellyfish 侧的免费存储预检会**在提交前拦下**
+（`storage_not_ready` + 中文修法），**不会产生任何费用**。
+
+**这一项的现状**：第 22 轮已把这条链路查清（403 落在带签名的 `PUT Object`，即"写入授权"而非"未配置"），
+第 23 轮用桩验证了 Jellyfish 侧的行为，本轮把上游要实现的部分写成上面的清单。
