@@ -312,3 +312,19 @@ needs_upstream = 上游健康检查需要增加长期存储「可写性」探测
 
 为取证据启动了上游出图服务（`人物及场景生产项目`，`node src/server.js`，127.0.0.1:4173），
 **只读**用了它的 `/api/service/health`；没有提交任何出图任务、没有动它的代码或数据。
+
+### 顺带查明的既有缺陷：13 个「信封多了 meta」的过期测试（**不是本分支引入**）
+
+全量后端套件（`1349 passed, 13 failed, 2 skipped`）里那 13 个失败都在实体/文件/镜头关联/skills 这些
+与本轮无关的地方，且**错误形状完全一致**：响应体多了一个 `'meta': None`，而这些用例是
+`assert response.json() == {...}` 的**全等**断言、没写 `meta`。
+
+已核实成因不在本分支：
+
+- 全分支对 `backend/app/api` / `backend/app/core` 的改动只有 `db.py`（SQLite 外键 PRAGMA）；
+  `backend/app/schemas/common.py`（`meta` 字段就在这里）**本分支一行未改**；
+- `git show df33a33:backend/tests/test_skills_integration.py` 显示**基线**上就已经是
+  「断言不带 meta」的写法 → 信封加 `meta` 是共同基线之前就发生的事，测试没跟着更新。
+
+处置建议（给总控）：这 13 个用例按新信封补 `meta`（或在断言里忽略该键），与文档所说的
+「信封新增字段需同步测试」是同一类问题；本分支不动它们（不掺入无关 hunk）。
