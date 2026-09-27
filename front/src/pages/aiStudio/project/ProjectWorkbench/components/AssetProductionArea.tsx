@@ -2031,12 +2031,26 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
     {
       title: '定版',
       key: 'primary',
-      width: 100,
+      width: 150,
       render: (_: unknown, record) =>
         record.hasPrimary ? (
-          <Tag color="green" bordered={false}>
-            已定版
-          </Tag>
+          <Space size={4} wrap>
+            <Tag color="green" bordered={false}>
+              已定版
+            </Tag>
+            {/*
+              只有「已定版」这一个标签会误导：定版图到底是公网长期资产、还是只在本机，
+              是另一件事（真实演练里那张定版图只在本机，下游出视频根本取不到）。
+              后端 `asset-readiness` 现在直接给结论，这里如实标出来。
+            */}
+            {record.primaryUsableForGeneration ? null : (
+              <Tooltip title={record.primaryReachabilityNote || '这张定版图不是公网长期地址，不能用于后续生成。'}>
+                <Tag color="orange" bordered={false}>
+                  仅本机 · 不能用于后续生成
+                </Tag>
+              </Tooltip>
+            )}
+          </Space>
         ) : record.hasImage ? (
           <Tag color="blue" bordered={false}>
             待设定版

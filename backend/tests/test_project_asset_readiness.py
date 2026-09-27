@@ -302,10 +302,18 @@ def test_four_asset_types_share_one_caliber() -> None:
                     "has_primary",
                     "thumbnail",
                     "image_id",
+                    # 定版图的可达性结论（新增）：四类资产同样都要有，口径不许分裂
+                    "primary_long_term_url",
+                    "primary_usable_for_generation",
+                    "primary_reachability_note",
                 }
                 assert item["has_image_prompt"] is False
                 assert item["has_image"] is False
                 assert item["has_primary"] is False
+                # 未定版时不谈"定版图能不能用于生成"：一律给空值/false，避免页面误标
+                assert item["primary_long_term_url"] == ""
+                assert item["primary_usable_for_generation"] is False
+                assert item["primary_reachability_note"] == ""
             assert payload["summary"]["total"] == 4
             assert payload["summary"]["done"] == 0
             assert payload["summary"]["all_done"] is False

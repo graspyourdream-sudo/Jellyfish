@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.studio import (
     Chapter,
+    FileItem,
     ProjectCostumeLink,
     ProjectPropLink,
     ProjectSceneLink,
@@ -50,6 +51,7 @@ from app.models.studio import (
     ShotExtractedCandidate,
 )
 from app.services.studio.entity_specs import entity_spec
+from app.services.studio.image_reachability import assess_storage_key
 from app.services.studio.entity_thumbnails import resolve_thumbnail_infos
 from app.services.studio.llm_orchestration.json_utils import normalize_name
 
@@ -169,6 +171,45 @@ async def _primary_parent_ids(db: AsyncSession, *, spec: _AssetSpec, parent_ids:
     return {str(value) for value in (await db.execute(stmt)).scalars().all() if value}
 
 
+async def _primary_file_map(
+    db: AsyncSession, *, spec: _AssetSpec, parent_ids: list[str]
+) -> dict[str, str]:
+    """资产 id → **定版图**的 ``file_id``（与 :func:`_primary_parent_ids` 同一口径）。
+
+    为什么要这个映射：页面只显示「已定版」，但定版图**是不是公网长期资产、能不能进后续生成**
+    是另一件事（真实演练里那张苏晚棠定版图只在本机，下游根本取不到）。
+    判定要落到"定版图那个文件"上，所以这里必须把 file_id 取出来。
+    同一资产有多行 is_primary 时取 id 最大的一行（与页面「首选图」打分里的 id 兜底一致）。
+    """
+    if not parent_ids:
+        return {}
+    owner_field = getattr(spec.image_model, spec.image_owner_field)
+    stmt = (
+        select(owner_field, spec.image_model.file_id, spec.image_model.id)
+        .where(
+            owner_field.in_(parent_ids),
+            spec.image_model.file_id.is_not(None),
+            spec.image_model.file_id != "",
+            spec.image_model.is_primary.is_(True),
+        )
+        .order_by(spec.image_model.id.asc())
+    )
+    mapping: dict[str, str] = {}
+    for owner, file_id, _row_id in (await db.execute(stmt)).all():
+        if owner:
+            mapping[str(owner)] = str(file_id or "")  # 升序遍历 → 最后写入的是 id 最大的那行
+    return mapping
+
+
+async def _storage_keys(db: AsyncSession, *, file_ids: list[str]) -> dict[str, str]:
+    """file_id → ``files.storage_key``（一次查询，避免逐个文件查）。"""
+    ids = [str(fid) for fid in file_ids if str(fid or "").strip()]
+    if not ids:
+        return {}
+    stmt = select(FileItem.id, FileItem.storage_key).where(FileItem.id.in_(ids))
+    return {str(fid): str(key or "") for fid, key in (await db.execute(stmt)).all()}
+
+
 def summarize_readiness(items: list[dict[str, Any]]) -> dict[str, Any]:
     """按同一批标志汇总（顶部统计与后端自测共用这一处口径）。"""
     asset_counts = {asset_type: 0 for asset_type in ASSET_TYPES}
@@ -219,11 +260,15 @@ async def build_project_asset_readiness(db: AsyncSession, *, project_id: str) ->
             parent_ids=parent_ids,
         )
         primary_ids = await _primary_parent_ids(db, spec=spec, parent_ids=parent_ids)
+        primary_files = await _primary_file_map(db, spec=spec, parent_ids=parent_ids)
+        # 定版图那个文件到底是公网长期地址、还是只在本机（→ 不能用于后续生成）
+        primary_keys = await _storage_keys(db, file_ids=list(primary_files.values()))
 
         for asset in assets:
             asset_id = str(asset.id)
             name = str(asset.name or "")
             info = image_infos.get(asset_id) or {}
+            reachability = assess_storage_key(primary_keys.get(primary_files.get(asset_id, ""), ""))
             items.append(
                 {
                     "asset_type": spec.asset_type,
@@ -235,6 +280,12 @@ async def build_project_asset_readiness(db: AsyncSession, *, project_id: str) ->
                     "has_primary": asset_id in primary_ids,
                     "thumbnail": str(info.get("thumbnail") or ""),
                     "image_id": info.get("image_id"),
+                    # 只有真定了版才谈"这张定版图能不能用于后续生成"；没定版就给空值，避免页面误标
+                    "primary_long_term_url": reachability.long_term_url if asset_id in primary_ids else "",
+                    "primary_usable_for_generation": (
+                        reachability.usable_for_generation if asset_id in primary_ids else False
+                    ),
+                    "primary_reachability_note": reachability.note if asset_id in primary_ids else "",
                 }
             )
 

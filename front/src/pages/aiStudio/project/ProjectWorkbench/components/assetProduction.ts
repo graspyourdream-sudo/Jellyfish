@@ -188,6 +188,15 @@ export type ProductionAsset = {
   hasImage: boolean
   /** 已设为定版 */
   hasPrimary: boolean
+  /**
+   * 定版图能不能用于**后续生成**（来自 `asset-readiness` 的后端结论）。
+   *
+   * 为什么要有：只有「已定版」这一个标签会误导——定版图是公网长期资产、还是只在本机，
+   * 是另一件事（真实演练里那张定版图只在本机，出视频下游根本取不到）。
+   */
+  primaryUsableForGeneration: boolean
+  /** 定版图不可用时的中文原因与修法（可用时为空串）。 */
+  primaryReachabilityNote: string
   /** 已保存图片提示词 */
   hasImagePrompt: boolean
   /** 当前首选图的行 ID（「设为定版」的默认目标）；null = 还没有图片 */
@@ -214,6 +223,8 @@ export function toProductionAssets(
     imageId: number | null
     thumbnail: string
     hasPendingCandidate: boolean
+    primaryUsableForGeneration?: boolean
+    primaryReachabilityNote?: string
   }[],
 ): ProductionAsset[] {
   return assets.map((asset) => ({
@@ -223,6 +234,10 @@ export function toProductionAssets(
     name: asset.name || asset.id,
     hasImage: asset.hasImage === true,
     hasPrimary: asset.hasPrimary === true,
+    // 兜底为 false（"没验过就不许说可用"）：后端没给结论时，页面宁可标"不能用于生成"，
+    // 也不能默认说它可用。
+    primaryUsableForGeneration: asset.primaryUsableForGeneration === true,
+    primaryReachabilityNote: asset.primaryReachabilityNote || '',
     hasImagePrompt: asset.hasImagePrompt === true,
     imageId: typeof asset.imageId === 'number' ? asset.imageId : null,
     thumbnail: asset.thumbnail || '',
@@ -1560,6 +1575,8 @@ export function collectUserFacingTexts(): string[] {
       name: '甲',
       hasImage: false,
       hasPrimary: false,
+      primaryUsableForGeneration: false,
+      primaryReachabilityNote: '',
       hasImagePrompt: false,
       imageId: null,
       thumbnail: '',
@@ -1572,6 +1589,8 @@ export function collectUserFacingTexts(): string[] {
       name: '乙',
       hasImage: true,
       hasPrimary: true,
+      primaryUsableForGeneration: false,
+      primaryReachabilityNote: '',
       hasImagePrompt: true,
       imageId: 7,
       thumbnail: '/x.png',
@@ -1584,6 +1603,8 @@ export function collectUserFacingTexts(): string[] {
       name: '丙',
       hasImage: true,
       hasPrimary: false,
+      primaryUsableForGeneration: false,
+      primaryReachabilityNote: '',
       hasImagePrompt: true,
       imageId: 9,
       thumbnail: '/y.png',
