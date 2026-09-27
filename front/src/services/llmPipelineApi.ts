@@ -939,6 +939,17 @@ export interface SubmitVideoResult {
   error?: string
   warnings?: string[]
   guard_status?: string
+  /** 本次使用的轮次（与请求一致）。 */
+  attempt?: number
+  /**
+   * true ＝ 后端命中了**同一轮**（同一镜头＋同一参数＋同一 attempt）已存在的任务，
+   * 直接复用：**没有**再调用供应商、没有产生新费用。页面据此如实提示，而不是当成"又生成了一次"。
+   */
+  deduplicated?: boolean
+  /** 本轮幂等键（同一轮重复提交是同一个键；点「重新生成」后变成新键）。不含任何凭证。 */
+  source_task_id?: string
+  /** 本轮落库的 generation_tasks.id：刷新页面后据此恢复任务状态。 */
+  task_id?: string
 }
 
 /**
@@ -947,6 +958,8 @@ export interface SubmitVideoResult {
  * 与 `/api/v1/film/tasks/video` 的区别：那条链路把任务丢给队列，本机没有 Redis / worker 时
  * 任务只会停在 pending（"点生成没反应"）。这条会真的等到结果。
  * DRY_RUN 下返回 `status: dry_run` 的占位结果，不花钱。
+ *
+ * `attempt`（第几轮）：同轮重复提交只会复用既有任务、不重复计费；点「重新生成」才 +1。
  */
 export function submitVideo(body: {
   shot_id: string
@@ -956,6 +969,7 @@ export function submitVideo(body: {
   ratio: string
   duration_seconds?: number
   timeout_seconds?: number
+  attempt?: number
 }): Promise<SubmitVideoResult> {
   return callApi('/api/v1/studio/image-pipeline/video-submit', body as AnyRecord)
 }

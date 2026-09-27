@@ -651,6 +651,16 @@ class VideoSubmitRequest(VideoSubmitPlanRequest):
     """直提出视频（受 DRY_RUN 守卫；默认被拦截）。"""
 
     timeout_seconds: float = Field(120.0, ge=1.0, le=3600.0, description="同步等待的墙钟上限")
+    attempt: int = Field(
+        0,
+        ge=0,
+        le=99,
+        description=(
+            "尝试序号（语义与 POST /submit 的 attempt **一致**）：同一序号＋同一参数＝同一轮，"
+            "重复提交不会重复付费（直接返回上一轮已建的任务，`deduplicated=true`）；"
+            "要真的再生成一次请把 attempt +1（页面上就是「重新生成」）"
+        ),
+    )
 
 
 class VideoPlanFrameRead(BaseModel):
@@ -793,6 +803,19 @@ class VideoSubmitRead(BaseModel):
     error: str = ""
     warnings: list[str] = Field(default_factory=list)
     guard_status: str = ""
+    attempt: int = Field(0, description="本次使用的尝试序号（与请求一致）")
+    deduplicated: bool = Field(
+        False,
+        description=(
+            "true ＝ **没有**调用供应商：命中了同一轮（同一镜头＋同一参数＋同一 attempt）"
+            "已存在的视频任务，直接复用它的结果/状态。用于刷新恢复与防重复计费"
+        ),
+    )
+    source_task_id: str = Field(
+        "",
+        description="本轮幂等键（同一轮重复提交是**同一个**键；点「重新生成」后会变成新键）。不含任何凭证，可安全展示/记录",
+    )
+    task_id: str = Field("", description="本轮落库的 generation_tasks.id（页面刷新后按它恢复任务状态）")
     note: str = (
         "直接提交路径不写库：结果地址仅在本响应中返回。"
         "需要长期资产请把该地址接入既有落库流程（files / shot.generated_video_file_id）。"

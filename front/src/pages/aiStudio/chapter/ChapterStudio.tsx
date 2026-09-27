@@ -3124,6 +3124,15 @@ function Inspector(props: {
     resolvedKeyframeRatio,
     keyframeResolutionProfile,
   )
+  /**
+   * 出视频的「第几轮」。
+   *
+   * 后端把「镜头 + 生成参数 + attempt」哈希成幂等键：**同一次**（同一 attempt）重复点生成
+   * 只会复用既有任务、不会重复计费；只有明确点「重新生成」把 attempt 加 1，才会真的
+   * 再调用一次供应商。用 ref 而不是 state 的原因：submit 回调是闭包，state 更新在同一个
+   * 事件里读不到新值，会出现"点了重新生成却还是复用了旧任务"。
+   */
+  const videoAttemptRef = useRef(0)
   const videoPromptDraft = useGenerationDraft<
     { prompt: string },
     { referenceMode: VideoReferenceMode; images: string[] },
@@ -3176,6 +3185,9 @@ function Inspector(props: {
         ratio,
         duration_seconds: Math.max(5, Number(shotDetail?.duration ?? 5) || 5),
         timeout_seconds: 900,
+        // 同一轮（同一 attempt）重复点生成 = 复用既有任务，不重复计费；
+        // 点「重新生成」才会把 attempt +1 → 换成一个新的幂等键。
+        attempt: videoAttemptRef.current,
       })
       if (result.status === 'dry_run') {
         // 演练模式：守卫拦下了真实调用。这不是错误，要说清楚而不是报红。
@@ -3186,6 +3198,22 @@ function Inspector(props: {
         )
         // 关键：把「被门禁阻止」和「没有任务 ID」区分开，否则调用方会再报一次红字。
         return { taskId: null, gated: true }
+      }
+      if (result.deduplicated) {
+        // 后端命中了同一轮的既有任务：**没有**再调供应商、没有产生新费用。
+        // 产物在首次提交时就已经落库并挂到本镜，所以这里**不再**重复登记（否则会多出
+        // 一条 files 记录 + 一个媒体对象）。
+        message.info(
+          '本轮已经提交过，直接复用既有任务，没有重复扣费。要真的再生成一次请点「重新生成」。',
+          8,
+        )
+        if (result.status === 'completed' && result.url) {
+          return {
+            taskId: selectedShot.generated_video_file_id?.trim() || null,
+            completed: true as const,
+            videoUrl: result.url,
+          }
+        }
       }
       if (result.status !== 'completed' || !result.url) {
         // 审计 §4.3 模式 3：`status=xxx` 属英文枚举原值直渲
@@ -4515,6 +4543,22 @@ function Inspector(props: {
         : { prompt: llmPrompt, images: videoPromptDraft.context.images, pack: null },
     })
     message.info('已切换为本次大模型生成结果')
+  }
+
+  /**
+   * 明确「重新生成」：把 attempt 加 1，换一个新的幂等键，才会真的再调用一次供应商。
+   *
+   * 为什么必须有这个按钮：没有它，用户在"结果不满意"时只能再点一次「生成」——而那是
+   * 同一轮，会被后端正确地判成复用（不重复扣费），于是表现为"点了没反应"。
+   * 语义要在这里说清楚：这是**会再花一次钱**的动作。
+   */
+  const regenerateVideoGeneration = async () => {
+    videoAttemptRef.current += 1
+    message.info(
+      `已开始第 ${videoAttemptRef.current + 1} 轮生成（重新生成会真的再调用一次视频供应商）。`,
+      6,
+    )
+    await submitVideoGeneration()
   }
 
   const submitVideoGeneration = async () => {
@@ -7574,6 +7618,15 @@ function Inspector(props: {
               onClick={() => void saveVideoPromptToShot()}
             >
               保存提示词
+            </Button>,
+            <Button
+              key="regenerate"
+              danger
+              loading={videoPromptPreviewSubmitting}
+              disabled={videoPromptSaving}
+              onClick={() => void regenerateVideoGeneration()}
+            >
+              重新生成（下一轮）
             </Button>,
             <Button
               key="submit"
