@@ -381,3 +381,39 @@ note: 这张图只存在本机（不是公网长期地址），**不能用于后
 - **④ 的另一半**：**已定版资产在「资产准备」列表行上**的直接标记还没接
   （需要把可达性字段接进 `asset-readiness` 这条读模型；本轮先落在"接口 + 结果卡片"）；
 - **⑤** 上游最小改动集（健康检查加可写性探测 + 403 归类）仍是待办（需上游配合）。
+
+---
+
+## 追加（第 15 轮）：定版图可达性接进资产工作台契约；页面标记复验**仍未通过**
+
+### 已落地并提交（`14c340f`）
+
+顺着"页面为什么没标记"的线索查到：第 2 步的资产列表吃的是 **`asset-workbench` 契约**
+（`AssetWorkbench.toSignalAssets`），不是 `asset-readiness`——所以第 14 轮只改 readiness 那条路，
+页面当然看不到。本轮把结论接到了契约上：
+
+- 后端 `asset_workbench.py`：拼 image 块时记下**定版图的 file_id**（多行 `is_primary` 取 id 最大的一行，
+  与页面「首选图」同口径），再批量查一次 `files.storage_key`，复用 `assess_storage_key` 给出
+  `primary_long_term_url` / `primary_usable_for_generation` / `primary_reachability_note`；未定版时一律空值/false；
+- `image_reachability.py` 抽出共享的 `storage_keys_by_file_id`，两个读模型共用同一处判定；
+- 前端 `toSignalAssets` 只搬运后端结论。
+
+真实接口核验：`GET /studio/chapters/{id}/asset-workbench` 22 项里，苏晚棠
+`primary_usable_for_generation=False` + 中文原因。测试：`test_asset_workbench.py` 9 项、
+前端 710 项通过。
+
+### ⚠️ 未通过：页面上的橙色标记仍然没出现
+
+复验方法：打开项目 → 点「资产准备」→ 截图 + 抓 body 文本（`64-asset-row-badge.png/.txt`），
+仍然只有「已定版 1」与「已定版」，**没有**「仅本机 · 不能用于后续生成」。
+
+已排除的渲染点（本轮实测）：
+
+- `AssetProductionArea.tsx` 的 `title: '定版'` 列 —— 我按 `dataSource={tabAssets}` 改过，页面未见；
+- `AssetWorkbench.tsx` 自身 —— 它只渲染 `Tag` 做统计，不渲染每行状态。
+
+缩小后的候选（下一轮用 DOM 定位确认）：`workbenchState.ts` 的 `WORKBENCH_STATUS_LABEL`
+（`primary: '已定版'`）的**实际消费方**、以及 `assetWorkbenchContract.ts:439` 那个降级视图里的 `已定版`。
+
+**因此 ④ 仍算未完成**：后端两级（`asset-readiness` + `asset-workbench`）结论都已在真实数据上成立，
+但"页面上显式标记"这条**没有证据**，不冒充通过。
