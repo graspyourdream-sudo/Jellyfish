@@ -1182,6 +1182,29 @@ export function describeFailureReason(result: Pick<SubmitResultLike, 'error_mess
   return '生成失败，但没有拿到具体原因；可在结果卡片上点「查看详情」核对。'
 }
 
+/**
+ * 这条结果能不能「采纳」。
+ *
+ * 真实演练（2026-09-27）暴露的阻塞：卡片上的采纳条件原本写死 `status === 'done'`，
+ * 于是"图已经生成、只是长期存储没成功（部分成功）"这条**明明有图**的结果没有采纳入口——
+ * 而它恰恰是花了钱、最需要被救回来的那一种。
+ * 后端那条记录的 `recoverable_hint` 写的就是"可以直接采纳它"，页面却给不出按钮。
+ *
+ * 口径：
+ * - 已采纳过 → 不再给（避免重复登记产物）；
+ * - 有**可用**图片地址（非空、且不是演练占位）→ 可以采纳（含部分成功）；
+ * - 其它（纯失败、没有图）→ 不给。
+ */
+export function canAdoptResult(
+  task: Pick<ProductionTask, 'status' | 'outcome' | 'imageUrl' | 'adoptedImageId'>,
+): boolean {
+  if (task.adoptedImageId !== null && task.adoptedImageId !== undefined) return false
+  const imageUrl = String(task.imageUrl || '').trim()
+  if (!imageUrl || isPlaceholderUrl(imageUrl)) return false
+  if (task.status === 'done') return true
+  return String(task.outcome || '') === 'partial_failed'
+}
+
 /** 失败原因 + （存储失败时的）"可能已计费"提醒；卡片用这个，别只写一句失败。 */
 export function describeFailureReasonWithStorageNote(
   result: Pick<SubmitResultLike, 'error_message' | 'message' | 'outcome'>,

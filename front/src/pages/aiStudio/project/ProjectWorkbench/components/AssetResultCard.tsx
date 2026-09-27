@@ -20,6 +20,7 @@ import {
 } from '@ant-design/icons'
 import {
   ASSET_TYPE_LABEL,
+  canAdoptResult,
   describeStorageReachability,
   describeTaskStatus,
   isPlaceholderUrl,
@@ -98,7 +99,8 @@ export function AssetResultCard(props: AssetResultCardProps) {
       })
     : null
   const promptBlocked = promptQualityVerdict?.status === 'unusable'
-  const canAdopt = task.status === 'done' && !task.adoptedImageId
+  // 采纳条件走纯函数：部分成功（有图但存储没成功）同样必须能采纳 —— 那张图已经计费了
+  const canAdopt = canAdoptResult(task)
   // 「设为定版」在结果可用时就可以点：它内部会先把这张保存进资产、再设为定版；
   // 资产已有定版时会先弹二次确认（硬边界 B），不会静默替换。
   // 注意：提示词不可用**不拦**这一步 —— 那是"采纳已经生成的这张图"，不是再花钱出图。

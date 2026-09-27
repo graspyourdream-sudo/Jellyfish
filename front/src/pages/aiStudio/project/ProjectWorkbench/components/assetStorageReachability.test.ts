@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  canAdoptResult,
   describeFailureReasonWithStorageNote,
   describeStorageReachability,
 } from './assetProduction.ts'
@@ -76,4 +77,61 @@ test('存储失败且拿不到本机图 → 失败原因里必须提醒"可能�
 test('非存储类失败不追加这个提醒（不许到处加噪音）', () => {
   const text = describeFailureReasonWithStorageNote({ outcome: 'failed' })
   assert.doesNotMatch(text, /已经计费/)
+})
+
+// —— 采纳入口：部分成功（有图）也必须能采纳 ——
+
+test('部分成功且图可取 → 可以采纳（这正是花了钱要救回来的那种）', () => {
+  assert.equal(
+    canAdoptResult({
+      status: 'failed',
+      outcome: 'partial_failed',
+      imageUrl: '/images/乌鸦_主图_01_03.png',
+      adoptedImageId: null,
+    }),
+    true,
+  )
+})
+
+test('纯失败、没有图 → 不给采纳入口', () => {
+  assert.equal(
+    canAdoptResult({ status: 'failed', outcome: 'failed', imageUrl: '', adoptedImageId: null }),
+    false,
+  )
+})
+
+test('演练占位图 → 不给采纳入口', () => {
+  assert.equal(
+    canAdoptResult({
+      status: 'failed',
+      outcome: 'partial_failed',
+      imageUrl: 'https://dry-run.invalid/x.png',
+      adoptedImageId: null,
+    }),
+    false,
+  )
+})
+
+test('已经采纳过 → 不再重复给（避免重复登记产物）', () => {
+  assert.equal(
+    canAdoptResult({
+      status: 'done',
+      outcome: 'ok',
+      imageUrl: 'https://cdn.example.com/a.png',
+      adoptedImageId: 46,
+    }),
+    false,
+  )
+})
+
+test('正常成功且有图 → 可以采纳', () => {
+  assert.equal(
+    canAdoptResult({
+      status: 'done',
+      outcome: 'ok',
+      imageUrl: 'https://cdn.example.com/a.png',
+      adoptedImageId: null,
+    }),
+    true,
+  )
 })
