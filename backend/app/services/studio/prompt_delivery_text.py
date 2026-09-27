@@ -212,7 +212,12 @@ def build_jurilu_prompt_export_document(
 
 
 def render_binding_lines(row: dict[str, Any]) -> list[str]:
-    """把一行镜头里已绑定的资产渲染成交付文本行（无绑定时返回空列表）。"""
+    """把一行镜头里已绑定的资产渲染成交付文本行（无绑定时返回空列表）。
+
+    槽位与中文标签必须与 ``bound_asset_files.SLOT_LABELS`` / ``prompt_delivery._BINDING_SLOTS``
+    同口径（含商品）。本模块刻意只依赖标准库，所以这里不 import 那两处，
+    改槽位时三处一起改（``tests/test_product_prompt_delivery.py`` 会钉住一致性）。
+    """
     bound = row.get("bound_assets")
     if not isinstance(bound, dict) or not bound:
         return []
@@ -221,6 +226,7 @@ def render_binding_lines(row: dict[str, Any]) -> list[str]:
         ("scene", "场景"),
         ("props", "道具"),
         ("costumes", "服装"),
+        ("products", "商品"),
     )
     lines: list[str] = []
     for key, label in labels:

@@ -137,7 +137,7 @@ async def fetch_delivery_rows(
             }
         )
 
-    # 绑定资产：交付文本要带出「这条提示词对应哪些角色/场景/道具/服装」
+    # 绑定资产：交付文本要带出「这条提示词对应哪些角色/场景/道具/服装/商品」
     shot_ids = [row["shot_id"] for row in rows]
     bound = await fetch_bound_asset_names(db, shot_ids=shot_ids)
     # 绑定素材的真实文件：名称之外必须能落到 file_id（用户要求）
@@ -151,12 +151,18 @@ async def fetch_delivery_rows(
     return rows
 
 
-# 槽位 key 与交付文本里的中文标签一一对应（渲染在 prompt_delivery_text.render_binding_lines）
+# 槽位 key 与交付文本里的中文标签一一对应（渲染在 prompt_delivery_text.render_binding_lines）。
+#
+# 含 ``products`` 的理由：**同一个交付文本的"实际文件段"早就带商品了**
+# （``bound_asset_files.SLOT_ASSET_TYPE`` 有 ``products → product``），
+# 如果名称段还停在四类，同一份交付里就会出现"文件段有商品、名称段没有商品"，
+# 用户会以为商品没绑上。两段必须同口径，所以槽位表照 ``bound_asset_files`` 对齐。
 _BINDING_SLOTS: tuple[tuple[str, str, str], ...] = (
     ("characters", "shot_character_links", "character_id"),
     ("scene", "project_scene_links", "scene_id"),
     ("props", "project_prop_links", "prop_id"),
     ("costumes", "project_costume_links", "costume_id"),
+    ("products", "project_product_links", "product_id"),
 )
 
 
@@ -165,13 +171,18 @@ async def fetch_bound_asset_names(
 ) -> dict[str, dict[str, list[str]]]:
     """按 shot_id 取已绑定资产**名称**（交付文本要的是名字，不是内部 ID）。
 
-    四类各一条查询（角色走 shot_character_links，其余走 project_*_links），
+    每类各一条查询（角色走 shot_character_links，其余走 project_*_links），
     只读、只 join 名称列，避免逐镜头开查询。
+
+    商品同理：``project_product_links`` 是全局商品与项目的**唯一**关联入口
+    （``products`` 表本身没有 project_id），``shot_id`` 非空即表示"这一镜出现商品"。
     """
     from app.models.studio import (
         Character,
         Costume,
+        Product,
         ProjectCostumeLink,
+        ProjectProductLink,
         ProjectPropLink,
         ProjectSceneLink,
         Prop,
@@ -184,9 +195,9 @@ async def fetch_bound_asset_names(
         return result
 
     def bucket(shot_id: str) -> dict[str, list[str]]:
-        return result.setdefault(
-            shot_id, {"characters": [], "scene": [], "props": [], "costumes": []}
-        )
+        # 桶的 key 由 _BINDING_SLOTS 推导：两处各写一遍迟早会漏一类，
+        # 漏了的结果是"名称段少一行"而没有任何报错。
+        return result.setdefault(shot_id, {slot: [] for slot, _, _ in _BINDING_SLOTS})
 
     char_rows = (
         await db.execute(
@@ -231,6 +242,17 @@ async def fetch_bound_asset_names(
     for shot_id, name in costume_rows:
         if name and str(name) not in bucket(str(shot_id))["costumes"]:
             bucket(str(shot_id))["costumes"].append(str(name))
+
+    product_rows = (
+        await db.execute(
+            select(ProjectProductLink.shot_id, Product.name)
+            .join(Product, Product.id == ProjectProductLink.product_id)
+            .where(ProjectProductLink.shot_id.in_(shot_ids))
+        )
+    ).all()
+    for shot_id, name in product_rows:
+        if name and str(name) not in bucket(str(shot_id))["products"]:
+            bucket(str(shot_id))["products"].append(str(name))
 
     return result
 

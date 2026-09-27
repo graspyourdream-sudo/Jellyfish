@@ -294,7 +294,7 @@ class VideoPromptPreviewRead(BaseModel):
 # P2 资产绑定预览
 # ---------------------------------------------------------------------------
 
-BindingSlotLiteral = Literal["characters", "scene", "props", "costumes"]
+BindingSlotLiteral = Literal["characters", "scene", "props", "costumes", "products"]
 BindingAgreementLiteral = Literal["both", "llm_only", "conflict", "heuristic_only"]
 BindingTierLiteral = Literal["auto", "review", "discard"]
 
@@ -315,7 +315,7 @@ class BindingCandidateRead(BaseModel):
     """候选资产（asset_id 只能从这里选）。"""
 
     asset_id: str
-    asset_type: str = Field(..., description="character / scene / prop / costume")
+    asset_type: str = Field(..., description="character / scene / prop / costume / product")
     name: str
     aliases: list[str] = Field(default_factory=list)
     description: str = ""

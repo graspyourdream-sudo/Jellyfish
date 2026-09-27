@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.studio.cast import ShotCharacterLinkCreate
@@ -13,6 +14,7 @@ from app.schemas.studio.shots import (
     ShotPreparationLinkEntityType,
     ShotPreparationStateRead,
 )
+from app.services.common import invalid_choice
 from app.services.studio.action_beats import infer_action_beat_sequence
 from app.services.studio.shot_assets import create_project_asset_link
 from app.services.studio.shot_details import get as get_shot_detail
@@ -21,6 +23,19 @@ from app.services.studio.shot_assets_overview import get_shot_assets_overview
 from app.services.studio.shot_dialogs import list_by_shot as list_saved_dialog_lines_by_shot
 from app.services.studio.shot_extracted_dialogue_candidates import list_by_shot as list_dialogue_candidates_by_shot
 from app.services.studio.shots import build_shot_read, get as get_shot
+
+#: 准备页里"走项目-章节-镜头资产关联表"的实体类型 → ``create_project_asset_link`` 的 entity_type。
+#:
+#: 为什么显式列出、而不是"不是角色就走资产关联"的兜底：兜底会把**未知类型**原样透传给
+#: ``shot_assets._link_spec``，那边只能回一句 invalid_choice，出错点离调用处很远。
+#: 显式表还有个好处：新增类型漏登记时，这里第一时间报出具体是哪个类型没接。
+#: 商品（product）落 ``project_product_links``，与场景/道具/服装同一条路径。
+_ASSET_LINK_ENTITY_TYPES: dict[ShotPreparationLinkEntityType, str] = {
+    ShotPreparationLinkEntityType.scene: "scene",
+    ShotPreparationLinkEntityType.prop: "prop",
+    ShotPreparationLinkEntityType.costume: "costume",
+    ShotPreparationLinkEntityType.product: "product",
+}
 
 
 async def build_shot_preparation_state(
@@ -101,9 +116,17 @@ async def link_existing_asset_for_preparation(
             ),
         )
     else:
+        link_entity_type = _ASSET_LINK_ENTITY_TYPES.get(entity_type_value)
+        if link_entity_type is None:  # pragma: no cover - 枚举已收口，这里只防新增成员漏登记
+            # 出错信息列的是**接口整体接受的取值**（含 character），而不是本表缺的那一项：
+            # 调用方要的是"能用什么"，不是"内部哪张表没登记"。
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=invalid_choice("entity_type", [item.value for item in ShotPreparationLinkEntityType]),
+            )
         await create_project_asset_link(
             db,
-            entity_type=entity_type_value.value,
+            entity_type=link_entity_type,
             body=ProjectAssetLinkCreate(
                 project_id=project_id,
                 chapter_id=chapter_id,
