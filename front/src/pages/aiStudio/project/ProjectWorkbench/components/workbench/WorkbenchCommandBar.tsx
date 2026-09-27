@@ -173,7 +173,22 @@ export function WorkbenchCommandBar(props: WorkbenchCommandBarProps) {
       {/* 四类数量 + 七个业务状态计数 */}
       <div className="mt-1 flex flex-wrap items-center gap-1">
         {WORKBENCH_TABS.map((tab) => (
-          <Tag key={tab} bordered={false} color={tab === activeTab ? 'blue' : undefined}>
+          /*
+            这四个标签以前是**纯展示**的（`Tag` 没有 onClick，`onSelectTab` 收到了却从没被调用），
+            于是第 2 步的资产网格永远只显示「人物」：场景/道具/服装只有计数、点不动，
+            用户没法给它们生成图片或设成定版 —— 而这一步自己的说明写的是
+            「整理人物、场景、道具、服装 → … → 生成或上传图片 → 设为定版」。
+            现在把它接上真正的切换（`itemsForTab` 早已按类型过滤，只差这一个回调）。
+          */
+          <Tag
+            key={tab}
+            bordered={false}
+            color={tab === activeTab ? 'blue' : undefined}
+            onClick={() => onSelectTab(tab)}
+            role="button"
+            aria-pressed={tab === activeTab}
+            style={{ cursor: 'pointer' }}
+          >
             {`${WORKBENCH_TAB_LABEL[tab]} ${typeCounts[tab]}`}
           </Tag>
         ))}
