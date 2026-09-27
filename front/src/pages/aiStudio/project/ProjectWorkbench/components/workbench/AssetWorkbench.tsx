@@ -86,6 +86,16 @@ export type AssetWorkbenchProps = {
   loading: boolean
   /** 采纳 / 定版 / 保存提示词后重算步骤信号 */
   onReload: () => void
+  /**
+   * 挂载时停在哪个页签（由 `?tab=` 决定，见 `ProjectWorkbench/utils/assetSubTab.ts`）。
+   *
+   * 为什么必须从外面给：商品卡片的「上传图片 / 设为定版」会跳到资产编辑页并带上
+   * `returnTo=…&tab=products`；返回是一次**重新挂载**，这里若不认这个参数，
+   * 用户就会落回"人物"页签、看不到刚编辑的商品。
+   */
+  initialTab?: WorkbenchAssetType
+  /** 用户切换页签时把新值写回 URL（`?tab=`），保证地址栏与页面说的是一致的。 */
+  onTabChange?: (tab: WorkbenchAssetType) => void
   /** 打开既有资产编辑页 */
   onOpenAssetEditor: (asset: ProjectSignalAsset, options?: { generate?: boolean }) => void
   /**
@@ -99,7 +109,17 @@ export type AssetWorkbenchProps = {
 }
 
 export function AssetWorkbench(props: AssetWorkbenchProps) {
-  const { projectId, chapter, assets, loading, onReload, onOpenAssetEditor, onOpenLegacyExtractConfirm } = props
+  const {
+    projectId,
+    chapter,
+    assets,
+    loading,
+    onReload,
+    initialTab,
+    onTabChange,
+    onOpenAssetEditor,
+    onOpenLegacyExtractConfirm,
+  } = props
 
   const [contractData, setContractData] = useState<AssetWorkbenchResponse | null>(null)
   const [contractFailed, setContractFailed] = useState('')
@@ -107,7 +127,18 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
   const [analysisRunning, setAnalysisRunning] = useState(false)
   /** 「生成图片提示词」面板开关（只带选中的资产；里面那次点击才会真正调用模型） */
   const [promptPanelOpen, setPromptPanelOpen] = useState(false)
-  const [tab, setTab] = useState<WorkbenchAssetType>('character')
+  /**
+   * 当前页签。初值由 `?tab=` 决定（商品编辑页返回时必须落回商品页签），
+   * 之后用户点击切页签会把新值写回 URL —— 地址栏与本屏说的始终是同一件事。
+   */
+  const [tab, setTabState] = useState<WorkbenchAssetType>(initialTab ?? 'character')
+  const setTab = useCallback(
+    (next: WorkbenchAssetType) => {
+      setTabState(next)
+      onTabChange?.(next)
+    },
+    [onTabChange],
+  )
   const [selectedKeys, setSelectedKeys] = useState<string[]>([])
   const [scriptCollapsed, setScriptCollapsed] = useState(false)
   const [detailItem, setDetailItem] = useState<AssetWorkbenchItem | null>(null)

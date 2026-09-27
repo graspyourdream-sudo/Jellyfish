@@ -44,6 +44,16 @@ import { AssetWorkbench } from './components/workbench/AssetWorkbench'
 import { ProjectStudioStepPanel } from './components/ProjectStudioStepPanel'
 import { EpisodeVideoPromptBoard } from './components/EpisodeVideoPromptBoard'
 import { ProjectDevInfo } from './components/ProjectDevInfo'
+import {
+  ASSET_SUB_TAB_LABELS,
+  DEFAULT_ASSET_SUB_TAB,
+  LEGACY_PANEL_ASSET_SUB_TABS,
+  assetSubTabToWorkbenchTab,
+  isAssetSubTab,
+  resolveLegacyPanelSubTab,
+  type AssetSubTab,
+  WORKBENCH_TAB_TO_ASSET_SUB_TAB,
+} from './utils/assetSubTab'
 
 const STEP_PARAM = 'step'
 const CHAPTER_PARAM = 'chapter'
@@ -72,21 +82,14 @@ const LEGACY_TAB_TO_STEP: Partial<Record<TabKey, ProjectStepKey>> = {
   actors: 'extract_assets',
 }
 
-/** 「提取资产」的子页签沿用 `?tab=` 参数，保证 `?tab=roles&create=1` 这类旧链接继续生效。 */
-const ASSET_SUB_TABS = ['roles', 'scenes', 'props', 'costumes', 'actors'] as const
-type AssetSubTab = (typeof ASSET_SUB_TABS)[number]
-const DEFAULT_ASSET_SUB_TAB: AssetSubTab = 'roles'
-const ASSET_SUB_TAB_LABELS: Record<AssetSubTab, string> = {
-  roles: '角色',
-  scenes: '场景',
-  props: '道具',
-  costumes: '服装',
-  actors: '演员',
-}
-
-function isAssetSubTab(value: string | null): value is AssetSubTab {
-  return value !== null && (ASSET_SUB_TABS as readonly string[]).includes(value)
-}
+/**
+ * 「提取资产」的子页签沿用 `?tab=` 参数，保证 `?tab=roles&create=1` 这类旧链接继续生效。
+ *
+ * 词汇表本身搬到了 `utils/assetSubTab.ts`（纯逻辑 + 单测）：同一份词汇还被
+ * **资产编辑页往返**使用（`?step=extract_assets&tab=products`）。此前这里少了 `products`，
+ * 于是商品编辑页返回时参数被丢掉、落回"人物"页签。详见该模块的文件头。
+ */
+const LEGACY_PANEL_SUB_TABS = LEGACY_PANEL_ASSET_SUB_TABS
 
 /** 旧功能页（原 10 个 Tab 里不参与六步流程的部分）→ 保留为「其他」下拉入口 */
 const LEGACY_PANEL_TABS: { key: TabKey; label: string }[] = [
@@ -107,6 +110,18 @@ const ProjectWorkbench: React.FC = () => {
   const tabFromUrl = searchParams.get(TAB_PARAM)
   const legacyTab: TabKey | null = tabFromUrl !== null && isTabKey(tabFromUrl) ? tabFromUrl : null
   const assetSubTab: AssetSubTab = isAssetSubTab(tabFromUrl) ? tabFromUrl : DEFAULT_ASSET_SUB_TAB
+  /**
+   * 第 2 步主界面（`AssetWorkbench`）该停在哪个页签。
+   *
+   * 为什么由 URL 决定而不是工作台自己 `useState('character')`：
+   * 商品卡片上的「上传图片 / 设为定版」会跳到资产编辑页并带上
+   * `returnTo=/projects/<id>?step=extract_assets&tab=products`。
+   * 返回是一次**重新挂载**，若工作台不读这个参数，用户就会落回"人物"页签、
+   * 看不到自己刚编辑的商品（URL 里明明写着 products）。
+   */
+  const workbenchInitialTab = assetSubTabToWorkbenchTab(tabFromUrl)
+  /** 旧「提取确认页」自己那排 Segmented 的值（它渲染不了商品那一栏，明确回落）。 */
+  const legacyPanelSubTab = resolveLegacyPanelSubTab(assetSubTab)
   const mappedStepFromLegacyTab: ProjectStepKey | null = legacyTab
     ? LEGACY_TAB_TO_STEP[legacyTab] ?? null
     : null
@@ -430,12 +445,15 @@ const ProjectWorkbench: React.FC = () => {
               <span className="text-xs text-gray-500">写入前的人工确认：关联已有资产或新建。</span>
               <Segmented
                 size="small"
-                value={assetSubTab}
+                /* 这一页底部只有角色/场景/道具/服装/演员五栏（没有商品那一栏），
+                   所以 URL 里是 `tab=products` 时明确回落到「角色」，
+                   而不是让 Segmented 显示一个**选了却什么都没有**的空选项。 */
+                value={legacyPanelSubTab}
                 onChange={(value) => {
                   const nextSubTab = String(value)
                   if (isAssetSubTab(nextSubTab)) setAssetSubTab(nextSubTab)
                 }}
-                options={ASSET_SUB_TABS.map((key) => ({
+                options={LEGACY_PANEL_SUB_TABS.map((key) => ({
                   label: ASSET_SUB_TAB_LABELS[key],
                   value: key,
                 }))}
@@ -448,11 +466,11 @@ const ProjectWorkbench: React.FC = () => {
               onReload={reloadSignals}
             />
             <div className="mt-3 min-h-0">
-              {assetSubTab === 'roles' && <RolesTab />}
-              {assetSubTab === 'scenes' && <ScenesTab />}
-              {assetSubTab === 'props' && <PropsTab />}
-              {assetSubTab === 'costumes' && <CostumesTab />}
-              {assetSubTab === 'actors' && <ActorsTab />}
+              {legacyPanelSubTab === 'roles' && <RolesTab />}
+              {legacyPanelSubTab === 'scenes' && <ScenesTab />}
+              {legacyPanelSubTab === 'props' && <PropsTab />}
+              {legacyPanelSubTab === 'costumes' && <CostumesTab />}
+              {legacyPanelSubTab === 'actors' && <ActorsTab />}
             </div>
           </div>
         )
@@ -471,6 +489,9 @@ const ProjectWorkbench: React.FC = () => {
           detail={stepDetail}
           loading={signalsLoading}
           onReload={reloadSignals}
+          /* 页签由 URL 驱动：商品编辑页返回时才能落回商品页签（见上面 workbenchInitialTab 的说明）。 */
+          initialTab={workbenchInitialTab}
+          onTabChange={(next) => setAssetSubTab(WORKBENCH_TAB_TO_ASSET_SUB_TAB[next])}
           onOpenAssetEditor={openAssetEditor}
           onOpenLegacyExtractConfirm={() =>
             updateSearchParams((next) => {
