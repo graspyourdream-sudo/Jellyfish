@@ -23,3 +23,17 @@
     ./backend/.venv/bin/python tools/browser_acceptance_drama_ad.py --seed-plan --out <仓库外的目录>
 
 去掉 `--seed-plan` 并在用户逐次授权后加 `--real-calls`，就是**真实验收**（见末尾说明）。
+
+## 环境版本（本地独立 venv，必须与已验证工作区一致）
+
+后端依赖版本直接决定测试结果：本机独立 venv 一开始装到 `fastapi 0.141.1`，
+其 `include_router` **不再把子路由摊平进 `app.routes`**，于是
+`test_product_extraction::test_extract_endpoint_is_registered_once_with_paid_outlet_doc`
+取到空数组（端点本身在运行中的服务上是可用的）。对齐到已验证工作区的版本后消除：
+
+    fastapi 0.135.1 / starlette 0.52.1 / sqlalchemy 2.0.48 / pydantic 2.12.5
+    pytest 9.0.2 / pytest-asyncio 1.3.0 / aiosqlite 0.22.1 / httpx 0.28.1
+    uvicorn 0.41.0 / celery 5.6.3 / langchain 1.2.10 / langgraph 1.0.10
+
+前端：`antd ^5.29.3`（源码用了 5.16 才有的 `Card.styles`）+ `@types/node`，
+已写入 `package.json` 与 `pnpm-lock.yaml`；`pnpm install --frozen-lockfile` 可复现。
