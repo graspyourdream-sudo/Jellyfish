@@ -200,3 +200,62 @@ pr41 实际装 `5.29.3` / `5.9.3`。即 **`pnpm install --frozen-lockfile` 装�
 
 - 最终守卫：`mode=dry_run`、`is_real_mode=false`、`dotenv_real_mode=false`、**四出口全 blocked**；无 `.env` 落盘。
 - 分支 `feat/main-flow-closure`：本地 = 远端 = 推送见报告。
+
+---
+
+## 追加：视频幂等落地 + 1 次被授权的 S001 真实出视频（2026-09-27）
+
+### 一、先补产品缺口：视频提交幂等（`S001-VIDEO-IDEM`）
+
+真实演练里踩到过的问题：视频提交**没有任何请求标识**，所以「请求发出去了但没等到回复」
+（网络断、浏览器被关、前端超时重试）之后就**无法判断上游是否已经建了任务**，重试＝再花一次钱。
+
+- `b1a9bf8` 后端 + 前端主体：键 = `sha256(镜头 + 真正发给上游的生成参数 + attempt)` 前 16 位，
+  落在既有 `generation_tasks.payload.run_args.idempotency_key`（**不改表结构**）；
+  同键命中就直接复用（`deduplicated=true`），同键用进程内锁串行化（并发只建一个上游任务）；
+  **发请求前**先落一条 running 任务行，因此"发出去了但没回"也能被同一轮的下一次提交识别出来；
+- `2c50cc7` 补：提示语改成业务说法（主区禁词「供应商」被前端文案守卫抓到）；
+- `a6d750f` 补：第 5 步真正花钱的主入口 `useShotRequestPlan.doGenerate()` 接上轮次，
+  并新增「重新生成（下一轮）」——只有它加轮次（此前"不满意再来一次"只能重复点生成，而那是同一轮，
+  会被正确地判成复用，表现为"点了没反应"）。
+
+测试：`backend/tests/test_video_submit_idempotency.py` 7 项（重复/并发/跨会话刷新恢复/明确重新生成/
+键稳定性/落库不含凭证）全通过；相关既有后端套件 99 项通过；前端 704 项全通过、`tsc` 对改动文件无错误。
+
+顺带发现并修掉一处安全卫生问题（**已单独报备**）：旧视频任务行 payload 里**明文存着 api_key**；
+新路径写库前经 `strip_credentials` 剔除凭证字段，并加了回归测试。
+
+### 二、1 次被授权的 S001 真实出视频（B 方案 a，已按授权执行 1 次、无重试）
+
+- 镜头：S001 `e76f2246-8105-4623-b049-0ca1cbb4d0f6`（第1集·试稿），参考方式**纯文本**（首帧缺失时页面会正确拦住生成）；
+- 页面驱动（不是手工调接口）：从「分镜工作室」第 5 步点「生成视频」；
+- 结果：`status=completed`、上游任务号 **`task_01M3GK5WC8EEWWETFT4CZFA82J`**、
+  `elapsed_ms=170309`（约 170s）、`provider_task_id` 与 `task_id=304a4da14218449c8a8fd57bfdf63861` 均落库；
+- 写回：`shots.generated_video_file_id = 269ae0e5-6247-4ea5-b536-9a0bec8bdd5d`（新增 1 条 `files`，139→140）；
+- 刷新复核：重新打开页面 → 点选 S001 → 主预览播放器载入这条视频（`0.0 / 12.0s`），
+  截图 `~/Desktop/jellyfish-flow-evidence/61-recovery-2-panel6-video-visible.png`；
+- 不重复计费：用**真实库 + 真实代码路径**按页面那次提交的键 `vid-c94c0019ddaa4622` 查询，
+  命中 `succeeded` 任务行（在可复用白名单里）→ 同一轮重复提交会直接复用、不再调上游；
+  复核前后 `files=140`、`video_generation_tasks=13` 均未增加；
+- 媒体对象配额：本轮共新增 **1 个**（视频），未超；没有第二次提交、没有重试；
+- 收尾：守卫已恢复 `mode=dry_run` / `is_real_mode=false` / **四个出口全部 blocked**。
+
+证据目录：`~/Desktop/jellyfish-flow-evidence/`（`59-rehearsal-*` 演练、`60-paid-*` 真实提交、
+`61-recovery-*` 刷新恢复）。
+
+### 三、本轮**未完成**的图片闭环项（如实记录，不冒充已完成）
+
+上游 OSS 403 的落点已定位：`人物及场景生产项目/src/ossUploader.js` 的
+`uploadImageToOss` → `putBuffer`（带签名的 `PUT Object`）——**已经过了"配置完整"检查**
+（`ossConfig().configured` 为真才走到这一步），是**写入授权**被拒，不是"没配置"；
+上游 `/api/service/health` 目前只报 `oss.configured / missing / public_base_url`，**不报可写性**，
+所以"已配置 ≠ 可写"这一点上游还看不出来。
+
+因此下列要求尚未落地（下一轮继续，均为免费改动）：
+① 出图提交前的**免费存储预检**（不可写则拦下并给中文修复文案）；
+② 生成成功但存储失败时返回**部分成功**并带上可恢复信息；
+③ 用页面从结果卡片里恢复/采纳/设为主图（不靠手工调接口、不读对方库）；
+④ 定版图不可公网访问时，**显式标记为不可用于后续生成**；
+⑤ 需要上游配合的最小改动集：健康检查增加"可写性"探测（探针或最小写删自检）＋把 403 原文归类为可读原因。
+需总控侧同步的接口字段：`VideoSubmitRequest.attempt`、`VideoSubmitRead.{attempt,deduplicated,source_task_id,task_id}`
+（**本分支未重新生成 OpenAPI**）。
