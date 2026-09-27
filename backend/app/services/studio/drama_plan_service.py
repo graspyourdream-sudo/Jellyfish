@@ -55,6 +55,7 @@ from app.schemas.studio.drama_plan import (
 from app.services.studio import drama_consistency
 from app.services.studio import drama_plan_drafts as drafts
 from app.services.studio import drama_plan_materialize as materialize
+from app.services.studio import product_card_service
 from app.services.studio.llm_orchestration import drama_plan as orchestration
 from app.services.studio.llm_orchestration import drama_story as story_stages
 
@@ -317,6 +318,12 @@ def _read_payload(chapter: Chapter, row: Any, *, note: str) -> dict[str, Any]:
         meta=dict(row.meta or {}),
         claim_expires_at=_iso(row.claim_expires_at),
         updated_at=_iso(row.updated_at),
+        # 确认状态与落库统计：刷新后页面靠它们认出"这一集已经确认过了"，
+        # 从而把主按钮换成「继续准备资产」而不是又回到「确认策划」。
+        story_status=str(row.story_status or "none"),
+        confirmed_at=_iso(row.confirmed_at),
+        materialized_at=_iso(row.materialized_at),
+        materialize_summary=dict(row.materialize_summary or {}),
         note=note,
     ).model_dump()
 
@@ -371,6 +378,20 @@ async def generate(
 
     row, token = await drafts.claim_for_generate(db, chapter_id=chapter_id)
     brief = dict(row.brief or {})
+    # **商品卡是生成剧情的输入**（契约 §二：商品卡 → 分层剧情）。
+    # brief 是在创建项目那一刻写的，那时卡还是空的；用户后来确认的商品卡必须盖上来，
+    # 否则模型拿不到名称 / 卖点 / 人群，就会自己编一个商品（实测真机跑出过
+    # 「花漾焕颜精华露」，而用户确认的卡里写的是「紧致焕颜精华」）。
+    # 覆盖层只认**已确认**的卡、且空字段不覆盖，详见 `product_card_service.brief_overlay`。
+    overlay = await product_card_service.brief_overlay(db, project_id=chapter.project_id)
+    if overlay:
+        merged = {**brief, **overlay}
+        merged["forbidden_elements"] = list(
+            dict.fromkeys(
+                [*list(brief.get("forbidden_elements") or []), *list(overlay.get("forbidden_elements") or [])]
+            )
+        )
+        brief = merged
     previous_plan = dict(row.plan or {})
     previous_flags = dict(row.stale_flags or {})
     started_at = _now()

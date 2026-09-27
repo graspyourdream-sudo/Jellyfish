@@ -52,6 +52,44 @@ def _is_blank(value: Any) -> bool:
     return False
 
 
+async def brief_overlay(db: AsyncSession, *, project_id: str) -> dict[str, Any]:
+    """商品卡 → 策划 brief 的**覆盖层**（生成剧情时用；不落库）。
+
+    为什么必须有这一层（实测踩到的坑）：需求写的是「商品卖点 → 一次模型调用出剧情方案」，
+    但剧情生成读的是 ``drama_plan_drafts.brief``，而 brief 是在**创建项目那一刻**写的 ——
+    那时商品卡还是空的（粘贴的资料只登记成"资料来源"）。用户后来确认的商品卡
+    （名称 / 卖点 / 人群 / 合规要求）**一个字都没进模型输入**，于是模型自己编了一个商品：
+    实测真机跑出来的是「花漾焕颜精华露」，而用户确认的卡里写的是「紧致焕颜精华」。
+
+    所以"生成剧情"这一步要把**已确认的商品卡**盖到 brief 上：
+
+    - ``name`` / ``selling_points`` / ``audience`` / ``notes`` 直接映射到 brief 的
+      ``product_name`` / ``selling_points`` / ``target_audience`` / ``product_description``；
+    - ``compliance``（禁止表达）**追加**到 ``forbidden_elements``（不是覆盖：brief 里用户
+      自己写的"必须/禁止"是导演要求，与合规要求并存）；
+    - **卡片为空就不覆盖**：用户可能只在 brief 里写了商品名，那一次也不该被清空。
+
+    只认**已确认**的卡：没确认的卡是"还在改的草稿"，拿它去生成等于把未定稿的输入当事实。
+    """
+    card = await get_card(db, project_id=project_id)
+    if card is None or not bool(card.confirmed):
+        return {}
+    overlay: dict[str, Any] = {}
+    if not _is_blank(card.name):
+        overlay["product_name"] = str(card.name).strip()
+    points = [str(item).strip() for item in (card.selling_points or []) if str(item).strip()]
+    if points:
+        overlay["selling_points"] = points
+    if not _is_blank(card.audience):
+        overlay["target_audience"] = str(card.audience).strip()
+    if not _is_blank(card.notes):
+        overlay["product_description"] = str(card.notes).strip()
+    compliance = [item.strip() for item in str(card.compliance or "").splitlines() if item.strip()]
+    if compliance:
+        overlay["forbidden_elements"] = compliance
+    return overlay
+
+
 def compute_missing(fields: dict[str, Any]) -> tuple[list[str], list[str]]:
     """算出缺项键与中文名（顺序稳定，页面可直接渲染）。"""
     missing = [key for key in EDITABLE_CARD_FIELDS if key != "confirmed" and _is_blank(fields.get(key))]

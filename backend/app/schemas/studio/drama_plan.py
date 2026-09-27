@@ -257,6 +257,22 @@ class DramaPlanRead(BaseModel):
     meta: dict[str, Any] = Field(default_factory=dict, description="运行元信息（不含任何密钥）")
     claim_expires_at: str = Field("", description="生成中租约的到期时间（ISO 串，空 = 无租约）")
     updated_at: str = Field("", description="草稿行最后更新时间（ISO 串）")
+    # ------------------------------------------------------------------
+    # 策划确认状态：**必须下发**，否则"刷新回到正确阶段"做不到。
+    #
+    # 实测踩到的坑：确认落库之后刷新页面，底部主按钮又变回「确认策划」——
+    # 因为前端只能从草稿读到"生成状态"，读不到"人确认过没有"。
+    # 契约要求刷新/重开后仍回到该项目的正确阶段，所以确认状态与落库统计
+    # （§一.3 那几列的存在意义就是"供幂等复核与页面回显"）都要读出来。
+    # ------------------------------------------------------------------
+    story_status: str = Field(
+        "none", description="策划确认状态：none=未确认 / draft=人工改过未确认 / confirmed=已确认"
+    )
+    confirmed_at: str = Field("", description="策划确认时间（ISO 串，空 = 未确认）")
+    materialized_at: str = Field("", description="落库时间（ISO 串，空 = 未落库）")
+    materialize_summary: dict[str, Any] = Field(
+        default_factory=dict, description="落库统计（镜头/资产/关联行/跳过项），页面刷新后回显"
+    )
     note: str = Field("", description="边界说明")
 
 
