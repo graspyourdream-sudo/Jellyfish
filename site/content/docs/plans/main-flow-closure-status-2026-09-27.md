@@ -949,3 +949,35 @@ DOM 实测（`77-tab-probe.json`）：
 但"为什么发两次"值得下一并查一下，属于潜在的浪费点）。
 
 **收尾**：桩已停、守卫恢复 `dry_run`（四出口 blocked）、未删除任何数据、无真实调用与计费。
+
+### 第 35 轮：**找到真正阻塞点**——判定漏了 `oss_url`（而且又是我自己引入的）
+
+不再在页面上试，按上一轮说的"读代码 + 对着回包核对"来做。先用桩抓 **scene 的 submit 回包**（零成本）：
+
+```
+outcome=ok ｜ status=completed ｜ oss_url=http://127.0.0.1:4317/images/stub-artifact.png ｜ image_url=''
+```
+
+一眼看出问题：**正常成功的结果，地址在 `oss_url`，`image_url` 是空的**。而我第 21 轮写的
+`canAdoptResult` / `canSetPrimaryResult` **只把 `imageUrl` 当可用地址**：
+
+```ts
+const imageUrl = String(task.imageUrl || '').trim()
+if (!imageUrl || isPlaceholderUrl(imageUrl)) return false   // ← 正常成功在这里被判为"没有地址"
+```
+
+后果：**出图成功的卡片既没有「采纳」也没有「设为定版」，只剩「查看详情」** ——
+一张真出好的图被锁死在结果区里。这解释了第 33/34 轮"详情取回了地址、结果区也是成功，
+却还是只有查看详情"的全部现象。
+
+**修复**（`4dd5610`）：抽出 `hasUsableResultAddress`，把三个阶段各自的地址字段都认上
+（临时 `image_url` / 长期 `oss_url` / 已采纳 `adoptedUrl`），两个判定共用；新增 3 项测试。
+前端 **728 项**通过。
+
+**这是第三次由我自己引入的连锁问题**（第 20 轮判据过窄 → 第 21/27 轮判定漏字段）。
+共同点都是：**我按"某一类结果长什么样"写死了判据，而没有按"这一层真正要回答的问题"来写**
+（要回答的是"**有没有可用产物地址**"，不是"成功还是失败""是 imageUrl 还是 ossUrl"）。
+
+**另记一个后端侧的浪费点（待定性）**：同一次请求（`items` 只传 1 个资产）后端回了 **2 条相同 results**，
+桩也收到 **2 次 create**（相差 18ms）。真实上游按 `source_task_id` 去重，所以不会重复计费，
+但这是明确的浪费点，下一轮先定性再修。
