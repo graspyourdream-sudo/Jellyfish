@@ -35,6 +35,7 @@ class StudioEntitiesService:
         prop_names: list[str],
         scene_names: list[str],
         costume_names: list[str],
+        product_names: list[str] | None = None,
     ) -> dict[str, list[dict[str, object]]]:
         return await check_names_existence_service(
             self._db,
@@ -44,6 +45,7 @@ class StudioEntitiesService:
             prop_names=prop_names,
             scene_names=scene_names,
             costume_names=costume_names,
+            product_names=product_names,
         )
 
     async def list_entities(

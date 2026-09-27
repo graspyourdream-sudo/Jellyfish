@@ -62,18 +62,24 @@ from app.services.studio.shot_extracted_candidates import mark_linked_by_name
 from app.utils.project_links import upsert_project_link
 
 #: 资产类型 → 新建 ID 前缀（沿用既有 "char-/scene-…" 的短写法口径）
+#: 商品（``product``）是第五类资产，前缀取 ``product``：它没有历史写法要兼容。
 ID_PREFIX: dict[str, str] = {
     "character": "char",
     "scene": "scene",
     "prop": "prop",
     "costume": "costume",
+    "product": "product",
 }
 
-#: 资产类型 → (关联模型, 关联列)
+#: 资产类型 → 关联表里的**资产外键列名**（关联模型见 :func:`_link_model_for`）。
+#: 键必须覆盖 ``asset_profiles.ASSET_TYPES`` 的全部类型：确认执行阶段用
+#: ``LINK_MODEL_BY_TYPE[asset_type]`` 直接取值，漏一个类型就是 ``KeyError``，
+#: 而类型闸在更上游已经放行（两边口径不一致时不会有更早的报错）。
 LINK_MODEL_BY_TYPE: dict[str, str] = {
     "scene": "scene_id",
     "prop": "prop_id",
     "costume": "costume_id",
+    "product": "product_id",
 }
 
 ACTION_CREATE = "create_new"
@@ -87,12 +93,20 @@ def _new_asset_id(asset_type: str) -> str:
 
 
 def _link_model_for(asset_type: str) -> type:
-    from app.models.studio import ProjectCostumeLink, ProjectPropLink, ProjectSceneLink
+    """资产类型 → 项目关联模型（与 ``entity_specs.LINK_MODEL_BY_ENTITY`` 同口径）。
+
+    这里保留一份本地映射而不是直接查 ``entity_specs``，是因为本模块的调用点只处理
+    "除角色以外"的全局资产；但**键必须与 LINK_MODEL_BY_TYPE 一一对应**：
+    两者一起用（``_link_model_for(t)`` 取模型、``LINK_MODEL_BY_TYPE[t]`` 取列），
+    只在一边补类型会得到「模型对、列名 KeyError」这种半通状态。
+    """
+    from app.models.studio import ProjectCostumeLink, ProjectProductLink, ProjectPropLink, ProjectSceneLink
 
     return {
         "scene": ProjectSceneLink,
         "prop": ProjectPropLink,
         "costume": ProjectCostumeLink,
+        "product": ProjectProductLink,
     }[asset_type]
 
 

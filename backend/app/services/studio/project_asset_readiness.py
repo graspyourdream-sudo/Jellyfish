@@ -1,4 +1,4 @@
-"""项目资产准备状态：角色 / 场景 / 道具 / 服装的**唯一数据源**。
+"""项目资产准备状态：角色 / 场景 / 道具 / 服装 / 商品的**唯一数据源**。
 
 为什么要有这个模块
 ------------------
@@ -14,7 +14,8 @@
 保存了场景提示词，返回后仍然显示「待完善提示词」**，后面「上传图片 → 设为定版」
 两个状态也就推不动。
 
-本模块把四类资产的准备状态收敛到**同一套口径**：每一项都由
+本模块把各类资产（现为角色 / 场景 / 道具 / 服装 / 商品）的准备状态收敛到**同一套口径**：
+每一项都由
 「实体本身（名字 / image_prompts）+ 图片表（是否有图、是否有定版）+ 提取候选（是否还有未确认）」
 算出来，与它挂在哪张关联表上无关：
 
@@ -43,18 +44,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.studio import (
     Chapter,
     ProjectCostumeLink,
+    ProjectProductLink,
     ProjectPropLink,
     ProjectSceneLink,
     Shot,
     ShotCandidateStatus,
     ShotExtractedCandidate,
 )
+from app.services.studio.asset_profiles import ASSET_TYPES
 from app.services.studio.entity_specs import entity_spec
 from app.services.studio.entity_thumbnails import resolve_thumbnail_infos
 from app.services.studio.llm_orchestration.json_utils import normalize_name
 
-#: 参与「资产准备」的资产类型（与页面标签、候选类型同名）。
-ASSET_TYPES: tuple[str, ...] = ("character", "scene", "prop", "costume")
+#: 参与「资产准备」的资产类型**只有一份定义**：``asset_profiles.ASSET_TYPES``（已含商品）。
+#: 本模块此前自己抄了一份"四类"字面量，于是 ``schemas/studio/assets.py`` 的
+#: ``asset_type`` Literal 放宽到五类之后，服务端依旧只算四类 —— 商品不进第 2 步清单，
+#: 而接口层面不报任何错，只是**少一行**。类型清单属于"两边必须同时改"的东西，
+#: 所以这里不再重复声明，直接复用上游那一份（``ASSET_TYPES`` 仍是本模块的公开名字，
+#: 调用方的导入路径不变）。
 
 
 @dataclass(frozen=True)
@@ -62,7 +69,8 @@ class _AssetSpec:
     """一类资产的取数规格。
 
     ``link_model`` 为 ``None`` 表示这类资产自带 ``project_id`` 列（角色）；
-    其余三类靠项目关联表挂在项目上。取数方式不同，但算出来的字段**完全一致**。
+    其余类型（场景 / 道具 / 服装 / 商品）靠 ``project_*_links`` 关联表挂在项目上。
+    取数方式不同，但算出来的字段**完全一致**。
     """
 
     asset_type: str
@@ -74,12 +82,15 @@ class _AssetSpec:
 
 
 def _build_specs() -> tuple[_AssetSpec, ...]:
-    """用实体的既有规格（`entity_spec`）拼出四类规格，避免重复声明表/字段名。"""
+    """用实体的既有规格（`entity_spec`）拼出各类规格，避免重复声明表/字段名。"""
     specs: list[_AssetSpec] = []
     link_models: dict[str, tuple[type, str]] = {
         "scene": (ProjectSceneLink, "scene_id"),
         "prop": (ProjectPropLink, "prop_id"),
         "costume": (ProjectCostumeLink, "costume_id"),
+        # 商品是全局资产（``products`` 没有 project_id 列），只能靠关联表挂到项目上；
+        # 列名与 ``entity_specs.LINK_MODEL_BY_ENTITY`` 同口径。
+        "product": (ProjectProductLink, "product_id"),
     }
     for asset_type in ASSET_TYPES:
         spec = entity_spec(asset_type)
@@ -203,7 +214,7 @@ def summarize_readiness(items: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 async def build_project_asset_readiness(db: AsyncSession, *, project_id: str) -> dict[str, Any]:
-    """项目资产准备清单（四类资产同一口径，供表格 / 顶部统计 / 步骤判定共用）。"""
+    """项目资产准备清单（各类资产同一口径，供表格 / 顶部统计 / 步骤判定共用）。"""
     pending_keys = await _pending_candidate_keys(db, project_id=project_id)
     items: list[dict[str, Any]] = []
 

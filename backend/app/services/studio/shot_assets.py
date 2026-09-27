@@ -158,7 +158,7 @@ async def list_shot_linked_assets(
     *,
     shot_id: str,
 ) -> list[ShotLinkedAssetItem]:
-    """获取镜头关联的角色/道具/场景/服装。"""
+    """获取镜头关联的角色/道具/场景/服装/商品。"""
     await require_entity(db, Shot, shot_id, detail=entity_not_found("Shot"), status_code=400)
 
     character_ids = (
@@ -173,11 +173,18 @@ async def list_shot_linked_assets(
     costume_ids = (
         await db.execute(select(ProjectCostumeLink.costume_id).where(ProjectCostumeLink.shot_id == shot_id))
     ).scalars().all()
+    # 商品与其余全局资产不同：**shot 档关联行就是"这一镜出现商品"的唯一事实来源**
+    # （``products`` 是全局表，没有 project/chapter 列可退回），所以这里只认 ``shot_id``
+    # 相等的行，不把 chapter 档的行也算成"这一镜的资产"。
+    product_ids = (
+        await db.execute(select(ProjectProductLink.product_id).where(ProjectProductLink.shot_id == shot_id))
+    ).scalars().all()
 
     character_ids = [x for x in dict.fromkeys(character_ids) if x]
     prop_ids = [x for x in dict.fromkeys(prop_ids) if x]
     scene_ids = [x for x in dict.fromkeys(scene_ids) if x]
     costume_ids = [x for x in dict.fromkeys(costume_ids) if x]
+    product_ids = [x for x in dict.fromkeys(product_ids) if x]
 
     character_rows = []
     if character_ids:
@@ -195,11 +202,17 @@ async def list_shot_linked_assets(
         costume_rows = (
             await db.execute(select(Costume.id, Costume.name).where(Costume.id.in_(costume_ids)))
         ).all()
+    product_rows = []
+    if product_ids:
+        product_rows = (
+            await db.execute(select(Product.id, Product.name).where(Product.id.in_(product_ids)))
+        ).all()
 
     character_name = {str(r[0]): str(r[1]) for r in character_rows}
     prop_name = {str(r[0]): str(r[1]) for r in prop_rows}
     scene_name = {str(r[0]): str(r[1]) for r in scene_rows}
     costume_name = {str(r[0]): str(r[1]) for r in costume_rows}
+    product_name = {str(r[0]): str(r[1]) for r in product_rows}
 
     character_thumb = await resolve_thumbnail_infos(
         db,
@@ -224,6 +237,12 @@ async def list_shot_linked_assets(
         image_model=entity_spec("costume").image_model,
         parent_field_name="costume_id",
         parent_ids=list(costume_name.keys()),
+    )
+    product_thumb = await resolve_thumbnail_infos(
+        db,
+        image_model=entity_spec("product").image_model,
+        parent_field_name="product_id",
+        parent_ids=list(product_name.keys()),
     )
 
     items: list[ShotLinkedAssetItem] = []
@@ -275,6 +294,20 @@ async def list_shot_linked_assets(
                 thumbnail=str(info.get("thumbnail") or ""),
             )
         )
+    # 商品也进这份列表（第 4 步镜头资产列表要能看到它）；文本提示词那边**刻意不看**它，
+    # 由 shot_video_prompt_pack 自行跳过（商品外观只走帧参考图，见该模块口径）。
+    for prid, name in product_name.items():
+        info = product_thumb.get(prid) or {}
+        items.append(
+            ShotLinkedAssetItem(
+                type="product",
+                id=prid,
+                image_id=info.get("image_id"),
+                file_id=info.get("file_id"),
+                name=name,
+                thumbnail=str(info.get("thumbnail") or ""),
+            )
+        )
 
     items.sort(key=lambda x: (x.type, x.name, x.id))
     return items
@@ -287,7 +320,7 @@ async def list_shot_linked_assets_paginated(
     page: int,
     page_size: int,
 ) -> ApiResponse[PaginatedData[ShotLinkedAssetItem]]:
-    """获取镜头关联的角色/道具/场景/服装（分页）。"""
+    """获取镜头关联的角色/道具/场景/服装/商品（分页）。"""
     items = await list_shot_linked_assets(db, shot_id=shot_id)
     total = len(items)
     start = (page - 1) * page_size

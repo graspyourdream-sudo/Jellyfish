@@ -25,10 +25,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.studio import Chapter, Shot, ShotExtractedCandidate
 from app.models.types import ShotCandidateStatus
 from app.services.common import entity_not_found
+from app.services.studio.asset_profiles import ASSET_TYPES
 from app.services.studio.entity_existence import check_names_existence
 from app.services.studio.llm_orchestration.json_utils import normalize_name
 
-CANDIDATE_TYPES: tuple[str, ...] = ("character", "scene", "prop", "costume")
+#: 参与本清单的候选类型：**直接复用** ``asset_profiles.ASSET_TYPES``（已含商品）。
+#: 这里曾经自抄一份"四类"字面量，后果是商品候选在聚合入口被 ``continue`` 静默丢掉
+#: （见 ``build_chapter_asset_candidates`` 的类型过滤）—— 第 2 步看不到已提取的商品，
+#: 而接口不报任何错。类型清单必须单一来源，本模块只做转出。
+CANDIDATE_TYPES: tuple[str, ...] = ASSET_TYPES
 
 # 候选类型 → existence-check 的**入参**字段名（注意：返回值里是复数桶名，见下）
 _EXISTENCE_INPUT: dict[str, str] = {
@@ -36,22 +41,25 @@ _EXISTENCE_INPUT: dict[str, str] = {
     "scene": "scene_names",
     "prop": "prop_names",
     "costume": "costume_names",
+    "product": "product_names",
 }
 
-# 候选类型 → existence-check 的**返回**桶名（实测为 characters/props/scenes/costumes）
+# 候选类型 → existence-check 的**返回**桶名（实测为 characters/props/scenes/costumes/products）
 _EXISTENCE_OUTPUT: dict[str, str] = {
     "character": "characters",
     "scene": "scenes",
     "prop": "props",
     "costume": "costumes",
+    "product": "products",
 }
 
-# 候选类型 → 交付/界面用的中文标签
+# 候选类型 → 交付/界面用的中文标签（商品沿用 ``asset_profiles.TYPE_LABELS`` 的写法）
 TYPE_LABELS: dict[str, str] = {
     "character": "人物",
     "scene": "场景",
     "prop": "道具",
     "costume": "服装",
+    "product": "商品",
 }
 
 
@@ -162,6 +170,7 @@ async def build_chapter_asset_candidates(
                 prop_names=names_by_bucket["prop_names"],
                 scene_names=names_by_bucket["scene_names"],
                 costume_names=names_by_bucket["costume_names"],
+                product_names=names_by_bucket["product_names"],
             )
         except HTTPException:
             checked = {}

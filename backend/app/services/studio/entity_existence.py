@@ -12,7 +12,9 @@ from app.models.studio import (
     Chapter,
     Character,
     Costume,
+    Product,
     ProjectCostumeLink,
+    ProjectProductLink,
     ProjectPropLink,
     ProjectSceneLink,
     Prop,
@@ -32,8 +34,14 @@ async def check_names_existence(
     prop_names: list[str],
     scene_names: list[str],
     costume_names: list[str],
+    product_names: list[str] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """批量检测名称是否存在，并返回项目/镜头关联状态。"""
+    """批量检测名称是否存在，并返回项目/镜头关联状态。
+
+    ``product_names`` 默认 ``None``（按空列表处理）：商品的第 2 步页面晚于本接口上线，
+    已有调用方只会发那四个名称字段，签名必须向后兼容；不传时 ``products`` 桶恒为空列表，
+    与"查了但都没命中"区分不开 —— 这是刻意的：桶的语义是"本次询问的商品名字存在性"。
+    """
 
     effective_shot_id = shot_id.strip() if shot_id and str(shot_id).strip() else None
     if effective_shot_id:
@@ -100,6 +108,25 @@ async def check_names_existence(
             return None
         link_id, costume_id = row
         return int(link_id), str(costume_id)
+
+    async def _find_linked_product(q: str) -> tuple[int, str] | None:
+        """商品与场景/道具/服装同形：命中"已关联到本项目"的关联行才回 link_id。
+
+        商品是全局资产（``products`` 没有 project_id），所以"是否已关联本项目"只能看
+        ``project_product_links``；关联列的连接口径与 ``entity_specs.LINK_MODEL_BY_ENTITY``
+        一致（``product_id``）。
+        """
+        stmt = (
+            select(ProjectProductLink.id, Product.id)
+            .join(Product, Product.id == ProjectProductLink.product_id)
+            .where(ProjectProductLink.project_id == project_id, Product.name.ilike(f"%{q}%"))
+            .limit(1)
+        )
+        row = (await db.execute(stmt)).first()
+        if not row:
+            return None
+        link_id, product_id = row
+        return int(link_id), str(product_id)
 
     def _empty_item(raw: str) -> dict[str, Any]:
         return {
@@ -230,6 +257,39 @@ async def check_names_existence(
             }
         )
 
+    products_out: list[dict[str, Any]] = []
+    for name in product_names or []:
+        raw = str(name)
+        q = raw.strip()
+        if not q:
+            products_out.append(_empty_item(raw))
+            continue
+        linked_row = await _find_linked_product(q)
+        if linked_row is not None:
+            link_id, product_id = linked_row
+            products_out.append(
+                {
+                    "name": raw,
+                    "exists": True,
+                    "linked_to_project": True,
+                    "linked_to_shot": False,
+                    "asset_id": product_id,
+                    "link_id": link_id,
+                }
+            )
+            continue
+        product_id = await _find_asset_id(Product, q)
+        products_out.append(
+            {
+                "name": raw,
+                "exists": product_id is not None,
+                "linked_to_project": False,
+                "linked_to_shot": False,
+                "asset_id": product_id,
+                "link_id": None,
+            }
+        )
+
     if effective_shot_id:
         char_ids = {r["asset_id"] for r in characters_out if r.get("asset_id")}
         if char_ids:
@@ -282,9 +342,23 @@ async def check_names_existence(
                 if aid and aid in linked_costume_ids:
                     row["linked_to_shot"] = True
 
+        product_ids = {r["asset_id"] for r in products_out if r.get("asset_id")}
+        if product_ids:
+            stmt = select(ProjectProductLink.product_id).where(
+                ProjectProductLink.project_id == project_id,
+                ProjectProductLink.shot_id == effective_shot_id,
+                ProjectProductLink.product_id.in_(product_ids),
+            )
+            linked_product_ids = {row[0] for row in (await db.execute(stmt)).all()}
+            for row in products_out:
+                aid = row.get("asset_id")
+                if aid and aid in linked_product_ids:
+                    row["linked_to_shot"] = True
+
     return {
         "characters": characters_out,
         "props": props_out,
         "scenes": scenes_out,
         "costumes": costumes_out,
+        "products": products_out,
     }
