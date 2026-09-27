@@ -83,6 +83,7 @@ from app.models.studio_ad_flow import DramaPlanMaterial, ProductCard
 from app.models.studio_drama_plan import DramaPlanDraft
 from app.schemas.studio.drama_plan import DramaPlanDraft as DramaPlanDraftDTO
 from app.services.studio.asset_profiles import render_profile_text
+from app.services.studio.llm_orchestration.drama_plan import missing_layers
 
 #: 章节标题缺省值（方案没给标题时用它，不编造内容）
 FALLBACK_TITLE = "剧情广告"
@@ -147,6 +148,17 @@ def _iso(value: Any) -> str:
 def _validate(plan: DramaPlanDraftDTO) -> list[str]:
     """落库前的确定性校验；返回 warnings，问题是抛异常而不是静默修。"""
     warnings: list[str] = []
+    # **完整剧情是落库的前置条件**：没有剧情的方案确认下去，只会得到一串没有故事依据的镜头
+    # （真机验收实测过一次：`stage="all"` 返回了 6 个分镜但 `story.full_text` 为空）。
+    # 这里用与生成侧同一套判据（`drama_plan.missing_layers`），两处不会各说各话。
+    missing = [name for name in missing_layers(plan) if name != "分镜"]  # 与生成侧同一判据
+    if missing:
+        raise _conflict(
+            "drama_plan_incomplete",
+            "草稿不完整，不能确认策划：缺少" + "、".join(missing) + "。",
+            fix="回到剧情策划页补齐（或重新生成一次），再确认策划。",
+            extra={"missing_layers": missing},
+        )
     if not plan.shots:
         raise _conflict(
             "drama_plan_no_shots",

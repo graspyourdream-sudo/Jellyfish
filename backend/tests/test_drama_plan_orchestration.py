@@ -42,6 +42,21 @@ def _raw_plan(**overrides: object) -> dict:
     payload = {
         "title": "面试那天",
         "logline": "她带着一瓶精华去面试，却发现面试官是前任",
+        # 一次生成（stage="all"）必须同时产出这三层 —— 字段名与分层路径逐字一致
+        "one_liner": "她带着一瓶精华去面试，却发现面试官是前任，当众拍瓶验成色",
+        "audience_emotion": "替她捏一把汗之后被治愈",
+        "story": {
+            # 生成侧对"完整剧情"有最低字数要求（60 字）：这里给一份像样的正文
+            "full_text": (
+                "会议室里，她把精华瓶拍在桌上。\n前任抬头说：好久不见。\n"
+                "她抹开那瓶紧致焕颜精华，三秒吸收不粘腻，随后把瓶子推回去，让他自己用。"
+            ),
+            "hook": "瓶子拍在桌上",
+            "conflict": "面试官是前任",
+            "product_usage": "她用精华当武器",
+            "climax": "前任说这瓶是他买的",
+            "cta": "她把它推回去，让他自己用",
+        },
         "sellingPoints": ["三秒吸收 → 她当众拍在桌上"],
         "characters": [
             {"name": "林小满", "profile": {"appearance": "鹅蛋脸"}, "shot_indexes": [1, 2]},
@@ -103,14 +118,18 @@ def test_prompt_contains_the_six_hard_rules() -> None:
         duration_hint=32,
         style_hint="真人都市 / 一本正经地荒诞",
     )
+    # 一次生成（stage="all"）的提示词现在把**三层**的硬要求合并在同一份里
+    # （旧的 DRAMA_PLAN_TEMPLATE 不含一句话与完整剧情，已废弃）
     assert "开场 3 秒" in prompt and "可拍摄的动作冲突" in prompt
-    assert "卖点不许直接念参数" in prompt
+    assert "不许直接念参数" in prompt
     assert "起势 → 升级 → 反转" in prompt
-    assert "至少出现在一半镜头" in prompt
-    assert "反转 + 自然的购买暗示" in prompt
+    assert "至少一半镜头" in prompt or "至少出现在一半镜头里" in prompt
+    assert "自然的购买暗示" in prompt
     assert "出场角色" in prompt  # 每镜要素：角色 / 动作 / 台词 / 时长 / 商品是否出现
     assert "动作" in prompt and "台词" in prompt and "时长" in prompt
-    for key in ("product_present", "sellingPoints", "climax", "logline"):
+    # 三层都必须被要求产出，且字段名与分层路径**逐字一致**
+    for key in ("one_liner", "audience_emotion", "story", "full_text", "hook",
+                "conflict", "product_usage", "climax", "cta", "product_present"):
         assert key in prompt, f"输出结构缺字段：{key}"
     # 用户填的 brief 与章节原文都要进提示词
     assert "紧致焕颜精华" in prompt
@@ -271,6 +290,42 @@ async def test_preview_parses_stub_output_and_reports_meta() -> None:
     assert meta.raw_output_chars > 0
     assert meta.json_repairs, "尾随逗号应当被记录成一次抢救"
     assert any("抢救" in item for item in result["warnings"])
+
+
+def _raw_plan_legacy_without_layers() -> dict:
+    """**真机实测的那份缺字段响应**的脱敏复刻（结构照抄，名字换成通用名）。
+
+    2026-09-27 的真实调用里，`stage="all"` 返回了 title / logline / sellingPoints /
+    characters / scenes / product / shots 共 6 个分镜，**但完全没有 one_liner 与 story** ——
+    这正是"旧并行字段契约"的产物。它必须被判为不完整，而不是被当成生成成功。
+    """
+    plan = _raw_plan()
+    for key in ("one_liner", "audience_emotion", "story"):
+        plan.pop(key, None)
+    return plan
+
+
+@pytest.mark.asyncio
+async def test_preview_all_rejects_legacy_payload_without_layers() -> None:
+    """缺一句话/完整剧情的一次生成响应 → **422 结构化中文错误**，且点名缺哪一层。"""
+    db, engine = await build_session()
+    try:
+        async with db:
+            await seed_project_chapter_shot(db)
+
+            async def caller(_prompt: str) -> str:
+                return json.dumps(_raw_plan_legacy_without_layers(), ensure_ascii=False)
+
+            with pytest.raises(HTTPException) as excinfo:
+                await module.preview_drama_plan(db, chapter_id="chap-1", brief=BRIEF, llm_caller=caller)
+    finally:
+        await engine.dispose()
+
+    assert excinfo.value.status_code == 422
+    detail = excinfo.value.detail
+    assert detail["code"] == "drama_plan_incomplete"
+    assert detail["missing_layers"] == ["一句话核心创意", "完整剧情全文"]
+    assert "一句话核心创意" in detail["message"] and "完整剧情全文" in detail["message"]
 
 
 @pytest.mark.asyncio

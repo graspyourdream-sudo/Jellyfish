@@ -622,15 +622,24 @@ def step04_generate_story(ctx: Ctx, record: StepRecord) -> None:
             record.failures.append(f"点不到「一次生成全部」：{exc}")
             record.ok = False
             return
-        before = ctx.browser.body_text()
+        # **等生成真的落进草稿**：只等页面文案会读到"还没写完"的中间态（真机验收踩过）。
+        # 这里轮询草稿本身，三层（一句话/完整剧情/分镜）都出现才继续；失败/超时如实记录。
         deadline = time.time() + GENERATE_WAIT_SECONDS
+        draft: dict[str, Any] = {}
         while time.time() < deadline:
-            body = ctx.browser.body_text()
-            if "生成中" not in body and ("已生成" in body or "失败" in body or "未调用" in body):
+            draft = (ctx.api_get(f"/api/v1/studio/chapters/{ctx.chapter_id}/drama-plan").get("data")) or {}
+            plan_now = draft.get("plan") or {}
+            story_now = plan_now.get("story") or {}
+            if (
+                str(plan_now.get("one_liner") or "").strip()
+                and str(story_now.get("full_text") or "").strip()
+                and (plan_now.get("shots") or [])
+            ):
                 break
-            time.sleep(2.0)
+            if str(draft.get("status") or "") == "failed":
+                break
+            time.sleep(3.0)
         ctx.shot(record, "02_all")
-        draft = (ctx.api_get(f"/api/v1/studio/chapters/{ctx.chapter_id}/drama-plan").get("data")) or {}
         plan = draft.get("plan") or {}
         ctx.expect(record, "失败" not in ctx.browser.body_text(), "生成没有报错")
         ctx.expect(record, bool(plan.get("one_liner")), f"一句话剧情已产出：{str(plan.get('one_liner'))[:40]!r}")
@@ -813,15 +822,30 @@ def step06_confirm_plan(ctx: Ctx, record: StepRecord) -> None:
     if dialog_seen:
         ctx.expect(record, True, "点「确认策划」后出现二次确认弹窗（写正式产物前先问一次）")
         ctx.shot(record, "02_dialog")
+        def _dialog_open() -> bool:
+            return "确认策划并落库" in ctx.browser.body_text()
+
         clicked = False
         try:
             ctx.click("确认策划", selector=DIALOG_BUTTONS, exact=True)
             clicked = True
         except CDPError:
             pass
-        if not clicked:
-            ctx.note(record, "弹窗内没找到确认按钮，改用回车确认（真实键盘事件）")
+        time.sleep(1.5)
+        if _dialog_open() or not clicked:
+            ctx.note(record, "弹窗还没关：改用回车确认（antd 确认框默认焦点在确认按钮上）")
             ctx.browser.press_enter()
+            time.sleep(1.5)
+        if _dialog_open():
+            # 还开着就把弹窗**取消掉**，避免遮罩挡住后面所有真实点击（这是之前连锁失败的元凶）
+            ctx.note(record, "确认弹窗仍未关闭：点「再改改」关掉它，避免遮罩挡住后续步骤")
+            for label in ("再改改", "取消"):
+                try:
+                    ctx.click(label, selector=DIALOG_BUTTONS)
+                    break
+                except CDPError:
+                    continue
+        ctx.expect(record, not _dialog_open(), "二次确认弹窗已关闭（不会挡住后续点击）")
     else:
         ctx.note(record, "没有出现二次确认弹窗（可能已经确认过）")
 

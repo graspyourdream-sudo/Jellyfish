@@ -499,15 +499,23 @@ def test_same_name_assets_are_reused_not_recreated() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_missing_story_text_keeps_chapter_raw_text(
+def test_confirm_is_refused_without_full_story_text(
     client_and_db: tuple[TestClient, async_sessionmaker[AsyncSession]],
 ) -> None:
+    """缺完整剧情时**拒绝确认**（不得物化镜头），且章节正文一个字都不改。
+
+    契约变更：以前"没有正文"只记一条 skipped 就继续落库；真机验收暴露出这条路会把
+    "没有故事的方案"落成一串镜头，所以生成侧与确认侧现在用**同一套判据**拦住。
+    """
     client, factory = client_and_db
     _set_plan(factory, _plan_payload(shots=3, story_extra=False))
+    before = _snapshot(factory)
 
     resp = client.post(f"{BASE}/confirm")
-    assert resp.status_code == 200, resp.text
-    data = resp.json()["data"]
-    assert any("完整剧情全文" in item for item in data["skipped"]), data["skipped"]
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["meta"]["error"]
+    assert detail["code"] == "drama_plan_incomplete"
+    assert "完整剧情全文" in detail["message"]
+    assert _snapshot(factory) == before, "被拒绝的确认不得新增任何镜头/资产"
     chapter = asyncio.run(_get(factory, Chapter, CHAPTER_ID))
-    assert chapter.raw_text == "旧正文", "草稿没给正文时不得清空章节原有正文"
+    assert chapter.raw_text == "旧正文", "被拒绝的确认不得改动章节正文"

@@ -62,7 +62,10 @@ from app.services.studio.llm_orchestration.json_utils import (
     normalize_name,
     parse_json_object_with_repairs,
 )
-from app.services.studio.llm_orchestration.prompt_templates import DRAMA_PLAN_TEMPLATE
+from app.services.studio.llm_orchestration.prompt_templates import (
+    DRAMA_ALL_TEMPLATE,
+    DRAMA_PLAN_TEMPLATE,
+)
 from app.services.studio.llm_orchestration.support import (
     build_run_meta,
     raise_llm_failure,
@@ -240,8 +243,14 @@ def build_drama_plan_prompt(
     duration_hint: int,
     style_hint: str,
 ) -> str:
-    """组装剧情策划提示词（``string.Template`` + ``$name`` 占位，禁用 ``str.format``）。"""
-    return DRAMA_PLAN_TEMPLATE.safe_substitute(
+    """组装「一次生成完整策划」的提示词（``string.Template`` + ``$name`` 占位，禁用 ``str.format``）。
+
+    **用 ``DRAMA_ALL_TEMPLATE``**：它把一句话 / 完整剧情 / 分镜三层的硬要求与输出结构
+    合并在同一份 JSON 里。旧的 ``DRAMA_PLAN_TEMPLATE`` 只要 title/logline/shots，
+    一次调用产出的草稿里一句话与完整剧情永远是空的（真机验收实测过），
+    所以那条并行字段契约已经废弃，不在 ``stage="all"`` 路径上使用。
+    """
+    return DRAMA_ALL_TEMPLATE.safe_substitute(
         brief_text=render_brief_text(brief),
         chapter_title=chapter_title or "（未命名）",
         chapter_text=(chapter_text or "（本章还没有原文，请完全依据商品信息创作）")[:MAX_SOURCE_CHARS],
@@ -249,6 +258,7 @@ def build_drama_plan_prompt(
         duration_hint=duration_hint or shot_count * 8,
         allowed_durations="/".join(str(item) for item in ALLOWED_DURATIONS),
         style_hint=style_hint or "（沿用项目风格）",
+        product_need=(shot_count + 1) // 2,
     )
 
 
@@ -482,7 +492,10 @@ def postprocess_plan(
 
     plan = DramaPlanDraft(
         title=coerce_str(raw.get("title")),
-        logline=coerce_str(raw.get("logline")),
+        # **兼容映射**：历史上 `logline` 承载"一句话主线"，分层路径引入 `one_liner` 之后
+        # 两者是同一件事。唯一事实来源是 `one_liner`；模型只给了 `logline` 时映射过来，
+        # 保证页面与数据库读的是同一个字段，不会一处显示一处为空。
+        logline=coerce_str(raw.get("logline")) or text_or_joined(raw.get("one_liner")),
         one_liner=text_or_joined(raw.get("one_liner") or raw.get("oneLiner")),
         audience_emotion=text_or_joined(raw.get("audience_emotion") or raw.get("audienceEmotion")),
         story=normalize_story_fields(raw.get("story")),
@@ -631,6 +644,8 @@ async def preview_drama_plan(
         return dry_run_stage_result(outcome, note="演练模式：未调用模型，未生成草稿。")
 
     plan, warnings = postprocess_plan(outcome["parsed"], shot_count=shot_count)
+    # 三层缺一不可：不完整就**不返回草稿**（服务层因此不会把状态标成 ok）
+    require_complete_plan(plan, stage="all")
     repairs = list(outcome["repairs"] or [])
     if repairs:
         warnings.insert(0, f"模型输出经 JSON 抢救后解析成功：{'、'.join(repairs)}。")
@@ -686,3 +701,61 @@ __all__ = [
     "run_plan_completion",
     "text_or_joined",
 ]
+
+
+#: 完整剧情全文的**最低字数**（生成侧判据：短于它一律算"没有完整剧情"）
+MIN_FULL_TEXT_CHARS = 60
+
+#: 「一次生成完整策划」的三层必需内容（缺任何一层都不算生成成功）
+REQUIRED_LAYERS: tuple[tuple[str, str], ...] = (
+    ("one_liner", "一句话核心创意"),
+    ("story", "完整剧情全文"),
+    ("shots", "分镜"),
+)
+
+
+def missing_layers(plan: Any, *, min_full_text_chars: int = 0) -> list[str]:
+    """列出这份草稿**缺了哪几层**（返回中文层名，空列表 = 三层齐全）。
+
+    判据只看"这一层有没有真内容"，不看字段是否存在：空串、全空白的全文都不算有。
+    ``min_full_text_chars``：生成侧传 :data:`MIN_FULL_TEXT_CHARS`（60 字，挡掉"20 字残句冒充完整剧情"）；
+    确认侧传 0（只要求**确实有一份剧情** —— 用户手写短稿是他的自由，但"没有剧情"绝不允许落库）。
+    这是**确定性校验**（不调用模型），也是"不允许把没有完整剧情的草稿当成生成成功"的落点。
+    """
+    missing: list[str] = []
+    one_liner = text_or_joined(getattr(plan, "one_liner", ""))
+    story = getattr(plan, "story", None)
+    full_text = text_or_joined(getattr(story, "full_text", ""))
+    shots = list(getattr(plan, "shots", []) or [])
+    if not one_liner.strip():
+        missing.append("一句话核心创意")
+    if len(full_text.strip()) < max(1, min_full_text_chars):
+        # "非空"不够：真机验收里出现过 20 字的人工残句被当成完整剧情。
+        # 这里按长度兜底（生成侧判据），阈值为 60 字 —— 远高于任何残句，远低于真实剧情（600~1200 字）。
+        missing.append("完整剧情全文")
+    if not shots:
+        missing.append("分镜")
+    return missing
+
+
+def require_complete_plan(plan: Any, *, stage: str = "all") -> None:
+    """三层缺内容就抛 **422**（结构化中文），调用方据此**不得标记生成完成**。
+
+    为什么必须有这道闸：真机验收里"一次生成全部"返回了 6 个分镜、人物场景商品齐全，
+    但 `story.full_text` 为空 —— 页面上看不出问题、草稿却是不完整的，
+    后面"确认策划"会把没有剧情的方案落成正式镜头。宁可当场报错说清缺哪一层。
+    """
+    missing = missing_layers(plan, min_full_text_chars=MIN_FULL_TEXT_CHARS)
+    if not missing:
+        return
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "code": "drama_plan_incomplete",
+            "message": "本次生成的内容不完整，缺少：" + "、".join(missing) + "。",
+            "fix": "重新生成一次（一次调用应同时产出一句话、完整剧情与分镜）；"
+                   "缺完整剧情时，确认策划会被拒绝。",
+            "stage": stage,
+            "missing_layers": missing,
+        },
+    )
