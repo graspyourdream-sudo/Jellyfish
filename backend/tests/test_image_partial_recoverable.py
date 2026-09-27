@@ -190,3 +190,54 @@ async def test_batch_submit_without_wait_still_fetches_detail_once() -> None:
     assert result.detail["recoverable"] is True
     assert "可以直接采纳它" in result.detail["recoverable_hint"]
     assert result.detail["artifact_state"] == "recoverable"
+
+
+@pytest.mark.asyncio
+async def test_successful_create_without_address_still_fetches_detail() -> None:
+    """**成功但回包里没有地址**也要查一次详情。
+
+    第 33 轮实测：桩/真实上游的 create 回包常常只给「服务任务号 + 状态」，
+    产物地址（oss_url / local_path）在 detail 里。改前只判"明确成功"就跳过查询 →
+    地址全丢 → 结果卡片给不出「采纳」，一张真出好的图等于白丢。
+    """
+    from app.services.studio.image_pipeline import image_pipeline as pipe
+
+    detail_calls: list[str] = []
+
+    async def _create(**_kwargs):  # type: ignore[no-untyped-def]
+        return pipe.client.ServiceTaskResult(
+            ok=True, service_task_id="svc-2", source_task_id="t-2", status="completed", message="出图完成"
+        )
+
+    async def _get_detail(service_task_id: str, **_kwargs):  # type: ignore[no-untyped-def]
+        detail_calls.append(service_task_id)
+        return pipe.client.ServiceTaskDetail(
+            ok=True, service_task_id=service_task_id, source_task_id="t-2", status="completed",
+            oss_url="http://127.0.0.1:4317/images/x.png", local_path="",
+        )
+
+    import app.services.studio.llm_orchestration.dry_run as dry_run_mod
+
+    monkey = dry_run_mod.dry_run_enabled
+    dry_run_mod.dry_run_enabled = lambda: False  # type: ignore[assignment]
+    try:
+        old_create, old_get = pipe.client.create_asset_image_task, pipe.client.get_asset_image_task
+        pipe.client.create_asset_image_task = _create  # type: ignore[assignment]
+        pipe.client.get_asset_image_task = _get_detail  # type: ignore[assignment]
+        try:
+            target = pipe.SubmissionTarget(
+                source_task_id="t-2", source_asset_id="asset-2", name="南安侯府大堂",
+                prompt="大堂内设灵堂", asset_type="scene", stage="character_sheet",
+                result_kind="sceneAssetImage", result_label="场景资产图",
+            )
+            results = await pipe.submit_targets([target], wait_seconds=0.0)
+        finally:
+            pipe.client.create_asset_image_task = old_create  # type: ignore[assignment]
+            pipe.client.get_asset_image_task = old_get  # type: ignore[assignment]
+    finally:
+        dry_run_mod.dry_run_enabled = monkey  # type: ignore[assignment]
+
+    assert detail_calls == ["svc-2"], "成功但没带地址时也必须查一次详情（只读、免费）"
+    assert results[0].outcome == OUTCOME_OK
+    assert results[0].oss_url == "http://127.0.0.1:4317/images/x.png"
+    assert results[0].oss_ready is True

@@ -776,7 +776,7 @@ async def submit_targets(
         detail = None
         if wait_seconds and wait_seconds > 0 and task.service_task_id:
             detail = await poll_task(task.service_task_id, wait_seconds=wait_seconds, transport=transport)
-        elif task.service_task_id and not _looks_like_success(task):
+        elif task.service_task_id and not _success_with_address(task):
             # **不等待也要问一次真相**（只读、免费）：
             #
             # 真实演练（2026-09-27）暴露的缺口：批量出图路径的 `wait_seconds=0`，
@@ -794,6 +794,36 @@ async def submit_targets(
                 detail = None
         results.append(_result_from_submission(target, task=task, detail=detail))
     return results
+
+
+def _success_with_address(task: client.ServiceTaskResult) -> bool:
+    """create 响应是否**既明确成功、又已经带着产物地址**——只有这种才不必再查详情。
+
+    第 33 轮实测补上的缺口：改前只判"明确成功"，于是**成功但 create 回包没带地址**的那种
+    （真实上游/桩都会这样：create 只回服务任务号与状态）就不再查详情 →
+    `oss_url` / `image_url` 全丢 → 结果卡片**没有可用图片地址**，页面因此连「采纳」都给不出来，
+    一张真的出好了的图等于白丢。所以：明确成功 **且** 回包里已经有地址，才跳过查询；
+    其余一律补一次只读的状态查询（不重新出图、不产生费用）。
+    """
+    if not _looks_like_success(task):
+        return False
+    return _has_artifact_address(task)
+
+
+def _has_artifact_address(task: client.ServiceTaskResult) -> bool:
+    """create 回包里是否已经带产物地址（``oss_url`` / ``images[].local_path``）。"""
+    raw = getattr(task, "raw", None)
+    if isinstance(raw, dict):
+        if str(raw.get("oss_url") or "").strip():
+            return True
+        images = raw.get("images")
+        if isinstance(images, list):
+            for item in images:
+                if isinstance(item, dict) and (
+                    str(item.get("oss_url") or "").strip() or str(item.get("local_path") or "").strip()
+                ):
+                    return True
+    return False
 
 
 def _looks_like_success(task: client.ServiceTaskResult) -> bool:
