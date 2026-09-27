@@ -78,8 +78,24 @@
    只能在 ⑤ 修好后才能验。
 3. **隔离库里的桩测试痕迹**：`files` 比真实基线多出的几条，是桩上游假图经**产品采纳接口**留下的本机素材
    （**无真实出图、无计费**）。**未删除**——删数据需你同意。
-4. `health.queue.total` 曾出现 696→697 的计数差异（任务记录侧无新增、守卫当时关闭）：**未解释**，
-   以任务记录为准。
+4. `health.queue.total` 的 696→697 计数差异：**已查到口径，但成因仍未证实**。本轮读上游实现确认：
+
+   ```js
+   // src/server.js
+   function queueSummary(projectId) { return queueSummaryFromTasks(listTasks(projectId), projectId); }
+   // src/store.js
+   export function listTasks(projectId) { const db = readDb(); return db.tasks.filter(...); }
+   ```
+
+   即 `queue.total` **就是 db.json 里 tasks 数组的长度**，和我用 python 读的是同一份数据 ——
+   所以差异只能意味着**那个文件在两次读取之间被改过**。
+
+   与我的动作无关的旁证：当时守卫是 `dry_run`（四出口全 blocked）、上游最新一条任务的
+   `createdAt` 仍是 06:51（没有新任务出现）、本地 `files` 未变。最可能的解释是
+   **另一个共用这个本机出图服务的进程改了 db.json**（同一个上游服务被多个项目/会话共用；
+   仓库里也有 `assetOssBackfill.js` 这类会写任务记录的脚本）。
+   **`failed` 同时 +1** 也与"某个回填/导入过程追加了一条历史失败任务"吻合。
+   —— 这条**我没有证实**（需要拿到那个进程的日志），如实留在这里，不作为结论。
 
 ## 7. 证据索引（`~/Desktop/jellyfish-flow-evidence/`）
 
