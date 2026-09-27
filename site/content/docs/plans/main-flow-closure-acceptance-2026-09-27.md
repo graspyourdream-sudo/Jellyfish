@@ -15,6 +15,23 @@
 | 出图服务 | `人物及场景生产项目`（`127.0.0.1:4173`）：只读用过它的健康与任务查询 |
 | 未动 | `jellyfish-pr41` / `jellyfish-ad-mvp` 的改动、历史提交、本分支的 OpenAPI（见 §5） |
 
+## 0.5 改动范围审计（本轮复核：不掺入无关改动）
+
+`git diff --name-only df33a33..HEAD` 共 **48** 个路径，按目录：
+
+| 目录 | 数量 | 说明 |
+|---|---|---|
+| `front/src` | 21 | 视频幂等 UI、可达性标记、类型切换、采纳/定版判定、常量与测试 |
+| `backend/app` | 12 | 幂等模块、存储预检、可达性、读模型、`distinct()` 修复等 |
+| `backend/tests` | 10 | 对应新增/收紧的测试 |
+| `site/content` | 2 | 状态流水与本文档 |
+| `front/public` | 1 | `env.js` 不再覆盖 `VITE_BACKEND_URL`（防误打真实模式后端） |
+| `backend/.venv`、`front/node_modules` | 2 | **删除（D）**：清掉历史提交里机器相关的符号链接（`4359bee`） |
+
+**禁改路径检查**：`.env` / `*.db` / `outputs/` / 生成图片视频 / `openapi.json` / `legacy_tools/`
+——除上面那两条 **删除**（清理）外，**没有任何命中**。
+`git status` 干净；`front/openapi.json` 未 regen（见 §5）。
+
 ## 1. 五步流程：每步的输入 / 结果 / 完成条件 / 下一步
 
 两条起步路径都用浏览器连续走过 1–5 步（`63-steps-*`＝剧本起步，`66-prompt-start-*`＝提示词起步）。
