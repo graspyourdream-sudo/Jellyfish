@@ -4555,7 +4555,7 @@ function Inspector(props: {
   const regenerateVideoGeneration = async () => {
     videoAttemptRef.current += 1
     message.info(
-      `已开始第 ${videoAttemptRef.current + 1} 轮生成（重新生成会真的再调用一次视频供应商）。`,
+      `已开始第 ${videoAttemptRef.current + 1} 轮生成（重新生成会真的再产生一次费用）。`,
       6,
     )
     await submitVideoGeneration()
