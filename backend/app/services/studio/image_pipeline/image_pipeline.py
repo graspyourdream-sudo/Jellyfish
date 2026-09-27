@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import asyncio
 import hashlib
 import re
@@ -51,6 +53,9 @@ from app.services.studio.llm_orchestration.registry import (
     ImagePromptSlotSpec,
 )
 from app.schemas.studio.llm_orchestration import EntityProfileInput
+
+
+_logger = logging.getLogger(__name__)
 
 # 画幅 / 槽位 / 结果类型标签的**唯一**分流表见 ``asset_strategies``：
 # 「按资产类型分流提示词模板 + 画幅 + 结果类型」只有那一份实现，本模块不再自己写一套。
@@ -771,8 +776,35 @@ async def submit_targets(
         detail = None
         if wait_seconds and wait_seconds > 0 and task.service_task_id:
             detail = await poll_task(task.service_task_id, wait_seconds=wait_seconds, transport=transport)
+        elif task.service_task_id and not _looks_like_success(task):
+            # **不等待也要问一次真相**（只读、免费）：
+            #
+            # 真实演练（2026-09-27）暴露的缺口：批量出图路径的 `wait_seconds=0`，
+            # 于是 create 响应之后**从不拉一次任务详情** → `local_path` / `oss_url` /
+            # 上游真实原因全丢，结果只能按 create 响应的 status 判成"失败"。
+            # 而那一单其实是"图已经生成并已计费、只是上游存不下来"
+            # （上游任务里明摆着有 `local_path=/images/乌鸦_主图_01_03.png`）——
+            # 页面因此既不显示可恢复信息，也给不出"采纳"这张图的入口。
+            #
+            # 这里补一次**状态查询**（不是重新出图、不产生费用），把真相拿回来。
+            try:
+                detail = await client.get_asset_image_task(task.service_task_id, transport=transport)
+            except Exception as exc:  # noqa: BLE001 - 查不到详情不能盖住主流程，但要在 warnings 里说
+                _logger.warning("拉取出图任务详情失败（service_task_id=%s）：%s", task.service_task_id, exc)
+                detail = None
         results.append(_result_from_submission(target, task=task, detail=detail))
     return results
+
+
+def _looks_like_success(task: client.ServiceTaskResult) -> bool:
+    """create 响应是否已经**明确**是成功。
+
+    只有认得出来的成功 token 才算"明确成功"；认不出来（空串或陌生词）一律当作
+    "需要查一次详情"——上游 create 响应的 ``ok`` 默认是 True，不足以单独作为成功证据
+    （真实演练里 create 返回 ok=true、status=failed，图其实已经生成）。
+    """
+    status = str(getattr(task, "status", "") or "").strip().lower()
+    return status in {"done", "succeeded", "success", "completed"}
 
 
 def _result_from_submission(
