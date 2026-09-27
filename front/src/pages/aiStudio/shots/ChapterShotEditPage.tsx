@@ -47,7 +47,11 @@ import { showUserConclusion } from '../components/userFacingMessage'
 const { Header, Content } = Layout
 const extractTaskCopy = TASK_COPY.scriptExtract
 
-type AssetKind = 'scene' | 'actor' | 'prop' | 'costume'
+/* 商品（`product`）是第五类资产：后端 `list_shot_linked_assets` 会把商品关联行一起返回
+   （`type="product"`），所以本页必须认它 —— 否则 `overviewTypeToAssetKind` 会把
+   `'product'` 原样传进下面的 `groups[kind]`，而 `groups` 只有四个键，
+   等于在这一屏直接抛 TypeError（重新生成 OpenAPI 客户端后类型才如实暴露出来）。 */
+type AssetKind = 'scene' | 'actor' | 'prop' | 'costume' | 'product'
 type NamedDraft = { name: string; thumbnail?: string | null; id?: string | null; file_id?: string | null; description?: string | null }
 type AssetVM = NamedDraft & {
   kind: AssetKind
@@ -226,12 +230,14 @@ export function ChapterShotEditPage() {
     actor: {},
     prop: {},
     costume: {},
+    product: {},
   })
   const existenceInFlightRef = useRef<Record<AssetKind, boolean>>({
     scene: false,
     actor: false,
     prop: false,
     costume: false,
+    product: false,
   })
 
   const [dialogLoading, setDialogLoading] = useState(false)
@@ -300,6 +306,7 @@ export function ChapterShotEditPage() {
       actor: [],
       prop: [],
       costume: [],
+      product: [],
     }
     for (const item of shotAssetsOverview?.items ?? []) {
       if (item.candidate_status === 'ignored') continue
@@ -324,6 +331,7 @@ export function ChapterShotEditPage() {
     actor: false,
     prop: false,
     costume: false,
+    product: false,
   })
 
   const toggleExpanded = (kind: AssetKind) => {
@@ -688,6 +696,7 @@ export function ChapterShotEditPage() {
         actor: {},
         prop: {},
         costume: {},
+        product: {},
       })
     }
 
@@ -1212,6 +1221,8 @@ export function ChapterShotEditPage() {
     void prefetchExistenceForNewAssets('actor', unionAssets.actor)
     void prefetchExistenceForNewAssets('prop', unionAssets.prop)
     void prefetchExistenceForNewAssets('costume', unionAssets.costume)
+    /* 商品同样要对账「项目里有没有同名资产」（走 products 那一套接口口径）。 */
+    void prefetchExistenceForNewAssets('product', unionAssets.product)
   }, [prefetchExistenceForNewAssets, unionAssets])
 
   if (!projectId || !chapterId || !shotId) {

@@ -7,7 +7,8 @@ import type {
   ShotExtractionSummaryRead,
 } from '../../../../services/generated'
 
-type AssetKind = 'scene' | 'actor' | 'prop' | 'costume'
+/* 商品是第五类资产（后端镜头资产总览会返回 `type="product"`），本组件照样给它一格。 */
+type AssetKind = 'scene' | 'actor' | 'prop' | 'costume' | 'product'
 type AssetVM = {
   name: string
   thumbnail?: string | null
@@ -36,6 +37,8 @@ function assetDetailUrl(kind: AssetKind, id: string, projectId: string) {
   if (kind === 'scene') return `/assets/scenes/${encodeURIComponent(id)}/edit`
   if (kind === 'prop') return `/assets/props/${encodeURIComponent(id)}/edit`
   if (kind === 'costume') return `/assets/costumes/${encodeURIComponent(id)}/edit`
+  /* 商品走资产库自己的商品编辑页（与工作台第 2 步「上传图片 / 设为定版」同一处入口）。 */
+  if (kind === 'product') return `/assets/products/${encodeURIComponent(id)}/edit`
   return `/projects/${encodeURIComponent(projectId)}/roles/${encodeURIComponent(id)}/edit`
 }
 
@@ -228,7 +231,7 @@ export function ChapterShotAssetConfirmation({
               {assetStatus.text}
             </Tag>
           </div>
-          <div className="text-[11px] text-slate-500 mt-1">这里处理系统提取出的场景、角色、道具和服装候选。</div>
+          <div className="text-[11px] text-slate-500 mt-1">这里处理系统提取出的场景、角色、道具、服装和商品候选。</div>
         </div>
       </div>
       <div className="space-y-4">
@@ -236,6 +239,7 @@ export function ChapterShotAssetConfirmation({
         {renderAssetGrid('actor', '角色', unionAssets.actor)}
         {renderAssetGrid('prop', '道具', unionAssets.prop)}
         {renderAssetGrid('costume', '服装', unionAssets.costume)}
+        {renderAssetGrid('product', '商品', unionAssets.product)}
       </div>
     </div>
   )
