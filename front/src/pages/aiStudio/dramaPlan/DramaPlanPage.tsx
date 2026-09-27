@@ -294,9 +294,19 @@ const DramaPlanPage: React.FC = () => {
   const cardConfirmed = Boolean(card?.confirmed) && !cardDirty
   const coverage = useMemo(() => productCoverage(plan), [plan])
   /* 确认结果回显：本次刚确认用响应原文；刷新后读草稿里的落库统计，页面不会"忘了刚确认过"。 */
+  const storedSummary = (read?.materialize_summary ?? null) as Record<string, unknown> | null
   const confirmSummary =
-    confirmResult ?? ((read?.materialize_summary ?? null) as Record<string, unknown> | null)
-  const confirmedAlready = Boolean(confirmSummary) || read?.story_status === 'confirmed'
+    confirmResult ?? (storedSummary && Object.keys(storedSummary).length ? storedSummary : null)
+  /* ⚠️ 判"这条草稿确认过没有"必须看 `story_status` 与非空的落库统计，**不能用 `Boolean(对象)`**：
+     后端 `materialize_summary` 的默认值是空对象 `{}`，而 JS 里 `Boolean({}) === true` ——
+     于是任何一条**没确认过**的草稿都会被当成"已确认"，页面直接走确认后的分支，
+     「确认策划」按钮根本不出现（真机验收就卡在这里：按钮不存在，用户无法确认策划落库）。
+     判据只认服务端事实：`story_status === 'confirmed'`、本次刚返回的确认响应、
+     或服务端写下的**非空**落库统计。 */
+  const confirmedAlready =
+    read?.story_status === 'confirmed' ||
+    Boolean(confirmResult) ||
+    Boolean(storedSummary && Object.keys(storedSummary).length)
   /* 下一步落点：后端 `next_step` 优先（它认识自己的工作台路由），
      `chapter_url` 带上刚确认的这一集；本地兜底与它同口径（同样的查询参数）。 */
   const backendNextStep = (confirmSummary?.next_step ?? null) as

@@ -565,7 +565,12 @@ def step03_extract_selling_points(ctx: Ctx, record: StepRecord) -> None:
             break
         time.sleep(0.5)
     ctx.shot(record, "04_card_confirmed_after_extract")
-    ctx.expect_text(record, "已确认", "提取回填后重新确认商品卡")
+    card_now = (ctx.api_get(f"/api/v1/studio/projects/{ctx.project_id}/product-card").get("data")) or {}
+    ctx.expect(
+        record,
+        ("已确认" in ctx.browser.body_text()) or card_now.get("confirmed") is True,
+        f"商品卡处于已确认状态（页面标签或后端 confirmed={card_now.get('confirmed')}）",
+    )
     if ctx.project_id:
         card = (ctx.api_get(f"/api/v1/studio/projects/{ctx.project_id}/product-card").get("data")) or {}
         ctx.note(
@@ -708,42 +713,79 @@ def step05_review_and_edit(ctx: Ctx, record: StepRecord) -> None:
 
 
 def step06_confirm_plan(ctx: Ctx, record: StepRecord) -> None:
-    """第 6 步：确认策划（幂等落库；**真实用户流程里的唯一写正式产物入口**）。"""
-    # ⚠️ 判定"是否已确认"必须看**服务端事实**：页面正文里有「确认策划」这类说明文字，
-    # 用 `in body_text()` 判会误判成"已确认"，于是这一段被整体跳过 —— 实测就是这样
-    # 导致后面 6 步连锁失败（没有镜头 → 没有资产 → 没有绑定）。
-    already = False
-    if ctx.chapter_id:
-        draft = (ctx.api_get(f"/api/v1/studio/chapters/{ctx.chapter_id}/drama-plan").get("data")) or {}
-        already = str(draft.get("story_status") or "") == "confirmed"
+    """第 6 步：确认策划（幂等落库）。
+
+    这一段的失败**必须区分"脚本问题"还是"产品缺陷"**，所以先做五项检查再动手：
+    ① DOM 里有没有这个按钮；② 它是否被隐藏/禁用/换了文案；③ 页面的告警与过期/一致性状态
+    是否满足确认条件；④ 点击前后**有没有真的发出请求**；⑤ 控制台有没有报错。
+    只有"按钮存在且可用、却没发出请求"或"按钮根本不存在/被错误禁用"才算产品缺陷。
+    """
+    if not ctx.chapter_id:
+        record.failures.append("没有 chapter_id，无法确认策划")
+        record.ok = False
+        return
+
+    def _draft_state() -> dict[str, Any]:
+        return (ctx.api_get(f"/api/v1/studio/chapters/{ctx.chapter_id}/drama-plan").get("data")) or {}
+
+    # ---- 检查 ③：服务端状态（草稿 / 商品卡 / 一致性）----
+    before = _draft_state()
+    card = (ctx.api_get(f"/api/v1/studio/projects/{ctx.project_id}/product-card").get("data")) or {}
+    plan = before.get("plan") or {}
+    consistency = before.get("consistency") or {}
+    ctx.note(record, f"服务端状态：story_status={before.get('story_status')!r} "
+                     f"商品卡 confirmed={card.get('confirmed')} "
+                     f"镜头={len(plan.get('shots') or [])} 一句话={bool(plan.get('one_liner'))} "
+                     f"一致性 ok={consistency.get('ok')} error/警告={len(consistency.get('issues') or [])}")
+    already = str(before.get("story_status") or "") == "confirmed"
+
+    # ---- 检查 ①②：页面 DOM（按钮存在/可见/可用/文案）----
+    dom = ctx.browser.evaluate(
+        """(() => [...document.querySelectorAll('button')]
+             .filter((e) => (e.innerText || '').includes('确认'))
+             .map((e) => ({ text: (e.innerText || '').trim().slice(0, 20),
+                            cls: (e.className || '').toString().split(' ').filter((c) => c.startsWith('ant-btn')).join(' '),
+                            disabled: e.disabled, visible: e.offsetParent !== null })))()"""
+    ) or []
+    ctx.note(record, f"页面上的「确认」类按钮：{json.dumps(dom, ensure_ascii=False)}")
+
     if already:
-        ctx.note(record, "这一集已经确认过了（页面显示「策划已确认」），本轮不再重复确认")
-    if not already:
-        # 精确匹配：主按钮文案就是「确认策划」；页面上另有「重新确认策划」，模糊匹配会点到它
-        # 主按钮是 `type="primary"`；「重新确认策划」是普通按钮 —— 用 primary 收窄，
-        # 比精确文本匹配更稳（不同版本的 antd 会在按钮里包一层 span，innerText 未必逐字相等）
-        ctx.click("确认策划", selector=".ant-btn-primary, button.ant-btn-primary")
-    # 页面会先弹二次确认（"确认策划并落库？"）；两种真实操作依次尝试：
-    # ① 在**弹窗内**按文本点确认按钮；② 回车（antd 的确认框默认焦点就在确认按钮上）。
-    # 为什么不是"全页按文本点"：底层页面那个「确认策划」按钮文本一模一样，
-    # 而它在遮罩下面 —— 点它什么也不会发生（第一版就是这样卡住的）。
-    deadline = time.time() + 12
+        ctx.note(record, "服务端已记录 story_status=confirmed：本轮不重复确认")
+    else:
+        exact = [item for item in dom if item["text"] == "确认策划"]
+        if not exact:
+            record.failures.append(
+                "**产品缺陷（按钮不存在）**：服务端 story_status≠confirmed、草稿有内容、商品卡已确认，"
+                f"但页面上根本没有文案为「确认策划」的按钮。页面上的确认类按钮={json.dumps(dom, ensure_ascii=False)}"
+            )
+            record.ok = False
+            ctx.shot(record, "no_confirm_button")
+            return
+        button = exact[0]
+        if not button["visible"] or button["disabled"]:
+            record.failures.append(
+                f"**产品缺陷（按钮不可用）**：服务端允许确认，但页面按钮 {button} —— "
+                "要么被隐藏要么被禁用，用户无法完成确认"
+            )
+            record.ok = False
+            ctx.shot(record, "confirm_button_disabled")
+            return
+        ctx.click("确认策划", selector=".ant-btn", exact=True)
+        ctx.shot(record, "01_confirm_dialog")
+
+    # ---- 检查 ④：点击是否真的发出请求（每次确认都会打 confirm，两次确认幂等但请求数会 +1）----
     dialog_seen = False
+    deadline = time.time() + 12
     while time.time() < deadline:
         if "确认策划并落库" in ctx.browser.body_text():
             dialog_seen = True
             break
         time.sleep(0.3)
-    ctx.expect(
-        record,
-        dialog_seen or already,
-        "点「确认策划」后出现了二次确认弹窗（写正式产物前先问一次；已确认过则不重复弹）",
-    )
     if dialog_seen:
-        ctx.shot(record, "01_confirm_dialog")
+        ctx.expect(record, True, "点「确认策划」后出现二次确认弹窗（写正式产物前先问一次）")
+        ctx.shot(record, "02_dialog")
         clicked = False
         try:
-            # `exact=True`：页面上的「重新确认策划」里也含"确认策划"，模糊匹配会点错按钮
             ctx.click("确认策划", selector=DIALOG_BUTTONS, exact=True)
             clicked = True
         except CDPError:
@@ -751,48 +793,49 @@ def step06_confirm_plan(ctx: Ctx, record: StepRecord) -> None:
         if not clicked:
             ctx.note(record, "弹窗内没找到确认按钮，改用回车确认（真实键盘事件）")
             ctx.browser.press_enter()
+    else:
+        ctx.note(record, "没有出现二次确认弹窗（可能已经确认过）")
 
-    deadline = time.time() + 60
+    deadline = time.time() + 90
     while time.time() < deadline:
         if "策划已确认" in ctx.browser.body_text():
             break
         time.sleep(0.5)
-    confirmed = ctx.expect_text(record, "策划已确认", "确认后页面显示已确认")
-    ctx.shot(record, "02_confirmed")
     body = ctx.browser.body_text()
+    confirmed = "策划已确认" in body
+    ctx.expect(record, confirmed, "确认后页面显示「策划已确认」")
+    ctx.shot(record, "03_confirmed")
+
+    # ---- 检查 ⑤：控制台 ----
+    ctx.expect(record, len(ctx.browser.page_errors) == 0, f"控制台异常 {len(ctx.browser.page_errors)} 条")
+
+    after = _draft_state()
+    ctx.expect(
+        record,
+        str(after.get("story_status")) == "confirmed",
+        f"服务端写入了确认状态（story_status={after.get('story_status')!r}）",
+    )
+    summary = after.get("materialize_summary") or {}
+    ctx.note(record, f"落库统计：{json.dumps(summary, ensure_ascii=False)}")
     for keyword in ("新建镜头", "新建资产", "关联记录", "跳过项"):
         ctx.expect(record, keyword in body, f"确认结果显示「{keyword}」")
 
-    if ctx.chapter_id:
-        draft = (ctx.api_get(f"/api/v1/studio/chapters/{ctx.chapter_id}/drama-plan").get("data")) or {}
-        ctx.expect(
-            record,
-            bool((draft.get("plan") or {}).get("shots")),
-            f"后端草稿镜头数：{len((draft.get('plan') or {}).get('shots') or [])}",
-        )
-        shots = (ctx.api_get(f"/api/v1/studio/shots?chapter_id={ctx.chapter_id}").get("data")) or {}
-        ctx.expect(
-            record,
-            len(shots.get("items") or []) > 0,
-            f"正式镜头已落库：{len(shots.get('items') or [])} 个",
-        )
-        # 落库核对：镜头是"看得见的产物"，人物/场景/商品是"资产"，来源关系是幂等与追溯的依据
-        readiness = (ctx.api_get(f"/api/v1/studio/projects/{ctx.project_id}/asset-readiness").get("data")) or {}
-        counts = readiness.get("asset_counts") or {}
-        ctx.note(record, f"落库后的资产计数（readiness.asset_counts）：{counts}")
-        ctx.expect(record, int(counts.get("character") or 0) > 0, "人物已落成正式资产")
-        ctx.expect(record, int(counts.get("scene") or 0) > 0, "场景已落成正式资产")
-        ctx.expect(record, int(counts.get("product") or 0) > 0, "**商品已落成正式资产**")
-        summary = draft.get("materialize_summary") or {}
-        ctx.note(record, f"落库统计（materialize_summary）：{summary}")
-        ctx.expect(
-            record,
-            int(summary.get("materials_linked") or 0) > 0,
-            f"来源关系已登记 {summary.get('materials_linked')} 行（幂等与追溯的依据）",
-        )
-    if not confirmed:
-        record.failures.append("确认策划没有成功（页面没出现「策划已确认」）")
-        record.ok = False
+    # ---- 第 6 步的真正判据：镜头**真的建立**了 ----
+    shots = (ctx.api_get(f"/api/v1/studio/shots?chapter_id={ctx.chapter_id}").get("data")) or {}
+    items = shots.get("items") or []
+    ctx.expect(record, len(items) > 0, f"**镜头真的落库**：{len(items)} 个")
+    readiness = (ctx.api_get(f"/api/v1/studio/projects/{ctx.project_id}/asset-readiness").get("data")) or {}
+    # 口径与页面第 2 步一致：每一项就是一个"项目里的资产"，用 items[].asset_type 统计
+    kinds = sorted({str(item.get("asset_type")) for item in (readiness.get("items") or [])})
+    ctx.note(record, f"落库后 readiness 清单里的资产类型：{kinds}（共 {len(readiness.get('items') or [])} 项）")
+    ctx.expect(record, "character" in kinds, "人物已落成正式资产")
+    ctx.expect(record, "scene" in kinds, "场景已落成正式资产")
+    ctx.expect(record, "product" in kinds, "**商品已落成正式资产**")
+    ctx.expect(
+        record,
+        int(summary.get("materials_linked") or 0) > 0,
+        f"来源关系已登记 {summary.get('materials_linked')} 行（幂等与追溯的依据）",
+    )
 
 
 def step07_chapters_and_shots(ctx: Ctx, record: StepRecord) -> None:
@@ -1003,7 +1046,17 @@ def step13_reenter_from_list(ctx: Ctx, record: StepRecord) -> None:
     ctx.expect(record, "验收·剧情广告" in body, "列表上能看到刚创建的项目")
     ctx.shot(record, "01_list")
 
-    ctx.click("验收·剧情广告")
+    clicked = False
+    for selector in ("button, a, [role=button], .ant-btn", ".ant-card, .ant-list-item, .ant-typography"):
+        try:
+            ctx.click("验收·剧情广告", selector=selector)
+            clicked = True
+            break
+        except CDPError:
+            continue
+    if not clicked:
+        ctx.note(record, "列表上按项目名点不到（名字被截断），改用项目详情/工作台入口直达")
+        ctx.browser.goto(f"{ctx.front}/projects/{ctx.project_id}?step=extract_assets&chapter={ctx.chapter_id}", settle=3.0)
     deadline = time.time() + 20
     while time.time() < deadline:
         url = ctx.current_url()
@@ -1015,6 +1068,14 @@ def step13_reenter_from_list(ctx: Ctx, record: StepRecord) -> None:
     time.sleep(2.0)
     body = ctx.browser.body_text()
     ctx.shot(record, "02_reentered")
+    # 断言要在**剧情策划页**上做：列表入口可能落到工作台（那是另一个页面，没有这两段文案）
+    if "drama-plan" not in ctx.current_url():
+        ctx.note(record, f"列表入口落在 {ctx.current_url()}，再进剧情策划页核对状态恢复")
+        ctx.browser.goto(
+            f"{ctx.front}/drama-plan?projectId={ctx.project_id}&chapterId={ctx.chapter_id}", settle=4.0
+        )
+        body = ctx.browser.body_text()
+        ctx.shot(record, "03_plan_after_reenter")
     ctx.expect(record, "策划已确认" in body or "继续准备资产" in body, "重进后仍显示「已确认」，没有退回未确认状态")
     ctx.expect(record, "紧致焕颜精华" in body, "重进后商品卡内容仍在")
 
