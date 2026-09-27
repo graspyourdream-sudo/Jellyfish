@@ -12,7 +12,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { describeStorageReachability } from './assetProduction.ts'
+import {
+  describeFailureReasonWithStorageNote,
+  describeStorageReachability,
+} from './assetProduction.ts'
 
 test('有公网长期地址 → 既是长期资产，也能进后续生成', () => {
   const r = describeStorageReachability({
@@ -58,4 +61,19 @@ test('演练占位地址不贴「仅本机」标签（它不是"只在本机的�
   })
   assert.equal(r.localOnly, false)
   assert.equal(r.note, '')
+})
+
+test('存储失败且拿不到本机图 → 失败原因里必须提醒"可能已经计费"', () => {
+  const text = describeFailureReasonWithStorageNote({
+    error_message: '出图成功但 OSS 上传失败：OSS 上传返回 HTTP 403 AccessDenied：bucket acl',
+    outcome: 'failed',
+  })
+  assert.match(text, /长期存储环节/)
+  assert.match(text, /已经计费/)
+  assert.match(text, /确认/)
+})
+
+test('非存储类失败不追加这个提醒（不许到处加噪音）', () => {
+  const text = describeFailureReasonWithStorageNote({ outcome: 'failed' })
+  assert.doesNotMatch(text, /已经计费/)
 })

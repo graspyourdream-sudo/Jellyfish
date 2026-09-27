@@ -1153,6 +1153,24 @@ export function isPubliclyReachableUrl(url: string): boolean {
   return !PRIVATE_HOST_PATTERNS.some((pattern) => pattern.test(host))
 }
 
+/** 失败原文看起来像"长期存储被拒"吗（上游 OSS 403 / AccessDenied / 上传失败）。 */
+const STORAGE_FAILURE_MARKERS = ['oss', 'accessdenied', 'bucket', '上传失败', '存储', '403']
+export function looksLikeStorageFailure(text: string): boolean {
+  const lowered = String(text || '').toLowerCase()
+  return STORAGE_FAILURE_MARKERS.some((marker) => lowered.includes(marker))
+}
+
+/**
+ * 存储失败、但**拿不到**本机图时，必须把"钱可能已经花了"说清楚。
+ *
+ * 真实演练（2026-09-27 第二次授权出图，对象「乌鸦」）：上游又一次 403（bucket acl），
+ * 但这一单没有返回本机图路径 —— 结果既不能说"部分成功"（没证据说图还能救），
+ * 也不该只写一句"生成失败"（那会让人以为没花钱、也没图）。
+ */
+export const STORAGE_FAILURE_UNKNOWN_NOTE =
+  '注意：这次失败发生在长期存储环节，图很可能已经生成并**已经计费**，' +
+  '但没有拿到可用的图地址，无法确认还能不能取回；重试之前请先确认上游那一单。'
+
 /** 失败原因：优先上游真话，其次按归一化口径给出可执行的说明；一律屏蔽内部标识。 */
 export function describeFailureReason(result: Pick<SubmitResultLike, 'error_message' | 'message' | 'outcome'>): string {
   const text = String(result.error_message || result.message || '').trim()
@@ -1162,6 +1180,15 @@ export function describeFailureReason(result: Pick<SubmitResultLike, 'error_mess
     return '图片已经生成，但没有完成长期存储，因此暂时不可用；可以稍后刷新这一项，或重新生成。'
   }
   return '生成失败，但没有拿到具体原因；可在结果卡片上点「查看详情」核对。'
+}
+
+/** 失败原因 + （存储失败时的）"可能已计费"提醒；卡片用这个，别只写一句失败。 */
+export function describeFailureReasonWithStorageNote(
+  result: Pick<SubmitResultLike, 'error_message' | 'message' | 'outcome'>,
+): string {
+  const base = describeFailureReason(result)
+  if (!looksLikeStorageFailure(base)) return base
+  return `${base} ${STORAGE_FAILURE_UNKNOWN_NOTE}`
 }
 
 /**
@@ -1234,7 +1261,7 @@ export function resolveResultStatus(
     }
   }
   if (outcome === 'failed' || outcome === 'partial_failed') {
-    return { ...base, status: 'failed', reason: describeFailureReason(result) }
+    return { ...base, status: 'failed', reason: describeFailureReasonWithStorageNote(result) }
   }
   if (outcome === 'running' || outcome === 'unknown' || (!outcome && result.ok !== false && serviceTaskId)) {
     if (serviceTaskId) {
@@ -1259,7 +1286,7 @@ export function resolveResultStatus(
   if (serviceTaskId) {
     return { ...base, status: 'generating', reason: '已提交给出图服务，正在生成；可以点「刷新进度」查看结果。' }
   }
-  return { ...base, status: 'failed', reason: describeFailureReason(result) }
+  return { ...base, status: 'failed', reason: describeFailureReasonWithStorageNote(result) }
 }
 
 /* -------------------------------------------------------- 提交结果去重/挑选 */
@@ -1332,7 +1359,7 @@ export function pickResultForAsset<T extends SubmitResultRow>(
       status: 'failed',
       ossUrl,
       imageUrl: localPath,
-      errorMessage: describeFailureReason({ error_message: query.error_message, outcome: rawStatus }),
+      errorMessage: describeFailureReasonWithStorageNote({ error_message: query.error_message, outcome: rawStatus }),
       outcome: rawStatus,
     }
   }

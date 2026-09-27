@@ -846,6 +846,38 @@ def _result_from_submission(
                 if local_path and outcome == OUTCOME_PARTIAL_FAILED
                 else ""
             ),
+            # —— 存储失败但**拿不到**可恢复产物时，也要如实说清"钱可能已经花了" ——
+            #
+            # 真实演练（2026-09-27 第二次授权出图，对象「乌鸦」）：上游又一次 403
+            # （bucket acl），但这一单的详情里**没有**返回本机图路径 —— 于是这条结果既不是
+            # 「部分成功」（没证据说图还能救），也不该只写一句「生成失败」（那会让人以为没花钱、
+            # 也没图）。字段口径：storage_failure 说明失败落在存储环节；artifact_state 说明
+            # 我们**能不能确认**产物还在（recoverable / unknown），不猜。
+            "storage_failure": bool(
+                outcome in {OUTCOME_FAILED, OUTCOME_PARTIAL_FAILED}
+                and _looks_like_oss_failure(upstream_error)
+            ),
+            "artifact_state": (
+                "recoverable"
+                if (local_path and outcome == OUTCOME_PARTIAL_FAILED)
+                else "unknown"
+                if (
+                    outcome in {OUTCOME_FAILED, OUTCOME_PARTIAL_FAILED}
+                    and _looks_like_oss_failure(upstream_error)
+                )
+                else ""
+            ),
+            "artifact_note": (
+                "这一单的失败发生在**长期存储**环节（上游存储返回了拒绝）："
+                "图很可能已经生成并**已经计费**，但本次回包没有给出本机图路径，"
+                "所以**无法确认**它还能不能取回。重试之前请先让管理员确认上游那一单能否取回。"
+                if (
+                    not local_path
+                    and outcome in {OUTCOME_FAILED, OUTCOME_PARTIAL_FAILED}
+                    and _looks_like_oss_failure(upstream_error)
+                )
+                else ""
+            ),
             "images": images,
             "status": status,
             "source_message": str(task.message or ""),
