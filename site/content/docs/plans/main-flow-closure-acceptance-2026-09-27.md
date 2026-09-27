@@ -67,6 +67,36 @@
     （`asset-workbench` 的 `image.*` 同名字段）
 - 未新增/未改动的表结构：**本分支没有任何数据库迁移**（幂等键存在既有 `generation_tasks.payload` 里）。
 
+## 5.5 全套件与类型检查状态（本轮复核，用来支撑"没引入回归"）
+
+**后端全量**（`pytest tests/ -q`）：
+
+```
+13 failed, 1365 passed, 2 skipped in 198.64s
+```
+
+那 13 个失败**全部**是同一类既有问题——响应信封多了 `'meta': None`，而用例是全等断言
+（`assert response.json() == {...}` 没写 `meta`）。已核实**与本分支无关**：
+`backend/app/schemas/common.py`（`meta` 就在这里）本分支一行未改；
+`git show df33a33:backend/tests/test_skills_integration.py` 显示**基线**上就已经是"断言不带 meta"的写法。
+（同一结论第 20 轮已查过一次，本轮复跑再次一致。）
+
+**前端类型检查**（`tsc --noEmit`）：共 **195** 个错误，全部落在两类**既有**根因上：
+
+| 类别 | 数量 | 根因 | 是否本分支引入 |
+|---|---|---|---|
+| `TS2307` 找不到 `node:*` | 143 | 仓库**没声明 `@types/node`**（所有测试文件都这样） | 否 |
+| `TS2322` antd `Card.styles` | 8 | lockfile 把 `antd` 钉在 **5.10.0**，而代码用了 ≥5.14 才有的 `styles` | 否 |
+| `TS18047/18048/7006` | 41 | 上面缺 `node` 类型的连带效应（隐式 any / 可能为 null） | 否 |
+
+"否"是复核过的，不是推断：例如 `AssetResultCard.tsx` 的 `styles={{ body: … }}` 在
+`git show df33a33:…` 里**基线就存在**（第 108 行），而我从没改过的
+`ProjectStepSummaryStrip.tsx` 也有 2 处同款。
+
+**结论**：本分支**没有引入新的失败类别**；前端"生产构建会失败"是仓库既有问题
+（缺 `@types/node` + `antd` 版本与代码不匹配），需要总控侧决定修法——我没有顺手改依赖
+（那会动 lockfile，超出本分支范围）。
+
 ## 6. 明确未完成 / 受阻（不冒充）
 
 1. **⑤ 上游最小改动集**（需出图服务那边执行，我方已就绪并在状态文档里给了可执行清单）：
