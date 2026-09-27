@@ -114,6 +114,8 @@ class Ctx:
     reuse_chapter_id: str = ""
     #: 本轮是否预期发生**真实**模型调用（决定"页面必须给出真内容"这类断言要不要上）
     real_calls_expected: bool = False
+    #: 真实验收：生成阶段**只点一次**「一次生成全部」（禁止三段重复调用与重试）
+    single_shot: bool = False
     #: 演练模式下没有生成产物时，用**手写草稿**把第 5/6 步跑通（免费模式；报告会标注）
     seed_plan: bool = False
 
@@ -609,6 +611,33 @@ def step04_generate_story(ctx: Ctx, record: StepRecord) -> None:
 
     ctx.expect_text(record, "分层生成", "页面写明是分层生成")
     ctx.shot(record, "01_before_generate")
+
+    if ctx.single_shot:
+        # 真实验收：**只点一次**「一次生成全部（将调用 1 次模型）」，不做三段重复调用、
+        # 不重试、失败即停（用户授权的调用次数是硬上限）。
+        print("    → 点「一次生成全部」（stage=all，**本次真实验收唯一的一次生成调用**）")
+        try:
+            ctx.click("一次生成全部")
+        except CDPError as exc:
+            record.failures.append(f"点不到「一次生成全部」：{exc}")
+            record.ok = False
+            return
+        before = ctx.browser.body_text()
+        deadline = time.time() + GENERATE_WAIT_SECONDS
+        while time.time() < deadline:
+            body = ctx.browser.body_text()
+            if "生成中" not in body and ("已生成" in body or "失败" in body or "未调用" in body):
+                break
+            time.sleep(2.0)
+        ctx.shot(record, "02_all")
+        draft = (ctx.api_get(f"/api/v1/studio/chapters/{ctx.chapter_id}/drama-plan").get("data")) or {}
+        plan = draft.get("plan") or {}
+        ctx.expect(record, "失败" not in ctx.browser.body_text(), "生成没有报错")
+        ctx.expect(record, bool(plan.get("one_liner")), f"一句话剧情已产出：{str(plan.get('one_liner'))[:40]!r}")
+        ctx.expect(record, bool((plan.get("story") or {}).get("full_text")), "完整剧情全文已产出")
+        ctx.expect(record, len(plan.get("shots") or []) > 0, f"分镜已产出：{len(plan.get('shots') or [])} 个")
+        ctx.note(record, f"模型={draft.get('model')!r}；分镜数={len(plan.get('shots') or [])}")
+        return
 
     stages = (
         ("生成一句话", "one_liner", "一句话核心创意"),
@@ -1245,6 +1274,11 @@ def main() -> int:
         "用了它报告会标出「本模式第 4 步没有真实剧情产物」",
     )
     parser.add_argument(
+        "--single-shot",
+        action="store_true",
+        help="真实验收：生成阶段只点一次「一次生成全部」（stage=all），不做三段重复调用",
+    )
+    parser.add_argument(
         "--real-calls",
         action="store_true",
         help="本轮会走**真实**模型调用（需要后端已切到真实模式，且用户已授权）："
@@ -1266,6 +1300,7 @@ def main() -> int:
             reuse_project_id=args.project_id.strip(),
             reuse_chapter_id=args.chapter_id.strip(),
             real_calls_expected=bool(args.real_calls),
+            single_shot=bool(args.single_shot),
             seed_plan=bool(args.seed_plan),
         )
         preflight = _preflight(ctx)
