@@ -83,6 +83,16 @@ export type AssetWorkbenchImage = {
   image_id: number | null
   thumbnail: string
   image_count: number
+  /**
+   * 定版图能否用于后续生成（后端 `asset-workbench` 契约给出的结论）。
+   *
+   * 只有公网 http(s):// 或 asset:// 才算 true；未定版时为 false。
+   * 页面据此在「已定版」旁边标出「仅本机 · 不能用于后续生成」——只在写了「已定版」
+   * 会让人以为它同时是长期资产，而真实演练里那张定版图只在本机、下游取不到。
+   */
+  primary_usable_for_generation: boolean
+  /** 不可用时的中文原因与修法（可用时为空串）。 */
+  primary_reachability_note: string
 }
 
 export type AssetWorkbenchItemStatus = {
@@ -241,6 +251,9 @@ function normalizeImage(value: unknown): AssetWorkbenchImage | null {
     image_id: typeof raw.image_id === 'number' ? raw.image_id : null,
     thumbnail: toText(raw.thumbnail),
     image_count: toNumber(raw.image_count),
+    // 兜底 false（"没验过就不许说可用"）：契约没给结论时页面宁可标"不能用于生成"
+    primary_usable_for_generation: raw.primary_usable_for_generation === true,
+    primary_reachability_note: toText(raw.primary_reachability_note),
   }
 }
 
@@ -420,6 +433,10 @@ export type DegradedSignalAsset = {
   hasImagePrompt?: boolean
   imageId?: number | null
   thumbnail?: string
+  /** 定版图能否用于后续生成（来自步骤信号里的后端结论） */
+  primaryUsableForGeneration?: boolean
+  /** 定版图不可用时的中文原因与修法 */
+  primaryReachabilityNote?: string
 }
 
 /**
@@ -459,6 +476,10 @@ export function buildDegradedWorkbench(input: DegradedWorkbenchInput): Workbench
         image_id: typeof asset.imageId === 'number' ? asset.imageId : null,
         thumbnail: asset.thumbnail || '',
         image_count: hasImg ? 1 : 0,
+        // 降级视图的来源（步骤信号）里有可达性结论就搬运；没有就 false ——
+        // **宁可不显示"可用"，也不凭空说它可用于后续生成**
+        primary_usable_for_generation: asset.primaryUsableForGeneration === true,
+        primary_reachability_note: asset.primaryReachabilityNote || '',
       },
       status: { key, label, reason: '' },
       // 降级视图拿不到"提示词是否需要重新生成"，只能按出图服务支持的类型给可批量
