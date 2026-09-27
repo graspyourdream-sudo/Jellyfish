@@ -80,6 +80,18 @@ OUTLET_VIDEO = "video"
 OUTLET_OSS = "oss"
 OUTLETS: tuple[str, ...] = (OUTLET_LLM, OUTLET_IMAGE, OUTLET_VIDEO, OUTLET_OSS)
 
+# 只读出口：**不可能产生费用**的读取类外部请求（查询出图任务状态、探测出图服务健康）。
+#
+# 存在的理由（实测到的适配缺口）：查询任务原本复用 ``OUTLET_IMAGE``（="出图"，计费出口），
+# 于是"读出图结果"被"确认真实付费"绑住了——真实模式下不打开
+# ``JELLYFISH_REAL_LLM_CONFIRMED=1`` 就读不到任何已有任务的产物，
+# 而打开它同时又放开了真实出图提交。只读与计费必须分开：
+#   - 只读出口不要求 real_call_confirmed()，也不占用 JELLYFISH_ALLOWED_OUTLETS 白名单
+#     （白名单表达的是"授权哪些**收费**出口"，读请求不在此列）；
+#   - DRY_RUN 那一层照旧生效：演练模式下只读请求同样被拦，走占位结果，行为不变。
+OUTLET_IMAGE_READ = "image_read"
+READ_ONLY_OUTLETS: frozenset[str] = frozenset({OUTLET_IMAGE_READ})
+
 # DRY_RUN 占位产物：用不可达的 .invalid 域名，绝不做真实请求。
 FAKE_IMAGE_BASE_URL = "https://dry-run.invalid/assets"
 FAKE_OSS_BASE_URL = "https://dry-run.invalid/oss"
@@ -90,6 +102,7 @@ _OUTLET_LABELS: dict[str, str] = {
     OUTLET_IMAGE: "出图",
     OUTLET_VIDEO: "出视频",
     OUTLET_OSS: "对象存储上传",
+    OUTLET_IMAGE_READ: "出图（只读查询，不计费）",
 }
 
 # --------------------------------------------------------------------------
@@ -620,10 +633,19 @@ def mode_details() -> dict[str, Any]:
 
 
 def assert_outbound_allowed(detail: str = "", *, outlet: str = OUTLET_LLM) -> None:
-    """真实发 HTTP / 上传对象存储前的最后一道检查。"""
+    """真实发 HTTP / 上传对象存储前的最后一道检查。
+
+    只读出口（``READ_ONLY_OUTLETS``）走一条更短的路：这类请求**不可能产生费用**
+    （查询出图任务状态、探测出图服务健康），因此既不该被「确认真实付费」拦住，
+    也不该占用收费出口白名单 ``JELLYFISH_ALLOWED_OUTLETS``。
+    DRY_RUN 那一层照旧先生效——演练模式下一行请求都不发。
+    """
     if dry_run_enabled():
         _record("blocked", detail, target=outlet)
         raise DryRunBlocked(detail, outlet=outlet)
+    if outlet in READ_ONLY_OUTLETS:
+        _record("allowed_read_only", detail, target=outlet)
+        return
     if not real_call_confirmed():
         _record("blocked_unconfirmed", detail, target=outlet)
         raise RealCallNotConfirmed(detail, outlet=outlet)

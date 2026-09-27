@@ -172,13 +172,20 @@ async def _request_json(
     path: str,
     *,
     payload: dict[str, Any] | None = None,
-    outlet: str = dry_run.OUTLET_IMAGE,
+    outlet: str = "",
     detail: str = "",
     timeout: int | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict[str, Any]:
-    """发一次请求。**任何 HTTP 之前先过守卫**（出图服务在本机，出站兜底拦不住它）。"""
-    dry_run.assert_outbound_allowed(detail or f"{method} {path}", outlet=outlet)
+    """发一次请求。**任何 HTTP 之前先过守卫**（出图服务在本机，出站兜底拦不住它）。
+
+    出口按方法区分：**GET 是只读查询（不可计费）**，走 ``OUTLET_IMAGE_READ``；
+    其余（POST 提交/返工）才是真正会产生费用的 ``OUTLET_IMAGE``。
+    这样"读出图结果"不会被"确认真实付费"绑住——此前两者共用 image 出口，
+    真实模式下不打开确认就读不到任何已有任务的产物。
+    """
+    effective_outlet = outlet or (dry_run.OUTLET_IMAGE_READ if method.upper() == "GET" else dry_run.OUTLET_IMAGE)
+    dry_run.assert_outbound_allowed(detail or f"{method} {path}", outlet=effective_outlet)
 
     url = f"{service_base_url()}{path}"
     try:

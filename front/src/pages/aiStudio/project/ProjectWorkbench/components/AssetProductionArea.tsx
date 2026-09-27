@@ -394,6 +394,12 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
   const [promptRequestStructureByKey, setPromptRequestStructureByKey] = useState<Record<string, string>>({})
   /** 刷新后恢复上次结果时给用户的那句话（只读恢复，绝不会重新提交） */
   const [restoredNote, setRestoredNote] = useState('')
+  /** 「读取已有出图任务」：这条结果属于哪个资产（资产 key；空 = 还没选） */
+  const [readAssetKey, setReadAssetKey] = useState('')
+  /** 「读取已有出图任务」：出图服务任务号（由用户填/粘贴） */
+  const [readTaskId, setReadTaskId] = useState('')
+  /** 读取中（**只读**查询：不提交、不重新出图、不产生费用） */
+  const [readingTask, setReadingTask] = useState(false)
 
   const stopRef = useRef(false)
   const gateRef = useRef<AssetSubmitGate>(createAssetSubmitGate())
@@ -850,8 +856,66 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
     [setBusy, updateTask],
   )
 
-  /* ------------------------------------------------------------ 提交一轮任务 */
+  /* ------------------------------------------------- 读取已有出图任务（只读） */
 
+  /**
+   * 读取一条**已经存在**的出图任务结果。
+   *
+   * 为什么需要这个入口（实测到的适配缺口）：出图提交本身不写库，任务号只活在
+   * 浏览器内存 / localStorage 里，而 localStorage 按 origin（host:port）隔离 ——
+   * 换端口、换会话、或那轮结果是别的进程建的，页面就再也回不到那条任务。
+   * 结果就是"图在出图服务里好好的、公网也能读到，页面却只能重新出图"。
+   *
+   * 本入口只做一次**只读**查询（后端走不计费的只读出口，见 dry_run.OUTLET_IMAGE_READ）：
+   * 不提交、不重新出图、不产生任何费用；命中后按既有结果卡片渲染，
+   * 采纳与设为定版完全复用既有逻辑（这里不另写一套）。
+   */
+  const readExistingTask = useCallback(async () => {
+    const taskId = readTaskId.trim()
+    if (!taskId) {
+      message.warning('请先填出图结果编号。')
+      return
+    }
+    const asset = productionAssets.find((item) => item.key === readAssetKey)
+    if (!asset) {
+      message.warning('请先选择这条结果属于哪个资产。')
+      return
+    }
+    setReadingTask(true)
+    try {
+      const query = await queryAssetImageTask(taskId)
+      const patch = resolveTaskQueryPatch(query)
+      // 键与真实轮次区分开：它不是"本轮生成"，只是把已有结果读回来
+      const key = `${asset.key}#read-${Date.now()}`
+      setTasks((prev) => [
+        ...prev,
+        {
+          ...queuedPlaceholder(asset),
+          key,
+          round: roundRef.current,
+          operation: 'regenerate',
+          status: 'generating' as ProductionTask['status'],
+          serviceTaskId: taskId,
+          note: '这条结果是从出图服务读取回来的已有任务（只读查询，没有重新出图）。',
+        },
+      ])
+      if (patch) updateTask(key, patch)
+      if (patch?.status === 'done' && patch.ossUrl) {
+        message.success('已读取该任务结果，可以点「采纳」把它落到资产图片里。')
+      } else if (patch?.status === 'failed') {
+        message.warning('该任务在出图服务里是失败状态，结果卡片里能看到原因。')
+      } else {
+        message.info('已读取该任务；它还没有完成，可稍后用「刷新进度」再看。')
+      }
+      setReadTaskId('')
+    } catch (error) {
+      message.error(toUserFacingText(error, '查询任务失败：请稍后重试'))
+    } finally {
+      setReadingTask(false)
+    }
+  }, [productionAssets, readAssetKey, readTaskId, updateTask])
+
+  /* ------------------------------------------------------------ 提交一轮任务 */
   const submitRound = useCallback(
     async (
       operation: BatchOperation,
@@ -2426,6 +2490,44 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
           }
         />
       ) : null}
+
+      {/*
+        读取已有出图任务（适配缺口修复）。
+        出图提交不写库、任务号只存在浏览器内存 / localStorage，而 localStorage 按 origin
+        隔离：换端口 / 换会话后就再也找不到那条任务。这里给一个**只读**入口把结果找回来，
+        命中后掉进下面同一套结果卡片，采纳 / 设为定版完全复用既有逻辑。
+      */}
+      <div className="rounded border border-slate-200 bg-slate-50/60 p-2" data-testid="read-existing-task">
+        <div className="mb-1 text-xs text-slate-600">
+          {OUTPUT_MODE_STATEMENT}
+          {' '}
+          读取已有出图任务：把**之前**某次出图的结果找回来。只读取结果，不会重新出图、不产生费用。
+        </div>
+        <Space wrap size="small">
+          <Select
+            size="small"
+            style={{ minWidth: 200 }}
+            placeholder="这条结果属于哪个资产"
+            value={readAssetKey || undefined}
+            onChange={(value) => setReadAssetKey(String(value))}
+            options={productionAssets.map((asset) => ({
+              value: asset.key,
+              label: `${asset.name}（${asset.type}）`,
+            }))}
+          />
+          <Input
+            size="small"
+            style={{ width: 340 }}
+            placeholder="出图结果编号"
+            value={readTaskId}
+            onChange={(event) => setReadTaskId(event.target.value)}
+            onPressEnter={() => void readExistingTask()}
+          />
+          <Button size="small" icon={<ReloadOutlined />} loading={readingTask} onClick={() => void readExistingTask()}>
+            读取结果
+          </Button>
+        </Space>
+      </div>
 
       {/* 结果卡片 */}
       {tasks.length > 0 ? (
