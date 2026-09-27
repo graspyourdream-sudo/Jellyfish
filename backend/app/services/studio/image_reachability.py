@@ -81,6 +81,15 @@ def assess_storage_key(storage_key: str) -> ImageReachability:
     return ImageReachability(note=_LOCAL_NOTE)
 
 
+async def storage_keys_by_file_id(db: AsyncSession, file_ids: list[str]) -> dict[str, str]:
+    """file_id → ``files.storage_key``（一次查询；两个读模型共用这一处，避免各写一份）。"""
+    ids = [str(fid) for fid in file_ids if str(fid or "").strip()]
+    if not ids:
+        return {}
+    stmt = select(FileItem.id, FileItem.storage_key).where(FileItem.id.in_(ids))
+    return {str(fid): str(key or "") for fid, key in (await db.execute(stmt)).all()}
+
+
 async def annotate_image_rows(
     db: AsyncSession,
     rows: list[dict[str, Any]],
@@ -106,4 +115,9 @@ async def annotate_image_rows(
     return rows
 
 
-__all__ = ["ImageReachability", "annotate_image_rows", "assess_storage_key"]
+__all__ = [
+    "ImageReachability",
+    "annotate_image_rows",
+    "assess_storage_key",
+    "storage_keys_by_file_id",
+]
