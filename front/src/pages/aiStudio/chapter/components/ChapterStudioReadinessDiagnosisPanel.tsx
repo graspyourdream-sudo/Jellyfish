@@ -2,7 +2,8 @@ import { Button, Progress, Tag, Tooltip } from 'antd'
 import { CheckCircleOutlined, EditOutlined } from '@ant-design/icons'
 import type { ShotRead } from '../../../../services/generated'
 
-type ReadinessCheckKey = 'characters' | 'scene' | 'props' | 'costumes'
+/* `products` = 商品（第五类资产，契约 §六）。 */
+type ReadinessCheckKey = 'characters' | 'scene' | 'props' | 'costumes' | 'products'
 
 type ReadinessEntry = {
   id: number

@@ -367,11 +367,15 @@ const ProjectWorkbench: React.FC = () => {
         navigate(`/projects/${projectId}/roles/${asset.id}/edit${generateParam}`)
         return
       }
-      const segment = assetType === 'scene' ? 'scenes' : assetType === 'prop' ? 'props' : 'costumes'
-      const tabByType: Record<Exclude<ProjectSignalAssetType, 'character'>, 'scenes' | 'props' | 'costumes'> = {
+      /* 场景 / 道具 / 服装 / **商品** 都走资产库编辑页（同一套 returnTo 口径）。
+         商品是第五类资产：它的图由人工上传 + 手动定版，所以这个入口对它是**必需**的
+         （第 2 步里商品卡片上的「上传图片 / 设为定版」就落在这里）。 */
+      const segment = assetType === 'scene' ? 'scenes' : assetType === 'prop' ? 'props' : assetType === 'product' ? 'products' : 'costumes'
+      const tabByType: Record<Exclude<ProjectSignalAssetType, 'character'>, 'scenes' | 'props' | 'costumes' | 'products'> = {
         scene: 'scenes',
         prop: 'props',
         costume: 'costumes',
+        product: 'products',
       }
       const returnTo = encodeURIComponent(`/projects/${projectId}?step=extract_assets&tab=${tabByType[assetType]}`)
       navigate(`/assets/${segment}/${asset.id}/edit?returnTo=${returnTo}${options?.generate ? '&generate=1' : ''}`)

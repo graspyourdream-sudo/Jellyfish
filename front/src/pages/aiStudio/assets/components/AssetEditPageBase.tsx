@@ -185,7 +185,7 @@ type HistoryCandidate<TImage extends BaseAssetImage> = {
 }
 
 /** 资产编辑页当前对应的实体类型（同时是 `llmPipelineApi` 里的 entity/asset_type 取值）。 */
-export type AssetEntityType = 'character' | 'scene' | 'prop' | 'costume' | 'actor'
+export type AssetEntityType = 'character' | 'scene' | 'prop' | 'costume' | 'actor' | 'product'
 
 const ENTITY_TYPE_BY_RELATION: Record<string, AssetEntityType> = {
   actor_image: 'actor',
@@ -193,6 +193,8 @@ const ENTITY_TYPE_BY_RELATION: Record<string, AssetEntityType> = {
   scene_image: 'scene',
   prop_image: 'prop',
   costume_image: 'costume',
+  /* 商品是第五类资产：这一页对它要做的事是**上传图片 + 手动设为定版**（不走出图通道）。 */
+  product_image: 'product',
 }
 
 /**
@@ -325,7 +327,9 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         throw new Error('asset image slot is required')
       }
       if (!supportsImageServiceAssetType(assetNavigateRelationType)) {
-        throw new Error('出图服务只支持角色/场景/道具；演员/服装请用别的通道（本页已禁用该按钮）')
+        throw new Error(
+          '出图服务只支持角色/场景/道具；演员/服装/商品请用别的通道（本页已禁用该按钮：商品的图请上传后手动「设为定版」）',
+        )
       }
       // 优先用「本次动作显式选定的项目」，其次用页面解析出来的作用域。
       // 为什么不能只读 state：用户在选择项目弹窗里选完立刻恢复出图时，React 的

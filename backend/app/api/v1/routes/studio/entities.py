@@ -39,6 +39,7 @@ async def check_entity_names_existence(
         prop_names=body.prop_names,
         scene_names=body.scene_names,
         costume_names=body.costume_names,
+        product_names=body.product_names,
     )
     return success_response(EntityNameExistenceCheckResponse.model_validate(data))
 

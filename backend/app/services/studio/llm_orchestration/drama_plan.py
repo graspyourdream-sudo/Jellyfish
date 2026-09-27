@@ -15,6 +15,18 @@
 
 本模块**不写库**（与编排层其他服务同一口径）：它只返回归一化后的草稿与运行元信息，
 落草稿/落正式产物分别由 ``drama_plan_drafts`` 与 ``drama_plan_materialize`` 负责。
+
+分层生成（``stage``）与本模块的关系
+==================================
+
+"一次出全部"仍然在这里（``preview_drama_plan``；``stage="all"`` 走的就是它）；分阶段的
+"一句话 → 完整剧情 → 分镜"在 :mod:`drama_story` 里，并且**复用本模块的内部件**：
+
+- :func:`run_plan_completion`：唯一碰模型的调用管线（演练判定 / JSON 抢救 / meta）；
+- :func:`postprocess_plan` 与 ``normalize_*``：确定性归一（景别/机位/运镜、时长档位、
+  序号重排、悬空引用剔除，以及 story / one_liner / 人物关系字段）；
+- :func:`preview_drama_stage`：阶段化入口的**薄转发**（函数内延迟导入，避免成环），
+  调用方只需要认 ``drama_plan`` 这一个模块。
 """
 
 from __future__ import annotations
@@ -27,11 +39,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.studio import CameraAngle, CameraMovement, CameraShotType, Chapter, Project
 from app.schemas.studio.drama_plan import (
     DEFAULT_SHOT_COUNT,
+    DEFAULT_STAGE,
     DramaPlanDialogueDraft,
     DramaPlanDraft,
     DramaPlanNamedAssetDraft,
     DramaPlanProductDraft,
     DramaPlanShotDraft,
+    DramaPlanStoryDraft,
 )
 from app.services.studio.llm_orchestration import dry_run
 from app.services.studio.llm_orchestration.client import (
@@ -48,7 +62,10 @@ from app.services.studio.llm_orchestration.json_utils import (
     normalize_name,
     parse_json_object_with_repairs,
 )
-from app.services.studio.llm_orchestration.prompt_templates import DRAMA_PLAN_TEMPLATE
+from app.services.studio.llm_orchestration.prompt_templates import (
+    DRAMA_ALL_TEMPLATE,
+    DRAMA_PLAN_TEMPLATE,
+)
 from app.services.studio.llm_orchestration.support import (
     build_run_meta,
     raise_llm_failure,
@@ -119,6 +136,22 @@ DEFAULT_MOVEMENT = CameraMovement.static.value
 
 #: 允许的时长档位（与 ``registry.ALLOWED_DURATION_SECONDS`` 同值，这里显式列出便于提示词渲染）
 ALLOWED_DURATIONS: tuple[int, ...] = (4, 5, 8, 10, 12, 15)
+
+#: 完整剧情全文字符数下限（低于它算"过短"）。
+#: 为什么在这里定：分层生成（``drama_story``）与一致性检查（``drama_consistency``）
+#: 必须用**同一个**阈值，否则会出现"生成时说太短、检查时说合格"的自相矛盾。
+MIN_STORY_CHARS = 200
+
+#: ``story`` 分块的字段别名表：模型可能给 snake_case / camelCase / 中文键。
+#: 归一化只认第一份存在的键（缺字段一律留空，绝不编造内容）。
+STORY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "full_text": ("full_text", "fullText", "text", "story_text", "完整剧情", "全文"),
+    "hook": ("hook", "opening_hook", "开场钩子", "钩子"),
+    "conflict": ("conflict", "core_conflict", "核心冲突", "冲突"),
+    "product_usage": ("product_usage", "productUsage", "product_placement", "商品介入", "商品使用"),
+    "climax": ("climax", "turn", "高潮", "反转"),
+    "cta": ("cta", "ending_guide", "结尾引导", "引导"),
+}
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -210,8 +243,14 @@ def build_drama_plan_prompt(
     duration_hint: int,
     style_hint: str,
 ) -> str:
-    """组装剧情策划提示词（``string.Template`` + ``$name`` 占位，禁用 ``str.format``）。"""
-    return DRAMA_PLAN_TEMPLATE.safe_substitute(
+    """组装「一次生成完整策划」的提示词（``string.Template`` + ``$name`` 占位，禁用 ``str.format``）。
+
+    **用 ``DRAMA_ALL_TEMPLATE``**：它把一句话 / 完整剧情 / 分镜三层的硬要求与输出结构
+    合并在同一份 JSON 里。旧的 ``DRAMA_PLAN_TEMPLATE`` 只要 title/logline/shots，
+    一次调用产出的草稿里一句话与完整剧情永远是空的（真机验收实测过），
+    所以那条并行字段契约已经废弃，不在 ``stage="all"`` 路径上使用。
+    """
+    return DRAMA_ALL_TEMPLATE.safe_substitute(
         brief_text=render_brief_text(brief),
         chapter_title=chapter_title or "（未命名）",
         chapter_text=(chapter_text or "（本章还没有原文，请完全依据商品信息创作）")[:MAX_SOURCE_CHARS],
@@ -219,66 +258,123 @@ def build_drama_plan_prompt(
         duration_hint=duration_hint or shot_count * 8,
         allowed_durations="/".join(str(item) for item in ALLOWED_DURATIONS),
         style_hint=style_hint or "（沿用项目风格）",
+        product_need=(shot_count + 1) // 2,
     )
+
+
+def text_or_joined(value: Any) -> str:
+    """把"字符串 / 段落数组 / 单值"统一成一段文本（数组按换行拼接）。
+
+    为什么需要它：模型经常把长文本写成 ``["第一段", "第二段"]``。直接 ``coerce_str``
+    会返回空串（它只认字符串），那等于**把整份剧情悄悄丢掉**。
+    """
+    if isinstance(value, (list, tuple)):
+        parts = [coerce_str(item) for item in value]
+        return "\n".join(item for item in parts if item)
+    return coerce_str(value)
+
+
+def normalize_product(raw: Any, *, warnings: list[str]) -> DramaPlanProductDraft | None:
+    """商品段落的确定性归一（``postprocess_plan`` 与分阶段生成共用）。
+
+    没有名称的商品一律忽略（落库只会得到一条无名商品资产），并如实记一条 warning
+    ——"模型说某镜有商品、却没有商品信息"这件事必须让用户看见，不能静默。
+    """
+    if not isinstance(raw, dict):
+        return None
+    name = coerce_str(raw.get("name"))
+    if not name:
+        warnings.append("模型返回的 product 没有名称，已忽略该字段。")
+        return None
+    return DramaPlanProductDraft(
+        name=name,
+        relation=text_or_joined(raw.get("relation")),
+        description=coerce_str(raw.get("description")),
+        profile={str(k): coerce_str(v) for k, v in (raw.get("profile") or {}).items()},
+        shot_indexes=[
+            value for value in (coerce_int(x, default=0) or 0 for x in raw.get("shot_indexes") or []) if value
+        ],
+    )
+
+
+def normalize_story_fields(raw: Any) -> DramaPlanStoryDraft:
+    """把模型返回的 ``story`` 归一到 :class:`DramaPlanStoryDraft`（缺字段留空）。
+
+    三种输入都认（都是实际见过的形态）：
+    - ``{"full_text": ..., "hook": ...}``：标准形态；
+    - 裸字符串：整段当 ``full_text``；
+    - 段落数组：按换行拼成 ``full_text``。
+
+    **不编造**：任何取不到的字段一律留空字符串，让页面显示"待补充"。
+    """
+    source: dict[str, Any] = dict(raw) if isinstance(raw, dict) else {}
+    if isinstance(raw, str) or isinstance(raw, (list, tuple)):
+        source = {"full_text": raw}
+    fields: dict[str, str] = {}
+    for key, aliases in STORY_FIELD_ALIASES.items():
+        value = next((source[alias] for alias in aliases if alias in source), None)
+        fields[key] = text_or_joined(value)
+    return DramaPlanStoryDraft(**fields)
+
+
+def normalize_named_assets(
+    items: Any,
+    *,
+    warnings: list[str] | None = None,
+    relation_field: bool = False,
+) -> list[DramaPlanNamedAssetDraft]:
+    """角色 / 场景列表的确定性归一（``postprocess_plan`` 与分阶段生成共用）。
+
+    - 空名称 / 非对象项直接丢弃（落库只会得到无名资产）；
+    - 按归一名去重（同一个角色写两遍会让正式表出现两条人物）；
+    - ``profile`` 的值统一成去空白字符串；
+    - ``relation``（人物关系）：只有角色用得上，场景留空即可；
+      给了非字符串（例如列表）时拼成一句，不整段丢掉。
+    """
+    warnings = warnings if warnings is not None else []
+    result: list[DramaPlanNamedAssetDraft] = []
+    seen: set[str] = set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        name = coerce_str(item.get("name"))
+        key = normalize_name(name)
+        if not name or not key or key in seen:
+            continue
+        seen.add(key)
+        relation = text_or_joined(item.get("relation")) if relation_field or "relation" in item else ""
+        result.append(
+            DramaPlanNamedAssetDraft(
+                name=name,
+                relation=relation,
+                profile={str(k): coerce_str(v) for k, v in (item.get("profile") or {}).items()},
+                shot_indexes=[
+                    value
+                    for value in (coerce_int(x, default=0) or 0 for x in item.get("shot_indexes") or [])
+                    if value
+                ],
+            )
+        )
+    return result
 
 
 def postprocess_plan(
     raw: dict[str, Any],
     *,
     shot_count: int,
+    allow_empty_shots: bool = False,
 ) -> tuple[DramaPlanDraft, list[str]]:
-    """把模型返回的 JSON 归一到 ``DramaPlanDraft``（确定性后校验，越界即修正并记 warning）。"""
+    """把模型返回的 JSON 归一到 ``DramaPlanDraft``（确定性后校验，越界即修正并记 warning）。
+
+    ``allow_empty_shots=True``：分阶段生成里"一句话 / 完整剧情"这两步**本来就没有镜头**，
+    此时空镜头不是失败（默认 ``False`` 保持既有语义：一次出全部时没有镜头就是失败）。
+    """
     warnings: list[str] = []
 
-    characters: list[DramaPlanNamedAssetDraft] = []
-    seen_characters: set[str] = set()
-    for item in raw.get("characters") or []:
-        if not isinstance(item, dict):
-            continue
-        name = coerce_str(item.get("name"))
-        key = normalize_name(name)
-        if not name or not key or key in seen_characters:
-            continue
-        seen_characters.add(key)
-        characters.append(
-            DramaPlanNamedAssetDraft(
-                name=name,
-                profile={str(k): coerce_str(v) for k, v in (item.get("profile") or {}).items()},
-                shot_indexes=[value for value in (coerce_int(x, default=0) or 0 for x in item.get("shot_indexes") or []) if value],
-            )
-        )
+    characters = normalize_named_assets(raw.get("characters"), warnings=warnings, relation_field=True)
+    scenes = normalize_named_assets(raw.get("scenes"), warnings=warnings)
 
-    scenes: list[DramaPlanNamedAssetDraft] = []
-    seen_scenes: set[str] = set()
-    for item in raw.get("scenes") or []:
-        if not isinstance(item, dict):
-            continue
-        name = coerce_str(item.get("name"))
-        key = normalize_name(name)
-        if not name or not key or key in seen_scenes:
-            continue
-        seen_scenes.add(key)
-        scenes.append(
-            DramaPlanNamedAssetDraft(
-                name=name,
-                profile={str(k): coerce_str(v) for k, v in (item.get("profile") or {}).items()},
-                shot_indexes=[value for value in (coerce_int(x, default=0) or 0 for x in item.get("shot_indexes") or []) if value],
-            )
-        )
-
-    product_raw = raw.get("product")
-    product: DramaPlanProductDraft | None = None
-    if isinstance(product_raw, dict):
-        product_name = coerce_str(product_raw.get("name"))
-        if product_name:
-            product = DramaPlanProductDraft(
-                name=product_name,
-                description=coerce_str(product_raw.get("description")),
-                profile={str(k): coerce_str(v) for k, v in (product_raw.get("profile") or {}).items()},
-                shot_indexes=[value for value in (coerce_int(x, default=0) or 0 for x in product_raw.get("shot_indexes") or []) if value],
-            )
-        else:
-            warnings.append("模型返回的 product 没有名称，已忽略该字段。")
+    product: DramaPlanProductDraft | None = normalize_product(raw.get("product"), warnings=warnings)
 
     shot_types: dict[str, int] = {}
     shots: list[DramaPlanShotDraft] = []
@@ -326,7 +422,7 @@ def postprocess_plan(
             )
         )
 
-    if not shots:
+    if not shots and not allow_empty_shots:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="模型返回里没有任何可用镜头，本次生成视为失败（不落草稿）。",
@@ -386,14 +482,23 @@ def postprocess_plan(
                 "确认时会再校验一次。"
             )
 
-    if len(shots) != shot_count:
-        warnings.append(f"要求 {shot_count} 个镜头，模型返回可用 {len(shots)} 个（已修正编号）。")
-    if shot_types.get(DEFAULT_SHOT_TYPE, 0) == len(shots) and len(shots) > 1:
-        warnings.append("所有镜头景别都相同，注意画面单调。")
+    # 这两条只在"本来应该有镜头"时才有意义：分阶段生成的一句话 / 完整剧情两步没有镜头，
+    # 那不是"少给了镜头"，被这里告警会让用户看到与自己无关的提示。
+    if shots:
+        if len(shots) != shot_count:
+            warnings.append(f"要求 {shot_count} 个镜头，模型返回可用 {len(shots)} 个（已修正编号）。")
+        if shot_types.get(DEFAULT_SHOT_TYPE, 0) == len(shots) and len(shots) > 1:
+            warnings.append("所有镜头景别都相同，注意画面单调。")
 
     plan = DramaPlanDraft(
         title=coerce_str(raw.get("title")),
-        logline=coerce_str(raw.get("logline")),
+        # **兼容映射**：历史上 `logline` 承载"一句话主线"，分层路径引入 `one_liner` 之后
+        # 两者是同一件事。唯一事实来源是 `one_liner`；模型只给了 `logline` 时映射过来，
+        # 保证页面与数据库读的是同一个字段，不会一处显示一处为空。
+        logline=coerce_str(raw.get("logline")) or text_or_joined(raw.get("one_liner")),
+        one_liner=text_or_joined(raw.get("one_liner") or raw.get("oneLiner")),
+        audience_emotion=text_or_joined(raw.get("audience_emotion") or raw.get("audienceEmotion")),
+        story=normalize_story_fields(raw.get("story")),
         selling_points=coerce_str_list(raw.get("sellingPoints") or raw.get("selling_points")),
         characters=characters,
         scenes=scenes,
@@ -403,6 +508,103 @@ def postprocess_plan(
         warnings=warnings,
     )
     return plan, warnings
+
+
+async def run_plan_completion(
+    db: AsyncSession,
+    *,
+    prompt: str,
+    llm_caller: TextLLMCaller | None = None,
+) -> dict[str, Any]:
+    """一次文本调用的**统一管线**：解析目标 → 演练判定 → 调模型 → JSON 抢救解析。
+
+    为什么抽出来（而不是让分阶段生成各写一遍）：这条管线的每一条边界都是"不能写半成品"
+    的落点 —— 演练下**一次都不调**、解析失败一律 422 且不落库、meta 里如实标注是否真的
+    调用了模型。复制一份的下场是两条路迟早不一致（例如只有一条路上 meta 带了 ``llm_called``，
+    页面就会在付费这件事上显示错）。
+
+    返回：
+
+    - ``dry_run``：是否演练占位（没有调用任何模型）；
+    - ``target``：解析到的模型目标（演练且未配置模型时为 ``None``）；
+    - ``raw_text`` / ``parsed`` / ``repairs``：模型原文、解析出的对象、JSON 抢救痕迹；
+    - ``meta``：``LlmRunMeta``（可直接放进草稿行 ``meta``）。
+    """
+    if llm_caller is None:
+        try:
+            target = await resolve_text_llm_target(db)
+        except HTTPException:
+            if not dry_run.dry_run_enabled():
+                raise
+            target = None
+    else:
+        # 测试注入的 caller：不走网络、不解析模型配置（与编排层其他服务同口径）
+        target = None
+
+    if llm_caller is None and dry_run.dry_run_enabled():
+        return {
+            "dry_run": True,
+            "target": target,
+            "raw_text": "",
+            "parsed": None,
+            "repairs": [],
+            "meta": build_run_meta(
+                target=target, llm_called=False, raw_output_chars=0, dry_run_reason=dry_run.short_status()
+            ),
+        }
+
+    latency_ms: int | None = None
+    if llm_caller is None:
+        try:
+            completion = await call_text_llm(prompt, target=target)
+        except LLMRequestError as exc:
+            raise_llm_failure(exc)
+            raise  # pragma: no cover - raise_llm_failure 一定抛异常
+        raw_text, latency_ms = completion.text, completion.latency_ms
+    else:
+        try:
+            raw_text = await llm_caller(prompt)
+        except LLMRequestError as exc:
+            raise_llm_failure(exc)
+            raise  # pragma: no cover
+        latency_ms = None
+
+    try:
+        parsed, repairs = parse_json_object_with_repairs(raw_text)
+    except JSONParseError as exc:
+        # 解析失败**不落库、不写半成品**：直接 422 结构化明细
+        raise_parse_failure(exc, raw_text=raw_text)
+        raise  # pragma: no cover
+
+    return {
+        "dry_run": False,
+        "target": target,
+        "raw_text": raw_text,
+        "parsed": parsed,
+        "repairs": repairs,
+        "latency_ms": latency_ms,
+        "meta": build_run_meta(
+            target=target,
+            llm_called=True,
+            latency_ms=latency_ms,
+            raw_output_chars=len(raw_text),
+            json_repairs=repairs,
+        ),
+    }
+
+
+def dry_run_stage_result(outcome: dict[str, Any], *, note: str) -> dict[str, Any]:
+    """演练占位结果（**没有 plan**，只有一句说明 + 如实标注未调用模型）。
+
+    为什么占位而不是给假草稿：假 JSON 一旦被上层写进 ``drama_plan_drafts.plan``
+    就是污染 —— 用户会看到"生成好了"，而里面是编的。
+    """
+    return {
+        "plan": None,
+        "warnings": [shortcut_context(skill="剧情策划")],
+        "meta": outcome["meta"],
+        "note": note,
+    }
 
 
 async def preview_drama_plan(
@@ -436,72 +638,124 @@ async def preview_drama_plan(
         style_hint=style_hint,
     )
 
-    if llm_caller is None:
-        try:
-            target = await resolve_text_llm_target(db)
-        except HTTPException:
-            if not dry_run.dry_run_enabled():
-                raise
-            target = None
-    else:
-        target = None
+    outcome = await run_plan_completion(db, prompt=prompt, llm_caller=llm_caller)
+    if outcome["parsed"] is None:
+        # 演练：不调用任何模型，也不给出假草稿
+        return dry_run_stage_result(outcome, note="演练模式：未调用模型，未生成草稿。")
 
-    if llm_caller is None and dry_run.dry_run_enabled():
-        # 演练：不调用任何模型，也不给出假草稿（假 JSON 会被上层写进草稿列，那是污染）
-        return {
-            "plan": None,
-            "warnings": [shortcut_context(skill="剧情策划")],
-            "meta": build_run_meta(
-                target=target, llm_called=False, raw_output_chars=0, dry_run_reason=dry_run.short_status()
-            ),
-            "note": "演练模式：未调用模型，未生成草稿。",
-        }
-
-    if llm_caller is None:
-        try:
-            completion = await call_text_llm(prompt, target=target)
-        except LLMRequestError as exc:
-            raise_llm_failure(exc)
-            raise  # pragma: no cover - raise_llm_failure 一定抛异常
-        raw_text, latency_ms = completion.text, completion.latency_ms
-    else:
-        # 测试注入的 caller：不走网络、不解析模型配置（与编排层其他服务的 llm_caller 同口径）
-        try:
-            raw_text = await llm_caller(prompt)
-        except LLMRequestError as exc:
-            raise_llm_failure(exc)
-            raise  # pragma: no cover
-        latency_ms = None
-
-    try:
-        parsed, repairs = parse_json_object_with_repairs(raw_text)
-    except JSONParseError as exc:
-        # 解析失败**不落库、不写半成品**：直接 422 结构化明细
-        raise_parse_failure(exc, raw_text=raw_text)
-        raise  # pragma: no cover
-
-    plan, warnings = postprocess_plan(parsed, shot_count=shot_count)
+    plan, warnings = postprocess_plan(outcome["parsed"], shot_count=shot_count)
+    # 三层缺一不可：不完整就**不返回草稿**（服务层因此不会把状态标成 ok）
+    require_complete_plan(plan, stage="all")
+    repairs = list(outcome["repairs"] or [])
     if repairs:
         warnings.insert(0, f"模型输出经 JSON 抢救后解析成功：{'、'.join(repairs)}。")
     return {
         "plan": plan.model_dump(),
         "warnings": warnings,
-        "meta": build_run_meta(
-            target=target,
-            llm_called=True,
-            latency_ms=latency_ms,
-            raw_output_chars=len(raw_text),
-            json_repairs=repairs,
-        ),
+        "meta": outcome["meta"],
         "note": "仅为草稿：确认之前不落任何正式行（章节/分镜/资产都还没有变化）。",
     }
+
+
+async def preview_drama_stage(
+    db: AsyncSession,
+    *,
+    chapter_id: str,
+    brief: dict[str, Any],
+    stage: str = DEFAULT_STAGE,
+    current_plan: dict[str, Any] | None = None,
+    llm_caller: TextLLMCaller | None = None,
+) -> dict[str, Any]:
+    """**阶段化生成的唯一入口**（薄转发到 ``drama_story``）。
+
+    为什么在这里转发：阶段化实现（``drama_story``）要复用本模块的内部函数，本模块若在
+    顶层 import 它就会成环。所以这里用**函数内延迟导入**，调用方（服务层）只需要认
+    ``drama_plan`` 这一个入口，不必同时 import 两个模块、也不会踩到导入顺序。
+    """
+    from app.services.studio.llm_orchestration import drama_story
+
+    return await drama_story.preview_drama_stage(
+        db,
+        chapter_id=chapter_id,
+        brief=brief,
+        stage=stage,
+        current_plan=current_plan,
+        llm_caller=llm_caller,
+    )
 
 
 __all__ = [
     "ALLOWED_DURATIONS",
     "MAX_SHOT_COUNT",
+    "MIN_STORY_CHARS",
+    "STORY_FIELD_ALIASES",
     "build_drama_plan_prompt",
+    "dry_run_stage_result",
+    "normalize_named_assets",
+    "normalize_product",
+    "normalize_story_fields",
     "postprocess_plan",
     "preview_drama_plan",
+    "preview_drama_stage",
     "render_brief_text",
+    "run_plan_completion",
+    "text_or_joined",
 ]
+
+
+#: 完整剧情全文的**最低字数**（生成侧判据：短于它一律算"没有完整剧情"）
+MIN_FULL_TEXT_CHARS = 60
+
+#: 「一次生成完整策划」的三层必需内容（缺任何一层都不算生成成功）
+REQUIRED_LAYERS: tuple[tuple[str, str], ...] = (
+    ("one_liner", "一句话核心创意"),
+    ("story", "完整剧情全文"),
+    ("shots", "分镜"),
+)
+
+
+def missing_layers(plan: Any, *, min_full_text_chars: int = 0) -> list[str]:
+    """列出这份草稿**缺了哪几层**（返回中文层名，空列表 = 三层齐全）。
+
+    判据只看"这一层有没有真内容"，不看字段是否存在：空串、全空白的全文都不算有。
+    ``min_full_text_chars``：生成侧传 :data:`MIN_FULL_TEXT_CHARS`（60 字，挡掉"20 字残句冒充完整剧情"）；
+    确认侧传 0（只要求**确实有一份剧情** —— 用户手写短稿是他的自由，但"没有剧情"绝不允许落库）。
+    这是**确定性校验**（不调用模型），也是"不允许把没有完整剧情的草稿当成生成成功"的落点。
+    """
+    missing: list[str] = []
+    one_liner = text_or_joined(getattr(plan, "one_liner", ""))
+    story = getattr(plan, "story", None)
+    full_text = text_or_joined(getattr(story, "full_text", ""))
+    shots = list(getattr(plan, "shots", []) or [])
+    if not one_liner.strip():
+        missing.append("一句话核心创意")
+    if len(full_text.strip()) < max(1, min_full_text_chars):
+        # "非空"不够：真机验收里出现过 20 字的人工残句被当成完整剧情。
+        # 这里按长度兜底（生成侧判据），阈值为 60 字 —— 远高于任何残句，远低于真实剧情（600~1200 字）。
+        missing.append("完整剧情全文")
+    if not shots:
+        missing.append("分镜")
+    return missing
+
+
+def require_complete_plan(plan: Any, *, stage: str = "all") -> None:
+    """三层缺内容就抛 **422**（结构化中文），调用方据此**不得标记生成完成**。
+
+    为什么必须有这道闸：真机验收里"一次生成全部"返回了 6 个分镜、人物场景商品齐全，
+    但 `story.full_text` 为空 —— 页面上看不出问题、草稿却是不完整的，
+    后面"确认策划"会把没有剧情的方案落成正式镜头。宁可当场报错说清缺哪一层。
+    """
+    missing = missing_layers(plan, min_full_text_chars=MIN_FULL_TEXT_CHARS)
+    if not missing:
+        return
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "code": "drama_plan_incomplete",
+            "message": "本次生成的内容不完整，缺少：" + "、".join(missing) + "。",
+            "fix": "重新生成一次（一次调用应同时产出一句话、完整剧情与分镜）；"
+                   "缺完整剧情时，确认策划会被拒绝。",
+            "stage": stage,
+            "missing_layers": missing,
+        },
+    )

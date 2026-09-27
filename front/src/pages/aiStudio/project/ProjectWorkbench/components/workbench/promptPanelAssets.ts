@@ -23,6 +23,7 @@
 
 import type { ProjectSignalAsset } from '../../hooks/useProjectStepSignals'
 import {
+  isWorkbenchTabType,
   workbenchItemKey,
   workbenchItemName,
   workbenchItemType,
@@ -53,6 +54,18 @@ export const NO_ASSET_ID_REASON = '这一项在本章只有资料记录、还没
 /** 选择键在清单里找不到对应项：清单可能刚重算过。 */
 export const STALE_SELECTION_REASON = '这一项已不在本章资产清单里：请重新分析本章资产后再勾选。'
 
+/**
+ * 商品不进这个面板：它没有出图提示词槽位（图由人工上传 + 手动定版）。
+ *
+ * 为什么必须显式说出来：用户勾了商品再点「生成图片提示词（N）」，如果不解释，
+ * 就会出现"按钮说 3 项、实际只发生 2 次"的数量对不上（与服装那条历史坑同一类）。
+ */
+export const PRODUCT_NO_PROMPT_REASON =
+  '商品的图片由人工上传并手动设为定版，不需要生成图片提示词：请到商品资产页上传图片。'
+
+/** 后端给了当前版本还不认识的资产类型：不猜、不送进面板。 */
+export const UNREGISTERED_TYPE_REASON = '这一项的资产类型当前版本还不认识：先不要为它生成图片提示词。'
+
 /** 选择键与清单键必须完全同口径（面板行的 key 就是它）。 */
 export function promptPanelAssetKey(asset: PromptPanelAssetLike): string {
   return `${asset.type}:${String(asset.id ?? '')}`
@@ -66,6 +79,8 @@ export function promptPanelAssetKey(asset: PromptPanelAssetLike): string {
  *   - 每一行的键 `promptPanelAssetKey(row)` 一定在 `selectedKeys` 里（键对齐）；
  *   - 同一项资产只出现一次（键去重）；
  *   - 服装**不丢**（它与角色/场景/道具一样能生成提示词）；
+ *   - **商品不进 `assets`**（它没有出图提示词槽位：图由人工上传 + 手动定版），
+ *     但一定进 `skipped` 并写清原因，不静默丢失；
  *   - `asset_id` 为空的项不进 `assets`，进 `skipped` 并带上原因。
  */
 export function selectPromptPanelAssets(
@@ -88,10 +103,20 @@ export function selectPromptPanelAssets(
       skipped.push({ key, name, reason: NO_ASSET_ID_REASON })
       return
     }
+    const bucket = workbenchItemType(item)
+    if (!isWorkbenchTabType(bucket)) {
+      /* 后端给了未登记的类型：不冒充某一类资产，也不送进面板（如实说明）。 */
+      skipped.push({ key, name, reason: UNREGISTERED_TYPE_REASON })
+      return
+    }
+    if (bucket === 'product') {
+      skipped.push({ key, name, reason: PRODUCT_NO_PROMPT_REASON })
+      return
+    }
     assets.push({
       id: assetId,
       name,
-      type: workbenchItemType(item),
+      type: bucket,
       hasImage: item.image?.has_image === true,
       thumbnail: item.image?.thumbnail ?? '',
       hasPrimary: item.image?.has_primary === true,

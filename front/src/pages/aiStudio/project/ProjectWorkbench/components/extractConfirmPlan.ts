@@ -14,7 +14,14 @@
  *   - `create_new`：在项目里**新建**一份资产（角色可选带演员绑定），再把候选挂上去。
  */
 
-export type ConfirmAssetKind = 'character' | 'scene' | 'prop' | 'costume'
+/**
+ * 可确认的资产类型。
+ *
+ * **商品（`product`）在列**：契约 §六 里它是第五类资产，与场景/道具/服装一样
+ * 从候选走来（「关联资产库已有商品」或「新建商品」）。少这一类时，
+ * 商品候选会在页面入口就被静默丢掉（`isAssetKind` 只认四类），用户看到的是"提取没结果"。
+ */
+export type ConfirmAssetKind = 'character' | 'scene' | 'prop' | 'costume' | 'product'
 
 /** 确认方式：只有「关联已有」和「新建」两条路，角色那条对应「关联全局演员」。 */
 export type ConfirmStrategy = 'link_existing' | 'link_actor' | 'create_new'
@@ -34,6 +41,8 @@ export const CONFIRM_KIND_META: Record<ConfirmAssetKind, ConfirmKindLabel> = {
   scene: { label: '场景', linkSourceLabel: '资产库' },
   prop: { label: '道具', linkSourceLabel: '资产库' },
   costume: { label: '服装', linkSourceLabel: '资产库' },
+  /* 商品也是全局资产（`products` 表不带 project_id），「关联已有」同样从资产库挑。 */
+  product: { label: '商品', linkSourceLabel: '资产库' },
 }
 
 export function confirmKindLabel(kind: ConfirmAssetKind): string {

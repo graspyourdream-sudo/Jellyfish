@@ -64,6 +64,16 @@ def _plan_payload(*, product_present: tuple[bool, bool, bool] = (True, True, Fal
     return {
         "title": "面试那天",
         "logline": "她带着一瓶精华去面试，面试官是前任",
+        # 确认策划的前置条件（契约）：草稿必须有**一句话**与**完整剧情全文**
+        "one_liner": "她带着一瓶精华去面试，面试官是前任",
+        "story": {
+            "full_text": "会议室里，她把精华瓶拍在桌上。\n前任抬头说：好久不见。\n她笑而不语。",
+            "hook": "瓶子拍在桌上",
+            "conflict": "面试官是前任",
+            "product_usage": "她用精华当武器",
+            "climax": "前任说这瓶是他买的",
+            "cta": "她把它推回去",
+        },
         "selling_points": ["三秒吸收 → 她当众拍在桌上"],
         "characters": [
             {"name": "林小满", "profile": {"appearance": "鹅蛋脸"}, "shot_indexes": [1, 2, 3]},

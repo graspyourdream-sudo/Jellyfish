@@ -38,7 +38,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
@@ -109,6 +109,59 @@ class DramaPlanDraft(Base, TimestampMixin):
         DateTime(timezone=True),
         nullable=True,
         comment="租约到期时间；到期后允许重新抢占（避免中断后永久卡住）",
+    )
+
+    # ------------------------------------------------------------------
+    # 「分层剧情 + 确认策划」新增的 6 列（实施契约 §一.3）。
+    #
+    # 与既有 `status` 的分工（别混用）：
+    # - `status`      = **生成状态**（""未生成 / running / ok / failed），回答"模型跑完了吗"；
+    # - `story_status`= **策划确认状态**（none / draft / confirmed），回答"人确认了吗"。
+    #   确认之后才允许幂等落库（§三），所以两者必须分开：一次成功的生成（ok）
+    #   完全可以还没被确认（none/draft）。
+    #
+    # 三列时间戳各管一段：
+    # - `manual_edited_at`：最近一次人工编辑时间。**生成前若晚于上次生成时间，必须显式确认覆盖**
+    #   （契约 §二 的 `confirm_overwrite`，否则 409）—— 这一列就是那个判断的依据；
+    # - `confirmed_at`：策划确认时间；
+    # - `materialized_at`：落库（materialize）时间。
+    # ------------------------------------------------------------------
+    story_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="none",
+        server_default="none",
+        comment="策划确认状态：none=未确认 / draft=人工改过未确认 / confirmed=已确认（与 status 生成状态分工不同）",
+    )
+    stale_flags: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
+        comment="过期标记：{one_liner_changed_at, story_changed_at, story_stale, shots_stale, reasons[]}"
+        "（改了上一步就标下一步过期，页面据此提示「需要重新生成」）",
+    )
+    manual_edited_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="最近一次人工编辑时间（晚于上次生成时间时，重新生成必须显式确认覆盖）",
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="策划确认时间（story_status=confirmed 的时间点）",
+    )
+    materialized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="落库时间（确认后把剧情/分镜/资产写成正式产物，幂等）",
+    )
+    materialize_summary: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
+        comment="落库统计（镜头数/资产数/关联行/跳过项），供幂等复核与页面回显",
     )
 
     chapter: Mapped["Chapter"] = relationship()

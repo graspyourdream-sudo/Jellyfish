@@ -92,6 +92,7 @@ import {
   findIdempotentReuse,
   generateActionLabel,
   hasUnsettledTasks,
+  isProductionAssetType,
   isSubmittableAssetType,
   PROMPT_SLOT_BY_ASSET_TYPE,
   orderCardsForDisplay,
@@ -2199,7 +2200,7 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
         block
         value={tab}
         onChange={(value) => setTab(value as ProductionAssetType)}
-        options={ASSET_TYPE_ORDER.map((type) => {
+        options={ASSET_TYPE_ORDER.filter(isProductionAssetType).map((type) => {
           const typeAssets = productionAssets.filter((asset) => asset.type === type)
           const done = typeAssets.filter((asset) => asset.hasPrimary).length
           return { label: `${ASSET_TYPE_LABEL[type]} ${done}/${typeAssets.length}`, value: type }

@@ -108,9 +108,14 @@ export function assetTypeProductionSpec(assetType: ProductionAssetType): AssetTy
   }
 }
 
-/** 全部四类的生产口径（按人物 / 场景 / 道具 / 服装顺序）。 */
+/**
+ * 全部**出图四类**的生产口径（按人物 / 场景 / 道具 / 服装顺序）。
+ *
+ * ⚠️ 刻意按出图口径排，不用 `ASSET_TYPE_ORDER`（后者多一个商品）：
+ * 商品没有提示词槽位、没有结果类型、没有出图画幅，给它编一套只会误导。
+ */
 export function assetTypeProductionSpecs(): AssetTypeProductionSpec[] {
-  return ASSET_TYPE_ORDER.map((assetType) => assetTypeProductionSpec(assetType))
+  return IMAGE_ASSET_TYPE_ORDER.map((assetType) => assetTypeProductionSpec(assetType))
 }
 
 /**
@@ -145,16 +150,45 @@ export function collectTypeNamingProblems(
  */
 export type ProductionAssetType = ImageAssetType
 
-/** 分页签顺序：人物 / 场景 / 道具 / 服装。 */
-export const ASSET_TYPE_ORDER: ProductionAssetType[] = ['character', 'scene', 'prop', 'costume']
+/**
+ * **资产准备区**认的资产类型：出图四类 + **商品**（契约 §六 的第五类资产）。
+ *
+ * 与 `ProductionAssetType`（出图口径）刻意分开：
+ *   - `ProductionAssetType` 是**出图**的类型集合（后端 `SERVICE_ASSET_TYPES` 同集合），
+ *     提示词槽位 / 结果类型 / 画幅都只对这四类有意义；
+ *   - 本类型是**资产准备**的类型集合：商品也要在这一步出现在清单里、被计数、
+ *     被判"有没有图 / 有没有定版"，只是它的图**不走出图通道**
+ *     （由用户手动上传 + 手动定版），所以它不进 `SUBMITTABLE_ASSET_TYPES`，
+ *     也不进 `assetTypeProductionSpecs()`。
+ */
+export type PreparationAssetType = ProductionAssetType | 'product'
 
-/** 分页签标题（用户语言）。 */
-export const ASSET_TYPE_LABEL: Record<ProductionAssetType, string> = {
+/** 商品的类型码（写一次，别到处写字符串字面量）。 */
+export const PRODUCT_ASSET_TYPE = 'product' as const
+
+/** 这个类型走出图通道吗（`product` 不走出图通道：图由人工上传 + 手动定版）。 */
+export function isProductionAssetType(value: unknown): value is ProductionAssetType {
+  return value === 'character' || value === 'scene' || value === 'prop' || value === 'costume'
+}
+
+/** 资产类型顺序：人物 / 场景 / 道具 / 服装 / **商品**（列表与计数顺序）。 */
+export const ASSET_TYPE_ORDER: PreparationAssetType[] = ['character', 'scene', 'prop', 'costume', 'product']
+
+/** 类型标题（用户语言）。 */
+export const ASSET_TYPE_LABEL: Record<PreparationAssetType, string> = {
   character: '人物',
   scene: '场景',
   prop: '道具',
   costume: '服装',
+  product: '商品',
 }
+
+/**
+ * 商品图这一步该怎么做（主区直接显示的一句话）。
+ *
+ * 为什么必须写清楚：商品**没有**出图按钮，如果不说，用户会以为"商品漏了"。
+ */
+export const PRODUCT_ASSET_HINT = '商品的图片由人工上传并手动「设为定版」，不走出图通道。'
 
 /**
  * 现在**四类都能出图**（人物 / 场景 / 道具 / 服装）：
@@ -216,7 +250,8 @@ export function toProductionAssets(
   assets: readonly {
     id: string
     name: string
-    type: ProductionAssetType
+    /** 放宽到 `string`：项目资产清单里还有商品等**不走出图通道**的类型，由本函数负责筛掉 */
+    type: string
     hasImage: boolean
     hasPrimary: boolean
     hasImagePrompt: boolean
@@ -227,10 +262,13 @@ export function toProductionAssets(
     primaryReachabilityNote?: string
   }[],
 ): ProductionAsset[] {
-  return assets.map((asset) => ({
-    key: assetKeyOf(asset.type, asset.id),
+  /* 只收**出图四类**：商品在项目资产清单里，但它不走出图通道
+     （图由人工上传 + 手动定版），所以不进结果区，避免出现一个只能报错的空壳行。 */
+  return assets.filter((asset) => isImageAssetType(asset.type)).map((asset) => ({
+    key: assetKeyOf(asset.type as ProductionAssetType, asset.id),
     id: asset.id,
-    type: asset.type,
+    /* 上面的 filter 已经把类型收窄到出图四类（`isImageAssetType`）。 */
+    type: asset.type as ProductionAssetType,
     name: asset.name || asset.id,
     hasImage: asset.hasImage === true,
     hasPrimary: asset.hasPrimary === true,

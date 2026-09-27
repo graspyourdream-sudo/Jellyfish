@@ -43,7 +43,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.studio import Chapter, Shot
+from app.models.studio import Chapter, Character, Costume, Product, Prop, Scene, Shot
 from app.services.common import entity_not_found
 from app.services.studio.asset_profiles import (
     ASSET_TYPES,
@@ -87,6 +87,30 @@ from app.services.studio.llm_orchestration.support import build_run_meta, dry_ru
 
 #: 参与本流程的资产类型（与候选类型一致）
 CANDIDATE_TYPES: tuple[str, ...] = ASSET_TYPES
+
+#: 资产类型 → 实体模型：冲突判定回读 ``description``、名称回读 ``name`` 两处共用一份。
+#: 它必须与 :data:`CANDIDATE_TYPES` 覆盖同一批类型 —— 漏一个类型不会在导入期报错，
+#: 只会在"库里恰好存在该类型的同名命中"那一刻炸，而那时错误形态是 KeyError/空名字，
+#: 定位成本极高（本轮商品就是这样漏的）。因此取值**一律**走 :func:`_asset_model`。
+_MODEL_BY_ASSET_TYPE: dict[str, Any] = {
+    "character": Character,
+    "scene": Scene,
+    "prop": Prop,
+    "costume": Costume,
+    "product": Product,
+}
+
+
+def _asset_model(asset_type: str) -> Any:
+    """取资产类型对应的实体模型；越界时报出能直接定位的错误而不是 ``KeyError``。"""
+    model = _MODEL_BY_ASSET_TYPE.get(str(asset_type))
+    if model is None:
+        raise ValueError(
+            f"资产类型 {asset_type!r} 没有实体模型：请同步 chapter_asset_profiles._MODEL_BY_ASSET_TYPE"
+            " 与 asset_profiles.ASSET_TYPES（两者必须是同一批类型）"
+        )
+    return model
+
 
 #: 出场镜头依据里，每段剧本原文保留的字符数上限（脱敏/控体积）
 MAX_EVIDENCE_CHARS = 240
@@ -679,9 +703,6 @@ async def _load_existing_descriptions(
     existing_by_type: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, str]:
     """取库中同名资产的 ``description``（冲突判定要用，只读）。"""
-    from app.models.studio import Character, Costume, Prop, Scene
-
-    models = {"character": Character, "scene": Scene, "prop": Prop, "costume": Costume}
     ids_by_type: dict[str, set[str]] = {asset_type: set() for asset_type in ASSET_TYPES}
     for (asset_type, _key), hit in existing_by_type.items():
         if hit.get("exists") and hit.get("asset_id"):
@@ -690,7 +711,8 @@ async def _load_existing_descriptions(
     for asset_type, ids in ids_by_type.items():
         if not ids:
             continue
-        rows = (await db.execute(select(models[asset_type]).where(models[asset_type].id.in_(sorted(ids))))).scalars().all()
+        model = _asset_model(asset_type)
+        rows = (await db.execute(select(model).where(model.id.in_(sorted(ids))))).scalars().all()
         for row in rows:
             result[str(row.id)] = str(getattr(row, "description", "") or "")
     return result
@@ -732,7 +754,7 @@ async def _match_existing(
 ) -> dict[tuple[str, str], dict[str, Any]]:
     """用既有存在性接口做"是否已有同名资产"的匹配（复用，不另写一套）。
 
-    **每个名称都要在四类里各查一次**（不是只查自己那一类）：只有这样才可能发现
+    **每个名称都要在每一类里各查一次**（不是只查自己那一类）：只有这样才可能发现
     "库里已有同名资产，但类型与本次判断不同"这种冲突 —— 只查同类是永远看不见它的。
     """
     buckets: dict[str, list[str]] = {f"{asset_type}_names": [] for asset_type in ASSET_TYPES}
@@ -749,6 +771,9 @@ async def _match_existing(
             prop_names=buckets["prop_names"],
             scene_names=buckets["scene_names"],
             costume_names=buckets["costume_names"],
+            # 上面按 ASSET_TYPES 生成的 product_names 必须真的传下去：漏传时商品永远
+            # 匹配不到同名命中，"库里已有同名商品"会被判成"没有"。
+            product_names=buckets["product_names"],
         )
     except HTTPException:
         return {}
@@ -786,14 +811,13 @@ async def _load_asset_names(
     ids_by_type: dict[str, set[str]],
 ) -> dict[str, str]:
     """按 id 取回库里资产的**真实名称**（用于区分"完全同名"与"名字里含它"）。"""
-    from app.models.studio import Character, Costume, Prop, Scene
-
-    models: dict[str, Any] = {"character": Character, "scene": Scene, "prop": Prop, "costume": Costume}
     names: dict[str, str] = {}
     for asset_type, ids in ids_by_type.items():
-        if not ids or asset_type not in models:
+        if not ids:
             continue
-        model = models[asset_type]
+        # 类型越界要在这里报清楚（而不是 continue 掉）：静默跳过会让"完全同名/fuzzy"判定
+        # 悄悄退化成"库里没有这个名字"，冲突检测随之失准且不留痕迹。
+        model = _asset_model(asset_type)
         rows = (await db.execute(select(model.id, model.name).where(model.id.in_(sorted(ids))))).all()
         for row in rows:
             names[str(row[0])] = str(row[1] or "")

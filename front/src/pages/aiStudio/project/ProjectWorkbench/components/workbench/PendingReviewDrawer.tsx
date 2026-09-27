@@ -21,7 +21,7 @@ import {
 } from './workbenchState.ts'
 import { TechnicalDetailSection } from './TechnicalDetailCollapse.tsx'
 import { buildUserFacingMessage } from '../../../../components/userFacingMessage.ts'
-import type { WorkbenchAssetType } from './workbenchState.ts'
+import { WORKBENCH_OTHER_TYPE, type WorkbenchAssetType } from './workbenchState.ts'
 import type { AssetWorkbenchPendingReview } from './assetWorkbenchContract.ts'
 
 const TYPE_BY_KEY: Record<string, WorkbenchAssetType> = {
@@ -29,6 +29,7 @@ const TYPE_BY_KEY: Record<string, WorkbenchAssetType> = {
   scene: 'scene',
   prop: 'prop',
   costume: 'costume',
+  product: 'product',
 }
 
 export type PendingReviewDrawerProps = {
@@ -66,7 +67,10 @@ export function PendingReviewDrawer(props: PendingReviewDrawerProps) {
                 <Space size={6} wrap>
                   <span className="text-sm font-medium text-slate-800">{row.name || '未命名'}</span>
                   <Tag bordered={false}>{describePendingReviewKind(row.kind)}</Tag>
-                  <Tag bordered={false}>{WORKBENCH_TAB_LABEL[TYPE_BY_KEY[row.asset_type] ?? 'character']}</Tag>
+                  {/* 未登记的类型不冒充人物（`other` 桶给中文兜底）。 */}
+                  <Tag bordered={false}>
+                    {WORKBENCH_TAB_LABEL[TYPE_BY_KEY[row.asset_type] ?? WORKBENCH_OTHER_TYPE]}
+                  </Tag>
                 </Space>
                 <Button size="small" onClick={() => onGoHandle(row)}>
                   去处理

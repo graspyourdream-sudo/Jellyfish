@@ -90,7 +90,7 @@ export function StudioAssetTypeFormModal({
 }: {
   open: boolean
   label: string
-  entityType: 'scene' | 'prop' | 'costume'
+  entityType: 'scene' | 'prop' | 'costume' | 'product'
   editing: StudioAssetLike | null
   linkProjectId?: string
   linkChapterId?: string

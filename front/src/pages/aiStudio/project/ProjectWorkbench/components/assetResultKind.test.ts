@@ -46,19 +46,27 @@ import {
 } from './assetProduction.ts'
 
 function asset(type: ProductionAsset['type'], id: string, patch: Partial<ProductionAsset> = {}): ProductionAsset {
-  return {
+  const base: ProductionAsset = {
     key: `${type}:${id}`,
     id,
     type,
     name: `${type}-${id}`,
     hasImage: false,
     hasPrimary: false,
+    /* 定版图可达性这两个字段在 `ProductionAsset` 里是**必填**（没验证过就必须给保守结论）：
+       夹具的默认值 = "还没验证过"，与生产代码 `toProductionAssets` 的兜底口径一致。 */
+    primaryUsableForGeneration: false,
+    primaryReachabilityNote: '',
     hasImagePrompt: true,
     imageId: null,
     thumbnail: '',
     hasPendingCandidate: false,
-    ...patch,
   }
+  /* 用 `Object.assign` 而不是对象展开：`patch` 是 `Partial<ProductionAsset>`，
+     展开会让上面两个必填字段变成 `boolean | undefined` 而通不过类型检查；
+     `Object.assign` 的返回类型是 `ProductionAsset & Partial<ProductionAsset>`，
+     必填字段仍是 `boolean`。合并语义与原来的 `{ ...默认值, ...patch }` 完全相同。 */
+  return Object.assign(base, patch)
 }
 
 const CHARACTER_ONLY = [asset('character', 'c1'), asset('character', 'c2'), asset('character', 'c3')]
@@ -82,8 +90,18 @@ test('结果类型标签与后端分流表逐条一致（人物参考图 / 场�
     prop: '道具资产图',
     costume: '服装设定图',
   })
-  // 类型中文名与生产区的表必须逐字相同（否则两处会各说各话）
-  assert.deepEqual(IMAGE_ASSET_TYPE_TEXT, ASSET_TYPE_LABEL)
+  /* 类型中文名与生产区的表必须逐字相同（否则两处会各说各话）。
+     新口径：生产区的表多了**商品**（第五类资产，不走出图通道），
+     所以这里改成"出图四类的名字逐字一致 + 多出来的键只能是商品"，
+     而不是把整张表拉平（那样会把商品的差异藏起来）。 */
+  Object.entries(IMAGE_ASSET_TYPE_TEXT).forEach(([type, label]) => {
+    assert.equal(ASSET_TYPE_LABEL[type as keyof typeof ASSET_TYPE_LABEL], label, `${type} 的中文名两处不一致`)
+  })
+  const extraKeys = Object.keys(ASSET_TYPE_LABEL).filter(
+    (key) => !(key in IMAGE_ASSET_TYPE_TEXT),
+  )
+  assert.deepEqual(extraKeys, ['product'], '生产区多出来的类型只允许是商品')
+  assert.equal(ASSET_TYPE_LABEL.product, '商品')
   // 只有人物允许「按定版图片批量出图」
   assert.deepEqual(BATCH_REFERENCE_ALLOWED_BY_ASSET_TYPE, {
     character: true,

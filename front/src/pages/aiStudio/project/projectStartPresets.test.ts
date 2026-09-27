@@ -5,20 +5,39 @@
  * 1. 五个预设（真人竖屏 / 真人横屏 / 2D / 3D / 其他自定义）各自映射到既有项目列；
  * 2. 竖屏预设必须写 9:16（短剧默认），横屏写 16:9；
  * 3. 自定义不覆盖任何字段；
- * 4. 起点决定新建后的落点（提示词起步直接进整集提示词看板）。
+ * 4. 起点决定新建后的落点（提示词起步直接进整集提示词看板）；
+ * 5. 第三种起点「剧情广告」：请求体带 `kind=ad` + `ad_*` 两段，
+ *    落点是**剧情策划页**并带上响应里的 `chapter_id`（不是工作台步骤）；
+ * 6. **UI 起点 ≠ 后端 `start_mode`**：`drama_ad` 在 `start_mode` 上必须是 `script`
+ *    （真实事故：`start_mode: startMode as any` 把这条映射错误吞到运行时才 422，
+ *    第 1 步整条链断掉）。这里既有纯函数用例，也有**源码级守卫**钉住创建请求那一行。
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
+  AD_DEFAULT_SHOT_COUNT,
+  AD_PRODUCT_SOURCE_OPTIONS,
   OVERALL_STYLE_PRESETS,
   START_MODE_OPTIONS,
+  buildAdProductSource,
+  buildAdProjectCreateFields,
+  buildAdRequirements,
+  dramaPlanPath,
   getOverallStylePreset,
+  resolveAssetPreparationPath,
   resolveLandingStep,
   resolveOverallStyleFields,
   resolveProjectVideoRatio,
+  resolveStartLandingPath,
+  toBackendStartMode,
 } from './projectStartPresets.ts'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
 
 test('五个整体风格预设齐全（含其他自定义）', () => {
   assert.deepEqual(
@@ -88,9 +107,171 @@ test('起点决定落点：剧本起步 → 第 1 步；提示词起步 → 整�
   assert.equal(resolveLandingStep('prompts'), 'video_prompt')
 })
 
-test('起点选项文案包含两种生产方式的关键差异', () => {
-  assert.equal(START_MODE_OPTIONS.length, 2)
+test('起点选项：三种生产方式并存（剧本 / 视频提示词 / 剧情广告）', () => {
+  /* 新口径：原来的两种生产方式之外**增加**「剧情广告」，它是项目类型（kind=ad）而不是
+     "从哪开始生产"——所以只断言"顺序与第三种的存在"，不推翻前两种既有口径。 */
+  assert.deepEqual(
+    START_MODE_OPTIONS.map((option) => option.key),
+    ['script', 'prompts', 'drama_ad'],
+  )
+  assert.equal(START_MODE_OPTIONS[2].label, '剧情广告')
+  assert.match(START_MODE_OPTIONS[2].description, /商品|剧情策划/)
   assert.match(START_MODE_OPTIONS[1].description, /默认章节|看板/)
+})
+
+/* ------------------------------- 剧情广告：资料来源 + 制作要求 ------------------------------- */
+
+test('商品资料来源四项齐全（粘贴 / 上传 / 选已有 / 暂无），且都能落到后端四个取值上', () => {
+  assert.deepEqual(
+    AD_PRODUCT_SOURCE_OPTIONS.map((option) => option.key),
+    ['paste', 'upload', 'existing', 'none'],
+  )
+  for (const option of AD_PRODUCT_SOURCE_OPTIONS) {
+    assert.ok(['manual', 'paste', 'upload', 'existing'].includes(option.payloadType), `${option.key} 的落库取值不合法`)
+    assert.ok(option.label.trim().length > 0 && option.hint.trim().length > 0, `${option.key} 缺中文说明`)
+  }
+})
+
+test('「暂无商品资料」落成 manual（后端没有 none 这个取值），其余三种一对一', () => {
+  assert.equal(buildAdProductSource({ choice: 'none' }).type, 'manual')
+  assert.equal(buildAdProductSource({ choice: 'paste', text: '卖点' }).type, 'paste')
+  assert.equal(buildAdProductSource({ choice: 'upload', fileIds: ['f1', 'f2'] }).type, 'upload')
+  assert.equal(buildAdProductSource({ choice: 'existing', productId: 'p1' }).type, 'existing')
+})
+
+test('资料来源只把**对应那一种**的内容填进去（不把粘贴文本塞进上传分支）', () => {
+  assert.deepEqual(buildAdProductSource({ choice: 'paste', text: '一瓶精华', fileIds: ['f1'], productId: 'p1' }), {
+    type: 'paste',
+    text: '一瓶精华',
+    file_ids: [],
+    product_id: '',
+  })
+  assert.deepEqual(buildAdProductSource({ choice: 'upload', text: '不该带上', fileIds: ['f1', '', 'f2'] }), {
+    type: 'upload',
+    text: '',
+    file_ids: ['f1', 'f2'],
+    product_id: '',
+  })
+  assert.deepEqual(buildAdProductSource({ choice: 'existing', productId: 'p1', text: '不该带上' }), {
+    type: 'existing',
+    text: '',
+    file_ids: [],
+    product_id: 'p1',
+  })
+})
+
+test('制作要求：镜头数收口到 1–16、时长不为负，缺省镜头数按 6', () => {
+  assert.equal(buildAdRequirements({}).shot_count, AD_DEFAULT_SHOT_COUNT)
+  assert.equal(buildAdRequirements({ shotCount: 99 }).shot_count, 16)
+  assert.equal(buildAdRequirements({ shotCount: 0 }).shot_count, 1)
+  assert.equal(buildAdRequirements({ shotCount: 4.7 }).shot_count, 4)
+  assert.equal(buildAdRequirements({ durationSeconds: -5 }).duration_seconds, 0)
+  assert.equal(buildAdRequirements({ shotCount: null }).shot_count, AD_DEFAULT_SHOT_COUNT)
+})
+
+test('制作要求：必含 / 禁含按一行一条过滤空行，题材调性去首尾空格', () => {
+  const built = buildAdRequirements({
+    genre: '  都市  ',
+    tone: '爽感',
+    mandatoryElements: ['产品出镜', '', '结尾有 slogan'],
+    forbiddenElements: [''],
+  })
+  assert.equal(built.genre, '都市')
+  assert.deepEqual(built.mandatory_elements, ['产品出镜', '结尾有 slogan'])
+  assert.deepEqual(built.forbidden_elements, [])
+})
+
+test('只有剧情广告才带 kind=ad 与 ad_* 字段（普通短剧的请求体一个字段都不变）', () => {
+  assert.equal(buildAdProjectCreateFields({ startMode: 'script' }), null)
+  assert.equal(buildAdProjectCreateFields({ startMode: 'prompts' }), null)
+  const ad = buildAdProjectCreateFields({
+    startMode: 'drama_ad',
+    productSource: { choice: 'paste', text: '文案' },
+    requirements: { tone: '温情', shotCount: 8 },
+  })
+  assert.ok(ad)
+  assert.equal(ad?.kind, 'ad')
+  assert.equal(ad?.ad_product_source.type, 'paste')
+  assert.equal(ad?.ad_product_source.text, '文案')
+  assert.equal(ad?.ad_requirements.shot_count, 8)
+})
+
+test('剧情广告创建后的落点是剧情策划页，且带上 chapter_id', () => {
+  assert.equal(dramaPlanPath('p1'), '/drama-plan?projectId=p1')
+  assert.equal(
+    resolveStartLandingPath('drama_ad', 'p1', 'c1'),
+    '/drama-plan?projectId=p1&chapterId=c1',
+  )
+  /* 没有 chapter_id 时（后端没回）也不能拼出空参数 —— 退化成只带 projectId。 */
+  assert.equal(resolveStartLandingPath('drama_ad', 'p1', ''), '/drama-plan?projectId=p1')
+  /* 其余起点的落点一个字都没变。 */
+  assert.equal(resolveStartLandingPath('script', 'p1', 'c1'), '/projects/p1?step=script')
+  assert.equal(resolveStartLandingPath('prompts', 'p1', 'c1'), '/projects/p1?step=video_prompt')
+})
+
+/* ---------------------- UI 起点 → 后端 start_mode（真实事故的回归） ---------------------- */
+
+test('后端 start_mode 只有两个取值：UI 起点必须显式换算（drama_ad → script）', () => {
+  /* 后端 `ProjectStartMode` = script | prompts；"剧情广告"由新列 `kind` 表达。
+     这条用例就是那个 422 的回归：三个 UI 起点里**没有任何一个**能直接当 start_mode 用。 */
+  assert.equal(toBackendStartMode('script'), 'script')
+  assert.equal(toBackendStartMode('prompts'), 'prompts')
+  assert.equal(toBackendStartMode('drama_ad'), 'script', '剧情广告在 start_mode 上就是 script')
+  for (const choice of ['script', 'prompts', 'drama_ad'] as const) {
+    assert.ok(
+      ['script', 'prompts'].includes(toBackendStartMode(choice)),
+      `${choice} 换算出了后端不接受的 start_mode`,
+    )
+  }
+})
+
+test('未登记 / 空值的起点一律落到 script（与后端默认值一致，不猜成 prompts）', () => {
+  assert.equal(toBackendStartMode(undefined), 'script')
+  assert.equal(toBackendStartMode(null), 'script')
+  assert.equal(toBackendStartMode(''), 'script')
+  assert.equal(toBackendStartMode('brand_new_mode'), 'script')
+  assert.equal(toBackendStartMode('PROMPTS'), 'script', '大小写不匹配时按 script 兜底，不猜')
+})
+
+test('源码级守卫：创建项目的请求里 start_mode 只能是 script / prompts（不许把 UI 起点直接发出去）', () => {
+  const source = readFileSync(resolve(HERE, 'ProjectLobby.tsx'), 'utf8')
+  /* 去注释：注释里正提到过这条坑，不能拿注释当"证据"。 */
+  const code = source
+    .split('\n')
+    .filter((line) => {
+      const trimmed = line.trim()
+      return !(trimmed.startsWith('/*') || trimmed.startsWith('*') || trimmed.startsWith('//'))
+    })
+    .join('\n')
+
+  const assignments = code.match(/start_mode\s*:[^,\n]*/g) ?? []
+  assert.ok(assignments.length > 0, 'ProjectLobby 里找不到 start_mode 的赋值（守卫会变成空跑）')
+  const offenders = assignments.filter((line) => {
+    const value = line.replace(/^start_mode\s*:/, '').trim()
+    /* 只允许两种写法：走显式换算函数，或直接写字面量 'script' / 'prompts'。 */
+    return !(
+      /^toBackendStartMode\(/.test(value) ||
+      value === "'script'" ||
+      value === "'prompts'"
+    )
+  })
+  assert.deepEqual(offenders, [], `start_mode 的赋值不合法（UI 起点直接发出去会 422）：\n${offenders.join('\n')}`)
+
+  /* 显式钉住那条真实事故的写法：`start_mode: startMode as any` */
+  assert.ok(!/start_mode\s*:\s*startMode\b/.test(code), 'start_mode 又把 UI 起点原样发出去了')
+  assert.ok(!/start_mode[^\n]*as any/.test(code), 'start_mode 上又出现了 as any（会把类型错误吞到运行时）')
+  assert.ok(/toBackendStartMode/.test(code), '创建请求没有走 toBackendStartMode 这个唯一换算处')
+})
+
+test('确认策划后的第 2 步入口：step=extract_assets 且 chapter 做 URL 编码', () => {
+  assert.equal(
+    resolveAssetPreparationPath('p 1', 'c/1'),
+    '/projects/p%201?step=extract_assets&chapter=c%2F1',
+  )
+  assert.equal(
+    resolveAssetPreparationPath('p1', 'c1'),
+    '/projects/p1?step=extract_assets&chapter=c1',
+  )
 })
 
 test('预设里凡带视觉风格的，必须同时有题材风格与画幅（避免写半截配置）', () => {

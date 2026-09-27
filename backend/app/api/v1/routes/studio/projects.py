@@ -26,13 +26,19 @@ from app.services.common import (
     patch_model,
 )
 from app.schemas.studio.projects import (
+    AdProductSource,
+    AdRequirements,
     ProjectCreate,
+    ProjectCreateRead,
     ProjectRead,
     ProjectStyleOptionsRead,
     ProjectUpdate,
     StyleOption,
 )
 from app.schemas.studio.assets import ProjectAssetReadinessRead
+from app.services.studio import ad_flow_service
+from app.services.studio import drama_plan_drafts as drama_plan_drafts_service
+from app.services.studio import product_card_service
 from app.services.studio.asset_prompt_batch import save_asset_image_prompts
 from app.services.studio.project_asset_readiness import build_project_asset_readiness
 
@@ -72,18 +78,30 @@ async def _next_chapter_index(db: AsyncSession, *, project_id: str) -> int:
     return (max(indexes) if indexes else 0) + 1
 
 
-async def _ensure_default_chapter(db: AsyncSession, *, project_id: str) -> bool:
-    """确保项目至少有一个章节；已有章节时什么都不做。
+async def _ensure_default_chapter(
+    db: AsyncSession,
+    *,
+    project_id: str,
+    title: str = "",
+    ensure_existing: bool = False,
+) -> str:
+    """确保项目至少有一个章节，返回**可用章节 ID**（空串 = 没有可用章节）。
 
     为什么「从视频提示词开始」必须自动建章节：整集提示词看板是按章节承载镜头的
     （`shot_details.video_prompt` 挂在镜头上），没有章节就没有承载物，导入预览与
     确认写入都会被挡住。这里只补一个空章节，不写入任何剧本或提示词。
+
+    `ensure_existing=True`（剧情广告创建时用）语义不同：**只复用不新建**——
+    创建向导刚建的项目本来就没有章节，直接建；但若项目已有章节（重复创建/重放），
+    返回既有那一个而不是再造一章，避免出现两个空章节。
     """
-    has_chapter = (
-        await db.execute(select(Chapter.id).where(Chapter.project_id == project_id).limit(1))
+    existing = (
+        await db.execute(
+            select(Chapter.id).where(Chapter.project_id == project_id).order_by(Chapter.index).limit(1)
+        )
     ).scalars().first()
-    if has_chapter:
-        return False
+    if existing:
+        return str(existing) if ensure_existing else ""
     index = await _next_chapter_index(db, project_id=project_id)
     chapter_id = f"{project_id}::EP{index:02d}"
     if await db.get(Chapter, chapter_id) is not None:  # 极端情况下的 id 冲突兜底
@@ -94,14 +112,128 @@ async def _ensure_default_chapter(db: AsyncSession, *, project_id: str) -> bool:
             id=chapter_id,
             project_id=project_id,
             index=index,
-            title=DEFAULT_PROMPT_START_CHAPTER_TITLE,
+            title=title or DEFAULT_PROMPT_START_CHAPTER_TITLE,
             summary="",
             raw_text="",
             storyboard_count=0,
             status=ChapterStatus.draft,
         ),
     )
-    return True
+    return chapter_id
+
+
+async def _setup_ad_project(
+    db: AsyncSession,
+    *,
+    project: Project,
+    source: AdProductSource | None,
+    requirements: AdRequirements | None,
+) -> str:
+    """剧情广告项目创建后的**同事务**副作用：默认章节 + 商品卡来源登记 + 策划 brief。
+
+    三个刻意的边界：
+
+    1. **不调用模型**：创建是免费动作。用户粘的商品文案只登记为"资料来源"
+       （`source_summary.raw_text`），真正的提取是策划页上一个显式付费动作；
+    2. **不编造字段**：除了"选已有商品资产"能带出名称，其余字段一律留空，
+       由页面标「待补充」，等提取或人工填写；
+    3. **brief 先落**：把制作要求写进该章节的策划 brief，策划页打开就能看到，
+       不用把创建时填的东西再问一遍。
+    """
+    chapter_id = await _ensure_default_chapter(
+        db,
+        project_id=project.id,
+        title=f"{project.name} · 第 1 集",
+        ensure_existing=True,
+    )
+
+    card_fields: dict[str, Any] = {}
+    source_summary: dict[str, Any] = {}
+    source_type = "manual"
+    reference_files: list[dict[str, Any]] = []
+    if source is not None:
+        source_type = source.type
+        if source.type == "paste":
+            source_summary = {
+                "origin": "project_create",
+                "source_type": "paste",
+                "raw_text": source.text,
+                "raw_chars": len(source.text or ""),
+            }
+        elif source.type == "upload":
+            source_summary = {
+                "origin": "project_create",
+                "source_type": "upload",
+                "file_ids": list(source.file_ids),
+            }
+            reference_files = [
+                {"file_id": file_id, "name": "", "kind": "document"} for file_id in source.file_ids
+            ]
+        elif source.type == "existing":
+            from app.models.studio import Product  # 就近 import：只在选已有商品时用
+
+            product = await db.get(Product, source.product_id) if source.product_id else None
+            if product is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": "ad_product_source_not_found",
+                        "message": f"选用的商品资产不存在：{source.product_id or '（空）'}",
+                        "fix": "重新选一个已有商品，或改成粘贴/上传商品资料。",
+                    },
+                )
+            card_fields["name"] = product.name
+            # 已有商品的自由文本描述落到 `notes`：**与 `product_extraction` 的
+            # `source_type=existing` 分支同一口径**（那边也是 description → notes）。
+            # 两处不一致的话，"创建时选已有商品"与"到策划页再点一次提取"会得到两张
+            # 内容不同的卡，用户会以为资料丢了。
+            card_fields["notes"] = product.description or ""
+            source_summary = {
+                "origin": "project_create",
+                "source_type": "existing",
+                "existing_product_id": product.id,
+                "existing_product_name": product.name,
+                "existing_description": product.description,
+            }
+
+    card_payload = {
+        **card_fields,
+        "reference_files": reference_files,
+        "confirmed": False,
+    }
+    card = await product_card_service.save_card(db, project_id=project.id, payload=card_payload)
+    # save_card 只落可编辑字段，来源类型与来源摘要要单独写（它们是服务端事实，不由页面填）
+    card_row = await product_card_service.get_card(db, project_id=project.id)
+    if card_row is not None:
+        card_row.source_type = source_type if source_type in {"manual", "paste", "upload", "existing"} else "manual"
+        card_row.source_summary = {**dict(card_row.source_summary or {}), **source_summary}
+        missing, _labels = product_card_service.compute_missing(
+            {key: getattr(card_row, key, None) for key in ("name", "category", "brand", "selling_points", "audience", "scenarios", "price_info", "compliance", "notes", "reference_files")}
+        )
+        card_row.missing_fields = missing
+        await db.flush()
+
+    if chapter_id and requirements is not None:
+        await drama_plan_drafts_service.save_brief(
+            db,
+            chapter_id=chapter_id,
+            project_id=project.id,
+            brief={
+                "product_name": str(card.get("name") or ""),
+                "product_description": "",
+                "selling_points": [],
+                "target_audience": "",
+                "genre": requirements.genre,
+                "tone": requirements.tone,
+                "duration_seconds": requirements.duration_seconds,
+                "shot_count": requirements.shot_count,
+                "brand_voice": "",
+                "mandatory_elements": list(requirements.mandatory_elements),
+                "forbidden_elements": list(requirements.forbidden_elements),
+                "director_notes": requirements.director_notes,
+            },
+        )
+    return chapter_id
 
 
 def _build_project_style_options() -> tuple[dict[ProjectVisualStyle, list[ProjectStyle]], dict[ProjectVisualStyle, ProjectStyle]]:
@@ -181,19 +313,31 @@ async def list_projects(
     stmt = apply_keyword_filter(stmt, q=q, fields=[Project.name, Project.description])
     stmt = apply_order(stmt, model=Project, order=order, is_desc=is_desc, allow_fields=PROJECT_ORDER_FIELDS, default="created_at")
     items, total = await paginate(db, stmt=stmt, page=page, page_size=page_size)
-    return paginated_response([ProjectRead.model_validate(x) for x in items], page=page, page_size=page_size, total=total)
+
+    # 剧情广告项目额外下发"当前阶段"（用户语言）：列表要能一眼看出它卡在哪一步。
+    # 只对 kind=ad 的行算，普通短剧项目不做额外查询（列表页可能有很多项目）。
+    reads = [ProjectRead.model_validate(x) for x in items]
+    ad_ids = [read.id for read, obj in zip(reads, items) if str(getattr(obj, "kind", "") or "") == ad_flow_service.PROJECT_KIND_AD]
+    if ad_ids:
+        phases = await ad_flow_service.ad_phase_map(db, ad_ids)
+        for read in reads:
+            phase = phases.get(read.id)
+            if phase:
+                read.ad_phase = phase
+                read.ad_phase_label = ad_flow_service.phase_label(phase)
+    return paginated_response(reads, page=page, page_size=page_size, total=total)
 
 
 @router.post(
     "",
-    response_model=ApiResponse[ProjectRead],
+    response_model=ApiResponse[ProjectCreateRead],
     status_code=status.HTTP_201_CREATED,
-    summary="创建项目",
+    summary="创建项目（kind=ad 时为剧情广告：自动建默认章节 + 登记商品资料来源 + 写好制作要求）",
 )
 async def create_project(
     body: ProjectCreate,
     db: AsyncSession = Depends(get_db),
-) -> ApiResponse[ProjectRead]:
+) -> ApiResponse[ProjectCreateRead]:
     await ensure_not_exists(
         db,
         Project,
@@ -204,12 +348,37 @@ async def create_project(
         _validate_project_style_combo(visual_style=body.visual_style, style=body.style)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    obj = await create_and_refresh(db, Project(**body.model_dump()))
+
+    # 剧情广告的两个向导字段**不是 projects 的列**：来源登记进商品卡、制作要求进策划 brief。
+    # 这样 `Project(**payload)` 不会被塞进未知字段（否则 SQLAlchemy 直接报错）。
+    payload = body.model_dump(exclude={"ad_product_source", "ad_requirements"})
+    obj = await create_and_refresh(db, Project(**payload))
 
     # 「从视频提示词开始」：创建后必须能直接进整集提示词看板，因此补一个默认章节。
     if obj.start_mode == ProjectStartMode.prompts.value:
         await _ensure_default_chapter(db, project_id=obj.id)
-    return created_response(ProjectRead.model_validate(obj))
+
+    chapter_id = ""
+    is_ad = str(obj.kind or "") == ad_flow_service.PROJECT_KIND_AD
+    if is_ad:
+        # 剧情广告：同一事务里建默认章节 + 商品卡来源 + 策划 brief（全部免费动作，不调模型）
+        chapter_id = await _setup_ad_project(
+            db,
+            project=obj,
+            source=body.ad_product_source,
+            requirements=body.ad_requirements,
+        )
+        if not chapter_id:
+            # 极端情况（比如同时传了 start_mode=prompts）已经建过章节 → 取回同一个
+            chapter_id = await _ensure_default_chapter(db, project_id=obj.id, ensure_existing=True)
+
+    data = ProjectCreateRead.model_validate(obj)
+    data.chapter_id = chapter_id
+    if is_ad:
+        phase = await ad_flow_service.resolve_ad_phase(db, project_id=obj.id, deep=True)
+        data.ad_phase = phase
+        data.ad_phase_label = ad_flow_service.phase_label(phase)
+    return created_response(data)
 
 
 @router.get(
@@ -222,7 +391,13 @@ async def get_project(
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[ProjectRead]:
     obj = await get_or_404(db, Project, project_id, detail=entity_not_found("Project"))
-    return success_response(ProjectRead.model_validate(obj))
+    data = ProjectRead.model_validate(obj)
+    if str(getattr(obj, "kind", "") or "") == ad_flow_service.PROJECT_KIND_AD:
+        # 详情用**深判**：多算一次"有没有资产图"，用来区分"已确认策划"与"已进入生产"
+        phase = await ad_flow_service.resolve_ad_phase(db, project_id=project_id, deep=True)
+        data.ad_phase = phase
+        data.ad_phase_label = ad_flow_service.phase_label(phase)
+    return success_response(data)
 
 
 @router.get(

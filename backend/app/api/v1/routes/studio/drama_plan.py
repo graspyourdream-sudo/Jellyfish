@@ -1,9 +1,10 @@
-"""「广告剧情流程」的四个端点（+ 一个找章节的小入口）。
+"""「广告剧情流程」的端点（+ 一个找章节的小入口）。
 
     GET  /studio/chapters/{chapter_id}/drama-plan            读取草稿（只读，永不付费）
     PUT  /studio/chapters/{chapter_id}/drama-plan/brief      保存商品信息（**免费，绝不触模型**）
     PUT  /studio/chapters/{chapter_id}/drama-plan/draft      保存手改草稿（免费，只写草稿列）
     POST /studio/chapters/{chapter_id}/drama-plan/generate   生成草稿（**付费出口**，租约防重复）
+    POST /studio/chapters/{chapter_id}/drama-plan/consistency 一致性检查（**免费，不调模型**）
     POST /studio/chapters/{chapter_id}/drama-plan/confirm    确认落库（materialize，一个事务）
     POST /studio/projects/{project_id}/drama-plan/chapter    项目里找一个可用空章节（没有就建）
 
@@ -12,7 +13,7 @@
 
 ``shot_binding.py`` / ``shot_binding_action.py``、``prompt_board.py``（读+写同一文件）…
 既有做法是"**哪些端点会花钱必须一眼可数**"。这里会花钱的只有 ``generate`` 一个，
-所以它和只读/免费的三个放在同一个文件里，但**在每条的 summary 里标死出口性质**。
+所以它和只读/免费的几个放在同一个文件里，但**在每条的 summary 里标死出口性质**。
 
 守卫怎么挂（与既有 newest 链路一致，不是漏挂）
 ==============================================
@@ -39,6 +40,8 @@ from app.schemas.common import ApiResponse, success_response
 from app.schemas.studio.drama_plan import (
     DramaBrief,
     DramaPlanConfirmRead,
+    DramaPlanConsistencyRead,
+    DramaPlanGenerateRequest,
     DramaPlanRead,
 )
 from app.services import paid_outlet_guard
@@ -119,15 +122,27 @@ async def put_drama_plan_draft(
 @router.post(
     "/{chapter_id}/drama-plan/generate",
     response_model=ApiResponse[DramaPlanRead],
-    summary=f"生成剧情方案草稿（一次模型调用）· {OUTLET_PAID}",
+    summary=f"生成剧情方案草稿（按 stage 分层生成，一次模型调用）· {OUTLET_PAID}",
 )
 async def post_drama_plan_generate(
     chapter_id: str,
+    body: DramaPlanGenerateRequest | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> Any:
-    """生成草稿：抢租约 → 一次调用 → 只落草稿列（确认之前不写任何正式行）。"""
+    """生成草稿：抢租约 → 一次调用 → 只落草稿列（确认之前不写任何正式行）。
+
+    请求体可省略（默认 ``stage="all"``，与加 stage 之前的行为完全一致）。
+    ``stage`` 决定这次生成哪一段：``one_liner`` / ``story`` / ``storyboard`` / ``all``；
+    人工编辑晚于上次生成时，必须带 ``confirm_overwrite=true``，否则 409。
+    """
+    request = body or DramaPlanGenerateRequest()
     try:
-        data = await service.generate(db, chapter_id=chapter_id)
+        data = await service.generate(
+            db,
+            chapter_id=chapter_id,
+            stage=request.stage,
+            confirm_overwrite=request.confirm_overwrite,
+        )
     except Exception as exc:  # noqa: BLE001
         # 兜底：守卫拦截（演练 / 未确认真实付费 / 出口不在白名单）→ 统一 409 结构化信封
         if paid_outlet_guard.is_blocked_exception(exc):
@@ -136,6 +151,29 @@ async def post_drama_plan_generate(
             return _error(exc)
         raise
     return success_response(DramaPlanRead.model_validate(data))
+
+
+@router.post(
+    "/{chapter_id}/drama-plan/consistency",
+    response_model=ApiResponse[DramaPlanConsistencyRead],
+    summary=f"一致性检查（商品覆盖 / 未知角色与资产 / 剧情长度）· {OUTLET_FREE}",
+)
+async def post_drama_plan_consistency(
+    chapter_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """一致性检查：**免费**，一次模型都不调，只做确定性的计数与文本核对。
+
+    没有草稿内容时返回 200 + ``ok=false``（"还没有内容"本身就是诊断结果），
+    章节不存在才 404。"""
+    try:
+        data = await service.consistency(db, chapter_id=chapter_id)
+    except Exception as exc:  # noqa: BLE001
+        if hasattr(exc, "status_code") and hasattr(exc, "detail"):
+            return _error(exc)
+        raise
+    payload = DramaPlanConsistencyRead.model_validate(data)
+    return success_response(payload, meta={"note": data.get("note", "")})
 
 
 @router.post(

@@ -51,6 +51,17 @@ class Project(Base, TimestampMixin):
         comment="项目起点：script=从剧本开始；prompts=从视频提示词开始",
     )
     stats: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict, comment="聚合统计（JSON）")
+    # 项目类型（「剧情广告完整闭环」实施契约 §一.1 新增列）。取值 `drama`（普通剧情项目）
+    # / `ad`（剧情广告项目：建项目时同一事务补默认章节 + 空商品卡，进策划页）。
+    # 旧项目由 `DEFAULT 'drama'` 自动回填，因此老数据的行为与迁移前完全一致
+    # （与上面 `start_mode` 同一做法：列声明在中部、库里由 ALTER 追加在末尾，顺序差异不影响语义）。
+    kind: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="drama",
+        server_default="drama",
+        comment="项目类型：drama=普通剧情项目；ad=剧情广告项目（走商品卡 + 分层剧情 + 确认策划）",
+    )
 
     chapters: Mapped[list["Chapter"]] = relationship(
         back_populates="project",

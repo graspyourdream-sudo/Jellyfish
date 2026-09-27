@@ -85,19 +85,27 @@ function asset(
   id: string,
   patch: Partial<ProductionAsset> = {},
 ): ProductionAsset {
-  return {
+  const base: ProductionAsset = {
     key: assetKeyOf(type, id),
     id,
     type,
     name: `${type}-${id}`,
     hasImage: false,
     hasPrimary: false,
+    /* 定版图可达性这两个字段在 `ProductionAsset` 里是**必填**（没验证过就必须给保守结论）：
+       夹具的默认值 = "还没验证过"，与生产代码 `toProductionAssets` 的兜底口径一致。 */
+    primaryUsableForGeneration: false,
+    primaryReachabilityNote: '',
     hasImagePrompt: false,
     imageId: null,
     thumbnail: '',
     hasPendingCandidate: false,
-    ...patch,
   }
+  /* 用 `Object.assign` 而不是对象展开：`patch` 是 `Partial<ProductionAsset>`，
+     展开会让上面两个必填字段变成 `boolean | undefined` 而通不过类型检查；
+     `Object.assign` 的返回类型是 `ProductionAsset & Partial<ProductionAsset>`，
+     必填字段仍是 `boolean`。合并语义与原来的 `{ ...默认值, ...patch }` 完全相同。 */
+  return Object.assign(base, patch)
 }
 
 /** 混合样本：人物(未生成) / 场景(已有图片未定版) / 道具(未生成) / 服装(已有定版)。 */

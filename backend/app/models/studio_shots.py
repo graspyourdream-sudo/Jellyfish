@@ -524,7 +524,7 @@ class ShotExtractedCandidate(Base, TimestampMixin):
         String(32),
         nullable=False,
         index=True,
-        comment="候选类型：character/scene/prop/costume",
+        comment="候选类型：character/scene/prop/costume/product",
     )
     candidate_name: Mapped[str] = mapped_column(String(255), nullable=False, comment="候选名称")
     candidate_status: Mapped[ShotCandidateStatus] = mapped_column(

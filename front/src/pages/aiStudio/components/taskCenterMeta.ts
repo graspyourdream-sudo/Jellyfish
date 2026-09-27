@@ -24,13 +24,16 @@ const ASSET_EDIT_PATH_BUILDERS: Record<string, (id: string) => string> = {
   scene_image: (id) => `/assets/scenes/${id}/edit`,
   prop_image: (id) => `/assets/props/${id}/edit`,
   costume_image: (id) => `/assets/costumes/${id}/edit`,
+  /* 商品（第五类资产）：它的图由人工上传 + 手动定版，所以这条关系指向商品编辑页。 */
+  product_image: (id) => `/assets/products/${id}/edit`,
 }
 
-const ASSET_ENTITY_TYPES: Record<string, 'actor' | 'scene' | 'prop' | 'costume'> = {
+const ASSET_ENTITY_TYPES: Record<string, 'actor' | 'scene' | 'prop' | 'costume' | 'product'> = {
   actor_image: 'actor',
   scene_image: 'scene',
   prop_image: 'prop',
   costume_image: 'costume',
+  product_image: 'product',
 }
 
 const SHOT_RELATION_TYPES = new Set([
@@ -88,8 +91,12 @@ async function resolveTaskMeta(task: TaskUiItem): Promise<ResolvedTaskMeta | nul
     }
   }
 
-  if (relationType && relationEntityId && ['actor', 'scene', 'prop', 'costume', 'character'].includes(relationType)) {
-    const entityType = relationType as 'actor' | 'scene' | 'prop' | 'costume' | 'character'
+  if (
+    relationType &&
+    relationEntityId &&
+    ['actor', 'scene', 'prop', 'costume', 'character', 'product'].includes(relationType)
+  ) {
+    const entityType = relationType as 'actor' | 'scene' | 'prop' | 'costume' | 'character' | 'product'
     try {
       const res = await StudioEntitiesApi.get(entityType, relationEntityId)
       const data = res.data as Record<string, unknown> | null
@@ -104,7 +111,9 @@ async function resolveTaskMeta(task: TaskUiItem): Promise<ResolvedTaskMeta | nul
               ? '道具'
               : entityType === 'costume'
                 ? '服装'
-                : '角色'
+                : entityType === 'product'
+                  ? '商品'
+                  : '角色'
       const navigateTo =
         entityType === 'character'
           ? projectId
@@ -116,7 +125,9 @@ async function resolveTaskMeta(task: TaskUiItem): Promise<ResolvedTaskMeta | nul
               ? `/assets/scenes/${relationEntityId}/edit`
               : entityType === 'prop'
                 ? `/assets/props/${relationEntityId}/edit`
-                : `/assets/costumes/${relationEntityId}/edit`
+                : entityType === 'product'
+                  ? `/assets/products/${relationEntityId}/edit`
+                  : `/assets/costumes/${relationEntityId}/edit`
       return {
         sourceLabel: name ? `${labelPrefix}：${name}` : `${labelPrefix}：名称读取中`,
         navigateTo,
@@ -131,7 +142,9 @@ async function resolveTaskMeta(task: TaskUiItem): Promise<ResolvedTaskMeta | nul
               ? `/assets/scenes/${relationEntityId}/edit`
               : entityType === 'prop'
                 ? `/assets/props/${relationEntityId}/edit`
-                : `/assets/costumes/${relationEntityId}/edit`
+                : entityType === 'product'
+                  ? `/assets/products/${relationEntityId}/edit`
+                  : `/assets/costumes/${relationEntityId}/edit`
       return {
         sourceLabel: `${resolveRelationTypeLabel(relationType)}：名称读取中`,
         navigateTo,

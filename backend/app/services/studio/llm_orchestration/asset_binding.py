@@ -10,8 +10,9 @@
   - 场景 → POST /api/v1/studio/shot-links/scene
   - 道具 → POST /api/v1/studio/shot-links/prop
   - 服装 → POST /api/v1/studio/shot-links/costume
+  - 商品 → POST /api/v1/studio/shot-links/product
 - 不改数据库结构：已有绑定状态从 ProjectSceneLink / ProjectPropLink / ProjectCostumeLink
-  / ShotCharacterLink 读取（这些表早就存在，不需要新表）。
+  / ProjectProductLink / ShotCharacterLink 读取（这些表早就存在，不需要新表）。
 """
 
 from __future__ import annotations
@@ -27,7 +28,9 @@ from app.models.studio import (
     Chapter,
     Character,
     Costume,
+    Product,
     ProjectCostumeLink,
+    ProjectProductLink,
     ProjectPropLink,
     ProjectSceneLink,
     Prop,
@@ -72,19 +75,23 @@ AUTO_TIER = 0.85
 REVIEW_TIER = 0.5
 
 # 槽位定义：槽位名 → 该槽位允许的资产类型。
+# 槽位名与绑定落库的表一一对应（商品落 ``project_product_links``，见 ``CONFIRM_ENDPOINTS``）。
 SLOT_ASSET_TYPES: dict[str, tuple[str, ...]] = {
     "characters": ("character",),
     "scene": ("scene",),
     "props": ("prop",),
     "costumes": ("costume",),
+    "products": ("product",),
 }
 
 # 槽位是否允许多个（场景每镜头最多 1 个）。
+# 商品也是多个：一镜可以同时出现主商品和赠品/包装，合同没规定"一镜一商品"。
 SLOT_MULTI: dict[str, bool] = {
     "characters": True,
     "scene": False,
     "props": True,
     "costumes": True,
+    "products": True,
 }
 
 DEFAULT_BATCH_SIZE = 8
@@ -95,11 +102,15 @@ DESCRIPTION_CLIP = 60
 SHOT_TEXT_CLIP = 800
 
 # 人工确认写库的端点映射（只作文档用途，本模块不调用）。
+# 每个值必须是**真实存在**的端点：它会被下发给人工确认页，路径写错等于让用户点了没反应。
+# ``tests/test_llm_orchestration_asset_binding.py`` 会用 app.openapi() 逐条核对。
 CONFIRM_ENDPOINTS: dict[str, str] = {
     "character": "POST /api/v1/studio/shot-character-links",
     "scene": "POST /api/v1/studio/shot-links/scene",
     "prop": "POST /api/v1/studio/shot-links/prop",
     "costume": "POST /api/v1/studio/shot-links/costume",
+    # 商品关联与其余三类同构（同一路由文件、同一个 ProjectAssetLinkCreate 请求体）
+    "product": "POST /api/v1/studio/shot-links/product",
 }
 
 
@@ -165,7 +176,12 @@ def build_catalog_from_rows(rows: list[tuple[str, str, str, str, list[str]]]) ->
 
 
 async def load_candidate_catalog(db: AsyncSession, *, project_id: str) -> list[BindingCandidate]:
-    """装载项目内可绑定资产：角色（项目内）+ 场景/道具/服装（项目关联）。"""
+    """装载项目内可绑定资产：角色（项目内）+ 场景/道具/服装/商品（项目关联）。
+
+    商品是**全局资产**（``products`` 没有 project_id），项目归属只看关联表；
+    这也意味着"项目里还没有商品关联"时商品不进候选清单 —— 那是真实情况（没绑过就没得绑），
+    不是漏读。
+    """
     rows: list[tuple[str, str, str, str, list[str]]] = []
 
     characters = (
@@ -221,6 +237,21 @@ async def load_candidate_catalog(db: AsyncSession, *, project_id: str) -> list[B
     for row in costume_rows:
         rows.append((row.id, "costume", row.name, row.description, list(row.tags or [])))
 
+    product_rows = (
+        (
+            await db.execute(
+                select(Product)
+                .join(ProjectProductLink, ProjectProductLink.product_id == Product.id)
+                .where(ProjectProductLink.project_id == project_id)
+                .order_by(Product.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for row in product_rows:
+        rows.append((row.id, "product", row.name, row.description, list(row.tags or [])))
+
     return build_catalog_from_rows(rows)
 
 
@@ -264,8 +295,10 @@ async def load_shots_for_binding(
 
     trimmed = list(shots)[:max_shots]
     ids = [item.id for item in trimmed]
+    # 桶的 key 与 SLOT_ASSET_TYPES 同源：少一个槽位会让"已绑定"状态在预览里静默丢失，
+    # 而那正是人工对账时最需要看到的一列。
     bound: dict[str, dict[str, set[str]]] = {
-        shot_id: {"characters": set(), "scene": set(), "props": set(), "costumes": set()} for shot_id in ids
+        shot_id: {slot: set() for slot in SLOT_ASSET_TYPES} for shot_id in ids
     }
 
     for row in (await db.execute(select(ShotCharacterLink).where(ShotCharacterLink.shot_id.in_(ids)))).scalars():
@@ -276,6 +309,8 @@ async def load_shots_for_binding(
         bound[str(row.shot_id)]["props"].add(str(row.prop_id))
     for row in (await db.execute(select(ProjectCostumeLink).where(ProjectCostumeLink.shot_id.in_(ids)))).scalars():
         bound[str(row.shot_id)]["costumes"].add(str(row.costume_id))
+    for row in (await db.execute(select(ProjectProductLink).where(ProjectProductLink.shot_id.in_(ids)))).scalars():
+        bound[str(row.shot_id)]["products"].add(str(row.product_id))
 
     return [
         BindingShot(
@@ -302,16 +337,18 @@ def missing_shot_ids(requested: list[str], shots: list[BindingShot]) -> list[str
 def _render_catalog(catalog: list[BindingCandidate]) -> str:
     if not catalog:
         return "（候选清单为空：项目内还没有可绑定资产，请先创建实体资产。）"
-    groups: dict[str, list[str]] = {"character": [], "scene": [], "prop": [], "costume": []}
+    groups: dict[str, list[str]] = {"character": [], "scene": [], "prop": [], "costume": [], "product": []}
     for item in catalog:
         alias_text = "、".join(item.aliases) if item.aliases else "无"
         line = f"- {item.asset_id} | 名称: {item.name} | 别名: {alias_text}"
         if item.description:
             line += f" | 简介: {item.description}"
         groups.setdefault(item.asset_type, []).append(line)
-    labels = {"character": "人物", "scene": "场景", "prop": "道具", "costume": "服装"}
+    labels = {"character": "人物", "scene": "场景", "prop": "道具", "costume": "服装", "product": "商品"}
     blocks: list[str] = []
-    for key in ("character", "scene", "prop", "costume"):
+    # 顺序与 SLOT_ASSET_TYPES 一致：商品排在最后，不改变既有四类的相对次序
+    # （提示词稳定 = 结果可比，改次序会让历史预览无法对照）。
+    for key in ("character", "scene", "prop", "costume", "product"):
         items = groups.get(key) or []
         if items:
             blocks.append(f"[{labels[key]}]\n" + "\n".join(items))
@@ -326,7 +363,7 @@ def _render_shots(shots: list[BindingShot]) -> str:
 
 
 def build_binding_prompt(*, catalog: list[BindingCandidate], shots: list[BindingShot], episode_id: str = "") -> str:
-    """按用户方案文档 §4 模板组装（并按 Jellyfish 需求补了服装槽）。"""
+    """按用户方案文档 §4 模板组装（并按 Jellyfish 需求补了服装槽与商品槽）。"""
     return LLM_BINDING_TEMPLATE.safe_substitute(
         catalog=_render_catalog(catalog),
         shots=_render_shots(shots),
@@ -698,7 +735,7 @@ async def preview_asset_binding(
     if not catalog:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"项目 {body.project_id} 内没有可绑定资产，请先创建角色/场景/道具/服装。",
+            detail=f"项目 {body.project_id} 内没有可绑定资产，请先创建角色/场景/道具/服装/商品。",
         )
 
     requested = [str(x).strip() for x in (body.shot_ids or []) if str(x).strip()]

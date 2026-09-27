@@ -209,4 +209,43 @@ export const assetAdapters = {
       }
     },
   } satisfies AdapterConfig<any, any>,
+
+  /**
+   * 商品（第五类资产）。
+   *
+   * 与其余几类共用实体 CRUD（`product` 分支）；**唯一**的差别是：
+   * 商品图不走出图通道（契约 §六），所以：
+   *   - 编辑页的「出图 / 重新生成」按钮对本页是禁用的（`AssetEditPageBase` 按实体类型判定）；
+   *   - `renderPrompt` 在这里是**明确的拒绝**（带中文原因），而不是悄悄拿别的资产类型去请求。
+   * 这一页真正要用的是「上传图片（写槽位）」+「设为定版」两个既有动作。
+   */
+  product: {
+    missingAssetIdText: MISSING_ASSET_ID_TEXT,
+    assetDisplayName: '商品',
+    backTo: '/assets?tab=product',
+    relationType: 'product_image',
+    getAsset: async (id: string) => {
+      const res = await StudioEntitiesApi.get('product', id)
+      return (res.data ?? null) as any | null
+    },
+    updateAsset: async (id: string, payload) => {
+      const res = await StudioEntitiesApi.update('product', id, payload as Record<string, unknown>)
+      return (res.data ?? null) as any | null
+    },
+    listImages: async (id: string) => {
+      const res = await StudioEntitiesApi.listImages('product', id, { page: 1, pageSize: 100 })
+      return (res.data?.items ?? []) as any[]
+    },
+    createImageSlot: async (id: string, angle) => {
+      await StudioEntitiesApi.createImage('product', id, { view_angle: angle })
+    },
+    updateImage: async (id: string, imageId: number, payload) => {
+      await StudioEntitiesApi.updateImage('product', id, imageId, normalizeUpdateImagePayload(payload))
+    },
+    renderPrompt: async () => {
+      /* 这一条路径在页面上是禁用的（商品不走出图通道）；真被调用到也不静默：
+         给出中文原因，让排查的人一眼看出是"能力边界"而不是"接口挂了"。 */
+      throw new Error('商品图不走出图通道：请在商品资产页上传图片并手动「设为定版」')
+    },
+  } satisfies AdapterConfig<any, any>,
 }

@@ -187,11 +187,17 @@ def test_migrated_tables_match_orm_columns_and_constraints(tmp_path: Path) -> No
 
     for item in shared.TABLES:
         orm_table = Base.metadata.tables[item.table]
+        # 只比对**本清单声明过**的列：后续切片会用自己的迁移给同一张表加列
+        # （例如 `scripts/migrate_ad_flow.py` 给 `products` 加 `provenance`），
+        # 那些列由各自的迁移与测试负责，这里不该因为它们而变红。
+        declared = set(item.columns)
+        orm_columns = [name for name in orm_table.columns.keys() if name in declared]
 
-        # (a) 列名集合完全相等（逐列一致），顺序也一致（PRAGMA 顺序 = DDL 顺序 = ORM 声明顺序）
+        # (a) 本清单声明的列：集合与顺序都与 ORM 一致
+        #     （PRAGMA 顺序 = DDL 顺序 = ORM 声明顺序）
         actual = _columns(db, item.table)
-        assert set(actual) == set(orm_table.columns.keys()), f"{item.table} 列名与 ORM 不一致"
-        assert actual == list(orm_table.columns.keys()), f"{item.table} 列顺序与 ORM 不一致"
+        assert set(actual) == set(orm_columns), f"{item.table} 列名与 ORM 不一致"
+        assert actual == orm_columns, f"{item.table} 列顺序与 ORM 不一致"
         assert tuple(actual) == item.columns, f"{item.table} 列与清单不一致"
 
         conn = _connect(db, read_only=True)
@@ -204,6 +210,7 @@ def test_migrated_tables_match_orm_columns_and_constraints(tmp_path: Path) -> No
             orm_flags = [
                 (column.name, 0 if column.nullable else 1, 1 if column.primary_key else 0)
                 for column in orm_table.columns
+                if column.name in declared
             ]
             assert pragma == orm_flags, f"{item.table} 的 NOT NULL / 主键与 ORM 不一致"
 

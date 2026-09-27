@@ -17,9 +17,15 @@
  * **在写之前把"这会写回全局资产"和"新旧差异"摆到用户面前，由用户确认。**
  */
 
-export type AssetScopeType = 'character' | 'scene' | 'prop' | 'costume'
+export type AssetScopeType = 'character' | 'scene' | 'prop' | 'costume' | 'product'
 
-/** 角色属项目内资产；场景 / 道具 / 服装是全局资产。 */
+/**
+ * 角色属项目内资产；场景 / 道具 / 服装 / **商品** 是全局资产。
+ *
+ * 商品是第五类资产：它落在全局 `products` 表（**不带 project_id**），
+ * 项目/镜头通过 `project_product_links` 关联它 —— 所以它**不在**这个项目内清单里，
+ * `isGlobalAssetType('product')` 必须是 true（否则页面会说"改了不影响别的项目"，是错的）。
+ */
 export const PROJECT_SCOPED_ASSET_TYPES: AssetScopeType[] = ['character']
 
 export function isGlobalAssetType(assetType: unknown): boolean {
@@ -34,6 +40,7 @@ const TYPE_LABEL: Record<string, string> = {
   scene: '场景',
   prop: '道具',
   costume: '服装',
+  product: '商品',
 }
 
 /** 未登记的类型码的中文兜底（**绝不回显后端原值**，审计 §1.2 模式 3）。 */

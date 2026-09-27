@@ -17,6 +17,7 @@ from app.api.v1.routes.studio import (
     prompt_board,
     prompt_delivery,
     prompts,
+    product_card,
     quick_skill,
     shots,
     timeline,
@@ -53,4 +54,7 @@ router.include_router(image_pipeline.router, prefix="/image-pipeline", tags=["st
 # 因此拆成两个 router 分别挂到 /chapters 与 /projects 前缀下）。
 router.include_router(drama_plan.router, prefix="/chapters", tags=["studio/drama-plan"])
 router.include_router(drama_plan.project_router, prefix="/projects", tags=["studio/drama-plan"])
+
+# 剧情广告的商品卡（项目级：一项目一张，服务端事实来源）
+router.include_router(product_card.router, prefix="/projects", tags=["studio/product-card"])
 

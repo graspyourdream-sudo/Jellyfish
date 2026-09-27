@@ -250,14 +250,18 @@ test('过期作废：超过 7 天（或时间戳在将来）的草稿不算数',
 })
 
 test('上限淘汰：一个键最多 60 条，超出丢最旧的', () => {
-  const entries = Array.from({ length: ASSET_PROMPT_DRAFT_MAX_ENTRIES + 5 }, (_, index) =>
-    entry({ assetId: `c${index}`, prompt: `第 ${index} 条`, savedAt: NOW + index }),
+  // 显式声明成数组：给 `assetId` 推断出字面量联合会让后面的模板字符串断言被 TS 拒绝
+  const entries: ReturnType<typeof entry>[] = Array.from(
+    { length: ASSET_PROMPT_DRAFT_MAX_ENTRIES + 5 },
+    (_, index) => entry({ assetId: `c${index}`, prompt: `第 ${index} 条`, savedAt: NOW + index }),
   )
   const trimmed = trimAssetPromptDraftEntries(entries)
   assert.equal(trimmed.length, ASSET_PROMPT_DRAFT_MAX_ENTRIES)
   // 丢掉的是最旧的 5 条，且顺序保持
   assert.equal(trimmed[0].assetId, 'c5')
-  assert.equal(trimmed[trimmed.length - 1].assetId, `c${ASSET_PROMPT_DRAFT_MAX_ENTRIES + 4}`)
+  // 期望值显式声明为 string：否则 TS 会把断言收窄成字面量类型 `"c64"`，模板字符串不被接受
+  const expectedLastId: string = `c${ASSET_PROMPT_DRAFT_MAX_ENTRIES + 4}`
+  assert.equal(trimmed[trimmed.length - 1].assetId, expectedLastId)
 
   // 逐条写入也会被裁（写入 65 条，读回来只有 60 条，且都在最新的那一批里）
   const storage = fakeStorage()

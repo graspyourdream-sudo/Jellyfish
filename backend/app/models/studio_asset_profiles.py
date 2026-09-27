@@ -190,7 +190,7 @@ class ChapterAssetProfile(Base, TimestampMixin):
         String(32),
         nullable=False,
         index=True,
-        comment="资产类型：character/scene/prop/costume",
+        comment="资产类型：character/scene/prop/costume/product",
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False, comment="规范名称（模型确认过的写法）")
     name_key: Mapped[str] = mapped_column(
@@ -224,7 +224,10 @@ class ChapterAssetProfile(Base, TimestampMixin):
         JSON, nullable=False, default=list, comment="本章特有的临时补充（时间天气/状态/场合等）"
     )
     asset_id: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, index=True, comment="已关联的真实资产 ID（角色/场景/道具/服装通用）"
+        String(64),
+        nullable=True,
+        index=True,
+        comment="已关联的真实资产 ID（角色/场景/道具/服装/商品通用）",
     )
     link_action: Mapped[str] = mapped_column(
         String(32), nullable=False, default="", comment="最近一次确认动作：create_new / link_existing"

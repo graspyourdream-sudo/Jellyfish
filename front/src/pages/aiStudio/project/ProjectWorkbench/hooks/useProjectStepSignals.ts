@@ -15,8 +15,13 @@ import { collectPrimaryLookupTargets } from '../assetPrepStatus'
  *    （普通页面只显示用户能看懂的状态，不出现模型名、原始状态值或内部文件编号）。
  */
 
-/** 项目-章节-镜头-实体关联支持的资产类型（后端 `_link_spec`）。 */
-const LINK_ENTITY_TYPES = ['scene', 'prop', 'costume'] as const
+/**
+ * 项目-章节-镜头-实体关联支持的资产类型（后端 `_link_spec`）。
+ *
+ * **商品在里面**：后端 `shot_assets._link_spec` 已经有 `product` 分支
+ * （`ProjectProductLink` / `product_id`），所以镜头级商品关联和其余几类一样能查。
+ */
+const LINK_ENTITY_TYPES = ['scene', 'prop', 'costume', 'product'] as const
 type LinkEntityType = (typeof LINK_ENTITY_TYPES)[number]
 
 const LINK_PAGE_SIZE = 100
@@ -25,7 +30,14 @@ const LINK_PAGE_LIMIT = 3
 /** 角色绑定抽样镜头数：`shot_character_links` 只有按镜头查询的接口，只能抽样。 */
 const BINDING_SAMPLE_LIMIT = 5
 
-export type ProjectSignalAssetType = 'character' | 'scene' | 'prop' | 'costume'
+/**
+ * 项目资产类型。
+ *
+ * **商品（`product`）是第五类资产**（契约 §六）：它和其余几类一样出现在
+ * `asset-readiness` 清单、镜头的关联行与步骤完成度里，只是**不走出图通道**
+ * （商品图由用户手动上传 + 手动定版）。
+ */
+export type ProjectSignalAssetType = 'character' | 'scene' | 'prop' | 'costume' | 'product'
 
 export type ProjectSignalAsset = {
   id: string
@@ -59,7 +71,7 @@ export type ProjectStepSignalDetail = {
   bindingSampleSize: number
   projectShotCount: number
   projectShotsWithPrompt: number
-  assetCounts: { characters: number; scenes: number; props: number; costumes: number }
+  assetCounts: { characters: number; scenes: number; props: number; costumes: number; products: number }
   assetImageCount: number
   /** 已设为定版的资产数；null = 无法判定（不阻塞步骤判定） */
   assetsWithPrimaryCount: number | null
@@ -88,7 +100,7 @@ const EMPTY_DETAIL: ProjectStepSignalDetail = {
   bindingSampleSize: 0,
   projectShotCount: 0,
   projectShotsWithPrompt: 0,
-  assetCounts: { characters: 0, scenes: 0, props: 0, costumes: 0 },
+  assetCounts: { characters: 0, scenes: 0, props: 0, costumes: 0, products: 0 },
   assetImageCount: 0,
   assetsWithPrimaryCount: null,
   assetsWithImagePromptCount: null,
@@ -146,6 +158,7 @@ const ASSET_TYPE_LABEL: Record<ProjectSignalAssetType, string> = {
   scene: '场景',
   prop: '道具',
   costume: '服装',
+  product: '商品',
 }
 
 export function getProjectSignalAssetTypeLabel(type: ProjectSignalAssetType): string {
@@ -277,6 +290,9 @@ export function useProjectStepSignals(args: {
         scenes: nextAssets.filter((asset) => asset.type === 'scene').length,
         props: nextAssets.filter((asset) => asset.type === 'prop').length,
         costumes: nextAssets.filter((asset) => asset.type === 'costume').length,
+        /* 商品计入步骤完成度（口径与后端 `project_asset_readiness` 的五类一致）：
+           商品没准备好时"资产准备"就不算完成。 */
+        products: nextAssets.filter((asset) => asset.type === 'product').length,
       }
       const assetImageCount = nextAssets.filter((asset) => asset.hasImage).length
       // 定版 / 提示词数量：准备接口成功返回才算（失败时保持 null，不冒充实数）

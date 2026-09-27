@@ -819,7 +819,8 @@ export async function fetchImagePromptSlots(): Promise<ImagePromptSlotSpec[]> {
  * 的后端请求体是宽松 dict，所以不需要重新生成客户端。
  */
 export function saveAssetImagePrompts(
-  entityType: 'character' | 'scene' | 'prop' | 'costume' | 'actor',
+  /* 商品（`product`）也在这条链上：它和其余几类共用同一张实体的 image_prompts 列。 */
+  entityType: 'character' | 'scene' | 'prop' | 'costume' | 'actor' | 'product',
   entityId: string,
   imagePrompts: Record<string, string>,
   extra: AnyRecord = {},
@@ -849,7 +850,8 @@ export function getAssetImagePrompts(entity: AnyRecord | null | undefined): Reco
  * 才把 `confirm_replace_primary=true` 发出去。默认 false（既有调用方行为不变）。
  */
 export function setEntityImagePrimary(
-  entityType: 'character' | 'scene' | 'prop' | 'costume' | 'actor',
+  /* 商品图的「手动定版」就走这里（`PATCH /studio/entities/product/{id}/images/{image_id}`）。 */
+  entityType: 'character' | 'scene' | 'prop' | 'costume' | 'actor' | 'product',
   entityId: string,
   imageId: number,
   isPrimary = true,

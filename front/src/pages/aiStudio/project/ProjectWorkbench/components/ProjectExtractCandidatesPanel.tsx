@@ -79,6 +79,8 @@ const KIND_META: Record<AssetKind, { label: string; color: string }> = {
   scene: { label: '场景', color: 'blue' },
   prop: { label: '道具', color: 'gold' },
   costume: { label: '服装', color: 'cyan' },
+  /* 商品是第五类资产：它在「确认候选」里与其余几类完全同等（关联资产库已有商品 / 新建商品）。 */
+  product: { label: '商品', color: 'magenta' },
 }
 
 /** 候选状态也用用户语言（不出现原始状态值）。 */
@@ -93,8 +95,20 @@ type LibraryOption = { id: string; name: string; thumbnail?: string }
 const EXTRACT_LOADING_KEY = 'project-extract-loading'
 const LINK_LIBRARY_PAGE_SIZE = 100
 
+/**
+ * 候选类型是否可确认。
+ *
+ * **商品必须在这里**：改前只认四类，后端下发的商品候选会在聚合阶段被静默丢掉 ——
+ * 用户看到的是"提取没有商品"，而不是"这一步不支持商品"。
+ */
 function isAssetKind(value: string): value is AssetKind {
-  return value === 'character' || value === 'scene' || value === 'prop' || value === 'costume'
+  return (
+    value === 'character' ||
+    value === 'scene' ||
+    value === 'prop' ||
+    value === 'costume' ||
+    value === 'product'
+  )
 }
 
 export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLabel, onReload }: ProjectExtractPanelProps) {
@@ -126,6 +140,7 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
     scene: [],
     prop: [],
     costume: [],
+    product: [],
   })
   const [libraryLoading, setLibraryLoading] = useState(false)
 
@@ -205,7 +220,13 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
   const refreshExistence = useCallback(
     async (targets: ExtractGroup[]) => {
       if (!effectiveProjectId || targets.length === 0) return
-      const byKind: Record<AssetKind, string[]> = { character: [], scene: [], prop: [], costume: [] }
+      const byKind: Record<AssetKind, string[]> = {
+        character: [],
+        scene: [],
+        prop: [],
+        costume: [],
+        product: [],
+      }
       targets.forEach((group) => {
         if (group.statuses.linked) return
         byKind[group.kind].push(group.name)
@@ -215,7 +236,10 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
       if (byKind.scene.length) body.scene_names = byKind.scene
       if (byKind.prop.length) body.prop_names = byKind.prop
       if (byKind.costume.length) body.costume_names = byKind.costume
-      if (!byKind.character.length && !byKind.scene.length && !byKind.prop.length && !byKind.costume.length) {
+      /* 商品是第五类：后端把 `product_names` 做成**可选、向后兼容**的参数
+         （老后端收不到这个键时行为不变，新后端会一并对账商品）。 */
+      if (byKind.product.length) body.product_names = byKind.product
+      if (Object.values(byKind).every((names) => names.length === 0)) {
         return
       }
       try {
@@ -224,11 +248,14 @@ export function ProjectExtractCandidatesPanel({ projectId, chapterId, chapterLab
         })
         const data = res.data
         const next: Record<string, EntityNameExistenceItem> = {}
+        /* `products` 是本轮新增的返回项（生成客户端里还没有这个键），按结构化读取。 */
+        const rawData = (data ?? {}) as Record<string, unknown>
         const buckets: [AssetKind, EntityNameExistenceItem[] | undefined][] = [
           ['character', data?.characters],
           ['scene', data?.scenes],
           ['prop', data?.props],
           ['costume', data?.costumes],
+          ['product', rawData.products as EntityNameExistenceItem[] | undefined],
         ]
         buckets.forEach(([kind, list]) => {
           ;(list ?? []).forEach((item) => {

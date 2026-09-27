@@ -46,23 +46,63 @@ function enumSpec(name: string, values: readonly string[], labels: Record<string
 }
 
 /**
+ * 标签表的**大小写无关索引**（每个 `labels` 对象只建一次）。
+ *
+ * 为什么需要它：本表的规矩是「`values` 与 `labels` 的键一一对应」，所以有的枚举类
+ * 键是大写（`ECU` / `DOLLY_IN`），有的是小写（`partial_failed`）。而调用方的输入
+ * 两种都会出现 —— 大模型出的分镜草稿常见小写（`ecu` / `dolly_in`）。
+ * 只做 `labels[key.toLowerCase()]` 只能覆盖"小写表"，大写表会把 `ecu` 判成未登记。
+ * 这里按**两张表都覆盖**的索引查，命中第一个登记的写法（同一枚举类里不会有两个
+ * 仅大小写不同的原值 —— `enumLabels.test.ts` 的去重/覆盖用例会把这种键拦下来）。
+ */
+const LABEL_LOWER_INDEX = new WeakMap<object, Map<string, string>>()
+
+function lowerLabelIndex(labels: Readonly<Record<string, string>>): Map<string, string> {
+  let index = LABEL_LOWER_INDEX.get(labels)
+  if (!index) {
+    index = new Map<string, string>()
+    Object.entries(labels).forEach(([key, label]) => {
+      const lower = key.toLowerCase()
+      if (!index!.has(lower)) index!.set(lower, label)
+    })
+    LABEL_LOWER_INDEX.set(labels, index)
+  }
+  return index
+}
+
+/**
  * 原值 → 中文业务说法。
  *
  * - 空值 / `null` / `undefined` → `unknown` 兜底；
  * - 未登记原值 → `unknown` 兜底（**不是原值**）；
- * - 大小写不敏感（后端有的枚举大写、有的小写，例如 `DIALOGUE` 与 `dialogue`）。
+ * - 大小写不敏感（后端有的枚举大写、有的小写，例如 `DIALOGUE` 与 `dialogue`；
+ *   大模型草稿里的大小写混写同样认）。
  */
 export function labelFor(spec: EnumSpec, raw: string | null | undefined): string {
   const key = String(raw ?? '').trim()
   if (!key) return spec.unknown
-  return spec.labels[key] ?? spec.labels[key.toLowerCase()] ?? spec.unknown
+  return spec.labels[key] ?? lowerLabelIndex(spec.labels).get(key.toLowerCase()) ?? spec.unknown
 }
 
 /** 原值 → 中文；**识别不了返回 null**（调用方需要自己决定业务话术时用这个）。 */
 export function lookupLabel(spec: EnumSpec, raw: string | null | undefined): string | null {
   const key = String(raw ?? '').trim()
   if (!key) return null
-  return spec.labels[key] ?? spec.labels[key.toLowerCase()] ?? null
+  return spec.labels[key] ?? lowerLabelIndex(spec.labels).get(key.toLowerCase()) ?? null
+}
+
+/**
+ * 原值 → **规范写法**（`values` 里登记的那一个）；识别不了返回 `null`。
+ *
+ * 页面上的枚举下拉必须用它：把用户/模型给的 `ecu` 换成登记的 `ECU` 再作为 `value`，
+ * 否则 antd 的 `Select` 在"当前值不在选项里"时会把**原样字符串**渲染出来 ——
+ * 那就是"未登记原值上屏"（审计 §2.1 判定铁律）。下游拿到的也始终是规范写法。
+ */
+export function canonicalEnumValue(spec: EnumSpec, raw: string | null | undefined): string | null {
+  const key = String(raw ?? '').trim()
+  if (!key) return null
+  const matched = spec.values.find((value) => value === key) ?? spec.values.find((value) => value.toLowerCase() === key.toLowerCase())
+  return matched ?? null
 }
 
 /** 原值是否已登记（供「覆盖检查」类测试使用）。 */
@@ -635,6 +675,279 @@ export function guardStatusLabel(raw: string | null | undefined): string {
   return '待确认（原始状态见「技术详情」）'
 }
 
+/* ==========================================================================
+ * 剧情广告流程（策划页）：分镜专业枚举 + 商品卡字段 + 阶段口径
+ * ==========================================================================
+ *
+ * 为什么这一族也放本文件：
+ *   1. 分镜的景别 / 机位 / 运镜 / 说话方式是**后端枚举原值**（`schemas/skills/common.py`
+ *      的 `SHOT_TYPE_ZH` / `CAMERA_ANGLE_ZH` / `CAMERA_MOVEMENT_ZH` / `DIALOGUE_LINE_MODE_ZH`），
+ *      与其它枚举同一类东西 —— 分镜卡片上必须显示中文，原值只进「技术详情」；
+ *   2. 商品卡字段名、广告阶段码同理：页面上的「待补充」与阶段文案都要有**唯一**中文口径，
+ *      不许策划页自己再抄一份（审计 §9.1-19「同一份数据全仓只允许一个名字」）；
+ *   3. 下面几个 `…Notice` / `…Missing…` 纯函数是**同一批中文口径的派生**（与既有的
+ *      `partialFailureHeadline` / `guardStatusLabel` 同一角色）：它们必须与映射表同源，
+ *      拆到别处就会出现「映射表改了、提示句没改」。
+ *     ⚠️ 本模块**不 import React / 网络模块**，`node --test` 能直接加载（文件头既有约定）。
+ */
+
+/** 景别（`shot_details.camera_shot`）：对齐后端 `SHOT_TYPE_ZH`。 */
+export const SHOT_SIZE = enumSpec(
+  'shotSize',
+  ['ECU', 'CU', 'MCU', 'MS', 'MLS', 'LS', 'ELS'],
+  {
+    ECU: '大特写',
+    CU: '特写',
+    MCU: '中近景',
+    MS: '中景',
+    MLS: '中远景',
+    LS: '远景',
+    ELS: '大远景',
+  },
+  '景别未识别',
+)
+
+/** 机位 / 角度（`shot_details.angle`）：对齐后端 `CAMERA_ANGLE_ZH`。 */
+export const CAMERA_ANGLE = enumSpec(
+  'cameraAngle',
+  ['EYE_LEVEL', 'HIGH_ANGLE', 'LOW_ANGLE', 'BIRD_EYE', 'DUTCH', 'OVER_SHOULDER'],
+  {
+    EYE_LEVEL: '平视',
+    HIGH_ANGLE: '俯拍',
+    LOW_ANGLE: '仰拍',
+    BIRD_EYE: '鸟瞰',
+    DUTCH: '荷兰角',
+    OVER_SHOULDER: '过肩',
+  },
+  '机位未识别',
+)
+
+/** 运镜（`shot_details.movement`）：对齐后端 `CAMERA_MOVEMENT_ZH`。 */
+export const CAMERA_MOVEMENT = enumSpec(
+  'cameraMovement',
+  [
+    'STATIC',
+    'PAN',
+    'TILT',
+    'DOLLY_IN',
+    'DOLLY_OUT',
+    'TRACK',
+    'CRANE',
+    'HANDHELD',
+    'STEADICAM',
+    'ZOOM_IN',
+    'ZOOM_OUT',
+  ],
+  {
+    STATIC: '固定',
+    PAN: '横摇',
+    TILT: '俯仰',
+    DOLLY_IN: '推轨',
+    DOLLY_OUT: '拉轨',
+    TRACK: '跟拍',
+    CRANE: '升降',
+    HANDHELD: '手持',
+    STEADICAM: '斯坦尼康',
+    ZOOM_IN: '变焦推进',
+    ZOOM_OUT: '变焦拉远',
+  },
+  '运镜未识别',
+)
+
+/** 说话方式（台词行 `mode`）：对齐后端 `DIALOGUE_LINE_MODE_ZH`。 */
+export const DIALOGUE_LINE_MODE = enumSpec(
+  'dialogueLineMode',
+  ['DIALOGUE', 'VOICE_OVER', 'OFF_SCREEN', 'PHONE'],
+  {
+    DIALOGUE: '对白',
+    VOICE_OVER: '旁白',
+    OFF_SCREEN: '画外音',
+    PHONE: '电话声',
+  },
+  '表述方式未标注',
+)
+
+/**
+ * 剧情广告项目阶段（`projects.ad_phase`，后端派生）。
+ *
+ * 中文口径**逐字**取自后端 `ad_flow_service.AD_PHASE_LABELS`（后端同时下发
+ * `ad_phase_label`，页面优先用它；这里只作为「后端没给 label」时的同一套兜底）。
+ */
+export const AD_PHASE = enumSpec(
+  'adPhase',
+  ['product', 'story', 'storyboard', 'ready', 'confirmed', 'production'],
+  {
+    product: '待补充商品资料',
+    story: '待生成详细剧情',
+    storyboard: '待生成分镜',
+    ready: '待确认策划',
+    confirmed: '已确认策划，可进入资产准备',
+    production: '已进入生产',
+  },
+  '阶段待确认',
+)
+
+/** 商品卡字段（`product_cards` 列名）：缺项标「待补充」时用它换中文。 */
+export const PRODUCT_CARD_FIELD = enumSpec(
+  'productCardField',
+  [
+    'name',
+    'category',
+    'brand',
+    'selling_points',
+    'audience',
+    'scenarios',
+    'price_info',
+    'compliance',
+    'notes',
+    'reference_files',
+  ],
+  {
+    name: '商品名称',
+    category: '品类',
+    brand: '品牌',
+    selling_points: '核心卖点',
+    audience: '目标人群',
+    scenarios: '使用场景',
+    price_info: '价格或促销信息',
+    compliance: '禁止表达与合规要求',
+    notes: '用户补充说明',
+    reference_files: '商品图片或参考资料',
+  },
+  '其它字段',
+)
+
+/** 商品资料来源（`product_cards.source_type`）。 */
+export const PRODUCT_CARD_SOURCE_TYPE = enumSpec(
+  'productCardSourceType',
+  ['manual', 'paste', 'upload', 'existing'],
+  {
+    manual: '手工填写',
+    paste: '粘贴资料',
+    upload: '上传资料',
+    existing: '已有商品资料',
+  },
+  '来源未记录',
+)
+
+/** 商品卡缺项的固定显示词（用户拍板口径：缺就是缺，**不编造**）。 */
+export const PRODUCT_CARD_PENDING_TEXT = '待补充'
+
+/** 后端必填的商品卡字段（与 `product_card.REQUIRED_CARD_FIELDS` 一致：只有名称）。 */
+export const PRODUCT_CARD_REQUIRED_FIELDS: readonly string[] = ['name']
+
+/**
+ * 商品卡某个字段是否为空。
+ *
+ * 与后端 `_is_blank` 同口径：`null` / 空串 / 全空白字符串 / 空数组都算空。
+ * 布尔与数字不参与缺项判定（`confirmed` 不是资料字段）。
+ */
+export function isProductCardFieldBlank(value: unknown): boolean {
+  if (value === null || value === undefined) return true
+  if (Array.isArray(value)) return value.length === 0
+  if (typeof value === 'string') return value.trim() === ''
+  return false
+}
+
+/**
+ * 按缺项规则算出还缺哪些字段（键序与 `PRODUCT_CARD_FIELD.values` 一致）。
+ *
+ * 为什么前端也要算：后端 `missing_fields` 是事实来源（页面优先用它），
+ * 但用户在页面上**刚改完还没保存**时，界面上的「待补充」必须跟着输入实时消失/出现 ——
+ * 那一步不能靠再请求一次接口。两套判定都从这里取同一张字段表，口径不会漂。
+ */
+export function computeProductCardMissingFields(
+  card: Readonly<Record<string, unknown>> | null | undefined,
+): string[] {
+  if (!card) return [...PRODUCT_CARD_FIELD.values]
+  return PRODUCT_CARD_FIELD.values.filter((key) => isProductCardFieldBlank(card[key]))
+}
+
+/** 缺项键 → 中文名（未登记给「其它字段」，**不回显列名**）。 */
+export function productCardMissingLabels(keys: readonly string[] | null | undefined): string[] {
+  return (keys ?? []).map((key) => labelFor(PRODUCT_CARD_FIELD, key))
+}
+
+/** 「待补充」那一行的整句口径：`待补充：商品名称、品类`。空缺项返回空串。 */
+export function productCardPendingText(keys: readonly string[] | null | undefined): string {
+  const labels = productCardMissingLabels(keys)
+  if (labels.length === 0) return ''
+  return `${PRODUCT_CARD_PENDING_TEXT}：${labels.join('、')}`
+}
+
+/** 广告阶段 → 中文（后端给了 `ad_phase_label` 时页面优先用它，这里是同一套兜底）。 */
+export function adPhaseLabel(raw: string | null | undefined): string {
+  return labelFor(AD_PHASE, raw)
+}
+
+/**
+ * `drama_plan_drafts.stale_flags` 的形状（后端 JSON 列）。
+ *
+ * 允许字段缺失：字段没给就是「不知道」，不推断、不编造过期结论。
+ */
+export type DramaStaleFlags = {
+  one_liner_changed_at?: string
+  story_changed_at?: string
+  story_generated_at?: string
+  shots_generated_at?: string
+  story_stale?: boolean
+  shots_stale?: boolean
+  reasons?: readonly string[]
+  /* 兼容位：后端目前不下发这两个时间戳（覆盖判定在服务端做），读到就用、读不到不猜。 */
+  manual_edited_at?: string
+  generated_at?: string
+}
+
+/** `stale_flags` 的**过期提示句**（主区显示用）。没有过期就不返回任何句子。 */
+export function dramaStaleNotices(flags: DramaStaleFlags | null | undefined): string[] {
+  if (!flags) return []
+  const notices: string[] = []
+  if (flags.story_stale) notices.push('一句话核心创意改过了：下面的详细剧情可能已经过期，需要重新生成。')
+  if (flags.shots_stale) notices.push('完整剧情改过了：分镜可能已经过期，需要重新生成。')
+  return notices
+}
+
+/**
+ * 重新生成前的**覆盖风险**口径。
+ *
+ * 后端规则（`drama_plan_service.needs_overwrite_confirmation`）：人工编辑晚于上次生成时，
+ * `generate` 必须带 `confirm_overwrite=true`，否则 409。页面要在按钮上先说清楚
+ * 「这一次会覆盖你的修改」，而不是让用户撞一次 409。
+ *
+ * 判定按**后端实际下发的信号**来，两级：
+ *   1. 有 `manual_edited_at` 与生成时间戳且前者更晚 → 确定会覆盖（时间戳是 ISO 串，
+ *      字典序即时间序）；
+ *   2. 否则看 `story_stale` / `shots_stale`：它们正是"上一步被（人工）改过、
+ *      下一步还没重生成"，重生成就是把改动覆盖掉 → **同样要问一次**。
+ *
+ * ⚠️ 这两个信号都可能因为"另一标签页刚改过"而过时 —— 服务端才是权威：
+ * 真撞上 409 时页面会再问一次覆盖（见策划页 `runGenerate`）。
+ */
+export function dramaOverwriteRisk(
+  flags: DramaStaleFlags | null | undefined,
+): { needsConfirm: boolean; message: string } {
+  const manual = String(flags?.manual_edited_at ?? '').trim()
+  const generated = String(
+    flags?.generated_at ?? flags?.story_generated_at ?? flags?.shots_generated_at ?? '',
+  ).trim()
+  if (manual && generated && manual > generated) {
+    return {
+      needsConfirm: true,
+      message: '你在上次生成之后手工改过内容：重新生成会覆盖你的修改，确认后才会继续。',
+    }
+  }
+  if (flags?.story_stale || flags?.shots_stale) {
+    return {
+      needsConfirm: true,
+      message: '上一次生成之后内容被改过（一句话或完整剧情）：重新生成会覆盖这些改动，确认后才会继续。',
+    }
+  }
+  return {
+    needsConfirm: false,
+    message: '重新生成会用新的结果替换当前内容（会再调用 1 次模型）。',
+  }
+}
+
 /* ---------------------------------------------------------- 扫描词源 / 自检 */
 
 /** 本文件里全部枚举类（顺序固定，便于测试报错定位）。 */
@@ -661,6 +974,14 @@ export const ALL_ENUM_SPECS: readonly EnumSpec[] = [
   DELIVERY_EXPORT_SOURCE,
   TASK_KIND,
   SCRIPT_ISSUE_TYPE,
+  /* 剧情广告流程（策划页）：分镜专业枚举 + 商品卡字段 + 项目阶段 */
+  SHOT_SIZE,
+  CAMERA_ANGLE,
+  CAMERA_MOVEMENT,
+  DIALOGUE_LINE_MODE,
+  AD_PHASE,
+  PRODUCT_CARD_FIELD,
+  PRODUCT_CARD_SOURCE_TYPE,
 ]
 
 /**
