@@ -1185,6 +1185,9 @@ export function describeStorageReachability(
   const imageUrl = String(task.imageUrl || '').trim()
   if (ossUrl) return { localOnly: false, note: '' }
   if (!imageUrl) return { localOnly: false, note: '' }
+  // 演练占位地址不是"只在本机的图"，它压根不是图：不能给它贴「仅本机 · 不能用于后续生成」——
+  // 那会把"演练没出图"说成"出图了但存不下来"，比不标更误导。
+  if (isPlaceholderUrl(imageUrl)) return { localOnly: false, note: '' }
   return {
     localOnly: true,
     note:

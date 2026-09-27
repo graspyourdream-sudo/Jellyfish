@@ -50,3 +50,12 @@ test('空白字符不算长期地址（不许因为一串空格就当成可达�
   const r = describeStorageReachability({ ossUrl: '   ', imageUrl: 'generated-images/a.png' })
   assert.equal(r.localOnly, true)
 })
+
+test('演练占位地址不贴「仅本机」标签（它不是"只在本机的图"，它压根不是图）', () => {
+  const r = describeStorageReachability({
+    ossUrl: '',
+    imageUrl: 'https://dry-run.invalid/generated/character/a.png',
+  })
+  assert.equal(r.localOnly, false)
+  assert.equal(r.note, '')
+})
