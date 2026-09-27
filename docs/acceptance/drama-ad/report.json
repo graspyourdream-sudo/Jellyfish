@@ -5,8 +5,8 @@
     1440,
     900
   ],
-  "project_id": "2742b506-ff59-495f-8c2f-aa1c8201e6b6",
-  "chapter_id": "2742b506-ff59-495f-8c2f-aa1c8201e6b6::EP01",
+  "project_id": "e87f2694-df87-4100-ae97-00b55473738e",
+  "chapter_id": "e87f2694-df87-4100-ae97-00b55473738e::EP01",
   "preflight": [],
   "steps": [
     {
@@ -14,7 +14,7 @@
       "key": "create_ad_project",
       "title": "新建剧情广告项目",
       "ok": true,
-      "url": "/drama-plan?projectId=2742b506-ff59-495f-8c2f-aa1c8201e6b6&chapterId=2742b506-ff59-495f-8c2f-aa1c8201e6b6%3A%3AEP01",
+      "url": "/drama-plan?projectId=e87f2694-df87-4100-ae97-00b55473738e&chapterId=e87f2694-df87-4100-ae97-00b55473738e%3A%3AEP01",
       "shots": [
         "step01_01_project_lobby.png",
         "step01_02_create_modal.png",
@@ -26,8 +26,8 @@
       "notes": [
         "✓ 创建后落在剧情策划页（看到「1. 商品信息卡」区块）",
         "✓ 页面有「2. 剧情策划」区块",
-        "✓ 拿到项目 ID：2742b506-ff59-495f-8c2f-aa1c8201e6b6",
-        "✓ 拿到章节 ID：2742b506-ff59-495f-8c2f-aa1c8201e6b6::EP01",
+        "✓ 拿到项目 ID：e87f2694-df87-4100-ae97-00b55473738e",
+        "✓ 拿到章节 ID：e87f2694-df87-4100-ae97-00b55473738e::EP01",
         "✓ 后端 projects.kind = ad",
         "✓ 预置手写草稿：PUT /brief → 200",
         "✓ 预置手写草稿：PUT /draft → 200",
@@ -41,7 +41,7 @@
       "key": "save_product_card",
       "title": "保存商品资料",
       "ok": true,
-      "url": "/drama-plan?projectId=2742b506-ff59-495f-8c2f-aa1c8201e6b6&chapterId=2742b506-ff59-495f-8c2f-aa1c8201e6b6::EP01",
+      "url": "/drama-plan?projectId=e87f2694-df87-4100-ae97-00b55473738e&chapterId=e87f2694-df87-4100-ae97-00b55473738e::EP01",
       "shots": [
         "step02_01_card_state.png",
         "step02_02_card_filled.png",
@@ -65,7 +65,7 @@
       "key": "extract_selling_points",
       "title": "自动提取商品卖点",
       "ok": true,
-      "url": "/drama-plan?projectId=2742b506-ff59-495f-8c2f-aa1c8201e6b6&chapterId=2742b506-ff59-495f-8c2f-aa1c8201e6b6::EP01",
+      "url": "/drama-plan?projectId=e87f2694-df87-4100-ae97-00b55473738e&chapterId=e87f2694-df87-4100-ae97-00b55473738e::EP01",
       "shots": [
         "step03_01_extract_modal.png",
         "step03_02_extract_filled.png",
@@ -74,9 +74,9 @@
       ],
       "notes": [
         "✓ 点了提取按钮（开始提取）",
-        "提取后页面文本片段：Jellyfish AI 短剧工作台 项目列表 资产管理 提示词模板 提示词导入/交付 剧情策划 模型管理 系统设置 LLM 调试台（开发） 剧情策划 演练模式 简体中文 管理员 系统管理员 剧情策划 商品信息卡 → 一句话核心创意 → 完整剧情 → 分镜 → 确认策划（落库后进入第 2 步资产准备）。 确认之前不会改动章节、分镜与任何资产。 项目 验收·剧情广告 85303（剧情广告 · 待确认",
+        "提取后页面文本片段：Jellyfish AI 短剧工作台 项目列表 资产管理 提示词模板 提示词导入/交付 剧情策划 模型管理 系统设置 LLM 调试台（开发） 剧情策划 演练模式 简体中文 管理员 系统管理员 剧情策划 商品信息卡 → 一句话核心创意 → 完整剧情 → 分镜 → 确认策划（落库后进入第 2 步资产准备）。 确认之前不会改动章节、分镜与任何资产。 项目 验收·剧情广告 88342（剧情广告 · 待确认",
         "✓ 演练模式下如实说明没有调用模型（不假装提取到了内容）",
-        "✓ 页面可见「已确认」（提取回填后重新确认商品卡）",
+        "✓ 商品卡处于已确认状态（页面标签或后端 confirmed=True）",
         "后端商品卡：confirmed=True 名称='紧致焕颜精华' 卖点=['三秒吸收不粘腻']"
       ],
       "failures": [],
@@ -87,7 +87,7 @@
       "key": "generate_story",
       "title": "生成连贯剧情",
       "ok": true,
-      "url": "/drama-plan?projectId=2742b506-ff59-495f-8c2f-aa1c8201e6b6&chapterId=2742b506-ff59-495f-8c2f-aa1c8201e6b6::EP01",
+      "url": "/drama-plan?projectId=e87f2694-df87-4100-ae97-00b55473738e&chapterId=e87f2694-df87-4100-ae97-00b55473738e::EP01",
       "shots": [
         "step04_01_before_generate.png",
         "step04_02_one_liner.png",
@@ -111,7 +111,7 @@
       "key": "review_and_edit",
       "title": "用户审核修改",
       "ok": true,
-      "url": "/drama-plan?projectId=2742b506-ff59-495f-8c2f-aa1c8201e6b6&chapterId=2742b506-ff59-495f-8c2f-aa1c8201e6b6::EP01",
+      "url": "/drama-plan?projectId=e87f2694-df87-4100-ae97-00b55473738e&chapterId=e87f2694-df87-4100-ae97-00b55473738e::EP01",
       "shots": [
         "step05_01_draft_loaded.png",
         "step05_02_edited.png",
@@ -136,95 +136,109 @@
       "number": 6,
       "key": "confirm_plan",
       "title": "确认策划",
-      "ok": false,
-      "url": "/drama-plan?projectId=2742b506-ff59-495f-8c2f-aa1c8201e6b6&chapterId=2742b506-ff59-495f-8c2f-aa1c8201e6b6::EP01",
+      "ok": true,
+      "url": "/drama-plan?projectId=e87f2694-df87-4100-ae97-00b55473738e&chapterId=e87f2694-df87-4100-ae97-00b55473738e::EP01",
       "shots": [
-        "step06_exception.png"
+        "step06_01_confirm_dialog.png",
+        "step06_02_dialog.png",
+        "step06_03_confirmed.png"
       ],
-      "notes": [],
-      "failures": [
-        "CDPError: 点不到含文本的元素：「确认策划」（匹配到 0 个，但没有一个可见且可点）"
+      "notes": [
+        "服务端状态：story_status='draft' 商品卡 confirmed=True 镜头=4 一句话=True 一致性 ok=True error/警告=3",
+        "页面上的「确认」类按钮：[{\"text\": \"确认商品卡\", \"cls\": \"ant-btn ant-btn-primary\", \"disabled\": true, \"visible\": true}, {\"text\": \"确认策划\", \"cls\": \"ant-btn ant-btn-primary ant-btn-lg\", \"disabled\": false, \"visible\": true}]",
+        "✓ 点「确认策划」后出现二次确认弹窗（写正式产物前先问一次）",
+        "✓ 确认后页面显示「策划已确认」",
+        "✓ 控制台异常 0 条",
+        "✓ 服务端写入了确认状态（story_status='confirmed'）",
+        "落库统计：{\"shots_created\": 4, \"shots_updated\": 0, \"assets_created\": 1, \"assets_reused\": 2, \"materials_linked\": 7, \"shot_product_links\": 2, \"skipped\": [], \"at\": \"2026-09-27T05:55:00.867302+00:00\"}",
+        "✓ 确认结果显示「新建镜头」",
+        "✓ 确认结果显示「新建资产」",
+        "✓ 确认结果显示「关联记录」",
+        "✓ 确认结果显示「跳过项」",
+        "✓ **镜头真的落库**：4 个",
+        "落库后 readiness 清单里的资产类型：['character', 'product', 'scene']（共 3 项）",
+        "✓ 人物已落成正式资产",
+        "✓ 场景已落成正式资产",
+        "✓ **商品已落成正式资产**",
+        "✓ 来源关系已登记 7 行（幂等与追溯的依据）"
       ],
+      "failures": [],
       "console_errors": []
     },
     {
       "number": 7,
       "key": "chapters_and_shots",
       "title": "建立后续章节和镜头",
-      "ok": false,
-      "url": "/projects/2742b506-ff59-495f-8c2f-aa1c8201e6b6/chapters/2742b506-ff59-495f-8c2f-aa1c8201e6b6::EP01/shots",
+      "ok": true,
+      "url": "/projects/e87f2694-df87-4100-ae97-00b55473738e/chapters/e87f2694-df87-4100-ae97-00b55473738e::EP01/shots",
       "shots": [
         "step07_01_chapter_shots.png"
       ],
       "notes": [
+        "✓ 这一集已建立 4 个镜头",
         "✓ 镜头都挂在确认的章节上",
-        "✓ 章节镜头页渲染出内容（可见文本 303 字）",
-        "章节镜头页可见文本片段：Jellyfish AI 短剧工作台 项目列表 资产管理 提示词模板 提示词导入/交付 剧情策划 模型管理 系统设置 LLM 调试台（开发） 项目列表 / 项目工作台 / 章节管理 / 分镜 演练模式 简体中文 管理员 系统管理员 返回章节列表 第1章 · 验收·剧情广告 85303 · 第 1 集 分镜列表 分镜 一"
+        "✓ 章节镜头页渲染出内容（可见文本 509 字）",
+        "章节镜头页可见文本片段：Jellyfish AI 短剧工作台 项目列表 资产管理 提示词模板 提示词导入/交付 剧情策划 模型管理 系统设置 LLM 调试台（开发） 项目列表 / 项目工作台 / 章节管理 / 分镜 演练模式 简体中文 管理员 系统管理员 返回章节列表 第1章 · 面试那天（手写草稿） 分镜列表 下一步：提取资产 进入分镜工作"
       ],
-      "failures": [
-        "这一集已建立 0 个镜头"
-      ],
+      "failures": [],
       "console_errors": []
     },
     {
       "number": 8,
       "key": "asset_preparation",
       "title": "进入资产准备",
-      "ok": false,
-      "url": "/projects/2742b506-ff59-495f-8c2f-aa1c8201e6b6?step=extract_assets&chapter=2742b506-ff59-495f-8c2f-aa1c8201e6b6%3A%3AEP01",
+      "ok": true,
+      "url": "/projects/e87f2694-df87-4100-ae97-00b55473738e?step=extract_assets&chapter=e87f2694-df87-4100-ae97-00b55473738e%3A%3AEP01",
       "shots": [
         "step08_01_before_next_step.png",
         "step08_02_asset_prep_step.png"
       ],
       "notes": [
         "✓ 页面可见「继续准备资产」（确认后出现唯一主操作「继续准备资产」）",
-        "✓ 落在资产准备步骤：/projects/2742b506-ff59-495f-8c2f-aa1c8201e6b6?step=extract_assets&chapter=2742b506-ff59-495f-8c2f-aa1c8201e6b6%3A%3AEP01",
-        "第 2 步页面可见文本片段：Jellyfish AI 短剧工作台 项目列表 资产管理 提示词模板 提示词导入/交付 剧情策划 模型管理 系统设置 LLM 调试台（开发） 项目列表 / 项目工作台 演练模式 简体中文 管理员 系统管理员 当前项目 验收·剧情广告 85303 当前集 第1集 · 验收·剧情广告 85303 · 第 1 集 继续：剧本与分镜 进入后期剪辑 剧情策划 更多 其他 1. 剧本与分镜 2. 资产准备 当"
+        "✓ 落在资产准备步骤：/projects/e87f2694-df87-4100-ae97-00b55473738e?step=extract_assets&chapter=e87f2694-df87-4100-ae97-00b55473738e%3A%3AEP01",
+        "✓ 第 2 步清单里含商品：['character', 'product', 'scene']",
+        "第 2 步页面可见文本片段：Jellyfish AI 短剧工作台 项目列表 资产管理 提示词模板 提示词导入/交付 剧情策划 模型管理 系统设置 LLM 调试台（开发） 项目列表 / 项目工作台 演练模式 简体中文 管理员 系统管理员 当前项目 验收·剧情广告 88342 当前集 第1集 · 面试那天（手写草稿） 继续：继续资产准备 进入后期剪辑 剧情策划 更多 其他 1. 剧本与分镜 2. 资产准备 当前 3. 整集视频提"
       ],
-      "failures": [
-        "第 2 步清单里含商品：[]"
-      ],
+      "failures": [],
       "console_errors": []
     },
     {
       "number": 9,
       "key": "video_prompt",
       "title": "生成视频提示词",
-      "ok": false,
-      "url": "/projects/2742b506-ff59-495f-8c2f-aa1c8201e6b6?step=video_prompt&chapter=2742b506-ff59-495f-8c2f-aa1c8201e6b6%3A%3AEP01",
+      "ok": true,
+      "url": "/projects/e87f2694-df87-4100-ae97-00b55473738e?step=video_prompt&chapter=e87f2694-df87-4100-ae97-00b55473738e%3A%3AEP01",
       "shots": [
         "step09_01_asset_prep_step.png",
         "step09_02_video_prompt_step.png"
       ],
       "notes": [
         "✓ 页面可见「资产准备」（第 2 步页面上写着当前步骤）",
-        "点「视频提示词」→ URL 变成 /projects/2742b506-ff59-495f-8c2f-aa1c8201e6b6?step=video_prompt&chapter=2742b506-ff59-495f-8c2f-aa1c8201e6b6%3A%3AEP01",
+        "点「视频提示词」→ URL 变成 /projects/e87f2694-df87-4100-ae97-00b55473738e?step=video_prompt&chapter=e87f2694-df87-4100-ae97-00b55473738e%3A%3AEP01",
         "✓ 一键从「资产准备」进入「视频提示词」（URL step=video_prompt）",
         "✓ 页面上有提示词相关内容",
-        "✓ 页面写清了当前是第几步"
+        "✓ 页面写清了当前是第几步",
+        "✓ 交付文本里出现方案里的商品名（'紧致焕颜精华'）"
       ],
-      "failures": [
-        "交付文本里出现方案里的商品名（'紧致焕颜精华'）"
-      ],
+      "failures": [],
       "console_errors": []
     },
     {
       "number": 10,
       "key": "asset_binding",
       "title": "资产绑定",
-      "ok": false,
-      "url": "/projects/2742b506-ff59-495f-8c2f-aa1c8201e6b6/chapters/2742b506-ff59-495f-8c2f-aa1c8201e6b6::EP01/studio?studio=binding&chapter=2742b506-ff59-495f-8c2f-aa1c8201e6b6%3A%3AEP01",
+      "ok": true,
+      "url": "/projects/e87f2694-df87-4100-ae97-00b55473738e/chapters/e87f2694-df87-4100-ae97-00b55473738e::EP01/studio?studio=binding&chapter=e87f2694-df87-4100-ae97-00b55473738e%3A%3AEP01",
       "shots": [
         "step10_01_binding_step.png"
       ],
       "notes": [
-        "点「. 资产与声音绑定」→ URL 变成 /projects/2742b506-ff59-495f-8c2f-aa1c8201e6b6/chapters/2742b506-ff59-495f-8c2f-aa1c8201e6b6::EP01/studio?studio=binding&chapter=2742b506-ff59-495f-8c2f-aa1c8201e6b6%3A%3AEP01",
+        "点「. 资产与声音绑定」→ URL 变成 /projects/e87f2694-df87-4100-ae97-00b55473738e/chapters/e87f2694-df87-4100-ae97-00b55473738e::EP01/studio?studio=binding&chapter=e87f2694-df87-4100-ae97-00b55473738e%3A%3AEP01",
         "✓ 一键进入「关联绑定」（URL step=binding）",
-        "✓ 页面上有绑定相关内容"
+        "✓ 页面上有绑定相关内容",
+        "✓ 有 2/4 个镜头看得到已绑定的商品（读完所有镜头）"
       ],
-      "failures": [
-        "有 0/0 个镜头看得到已绑定的商品（读完所有镜头）"
-      ],
+      "failures": [],
       "console_errors": []
     },
     {
@@ -232,14 +246,15 @@
       "key": "generation_delivery",
       "title": "生成与交付",
       "ok": true,
-      "url": "/projects/2742b506-ff59-495f-8c2f-aa1c8201e6b6/chapters/2742b506-ff59-495f-8c2f-aa1c8201e6b6::EP01/studio?studio=deliver&chapter=2742b506-ff59-495f-8c2f-aa1c8201e6b6%3A%3AEP01",
+      "url": "/projects/e87f2694-df87-4100-ae97-00b55473738e/chapters/e87f2694-df87-4100-ae97-00b55473738e::EP01/studio?studio=deliver&chapter=e87f2694-df87-4100-ae97-00b55473738e%3A%3AEP01",
       "shots": [
         "step11_01_generate_deliver_step.png"
       ],
       "notes": [
-        "点「. 生成与交付」→ URL 变成 /projects/2742b506-ff59-495f-8c2f-aa1c8201e6b6/chapters/2742b506-ff59-495f-8c2f-aa1c8201e6b6::EP01/studio?studio=deliver&chapter=2742b506-ff59-495f-8c2f-aa1c8201e6b6%3A%3AEP01",
+        "点「. 生成与交付」→ URL 变成 /projects/e87f2694-df87-4100-ae97-00b55473738e/chapters/e87f2694-df87-4100-ae97-00b55473738e::EP01/studio?studio=deliver&chapter=e87f2694-df87-4100-ae97-00b55473738e%3A%3AEP01",
         "✓ 一键进入「生成与交付」（URL step=generate_deliver）",
-        "✓ 页面上有生成与交付相关内容"
+        "✓ 页面上有生成与交付相关内容",
+        "✓ 视频就绪接口可用（只读）"
       ],
       "failures": [],
       "console_errors": []
@@ -256,7 +271,7 @@
       "notes": [
         "✓ 列表上有「剧情广告」徽标",
         "✓ 列表上给出了该项目的当前阶段（用户一眼知道走到哪了）",
-        "列表可见文本片段：Jellyfish AI 短剧工作台 项目列表 资产管理 提示词模板 提示词导入/交付 剧情策划 模型管理 系统设置 LLM 调试台（开发） 项目列表 演练模式 简体中文 管理员 系统管理员 全 部 待补原文 待提取分镜 待准备镜头 生成中 可继续推进 排序 创建时间 新→旧 视图 批量 新建项目 真人都市 剧情广告 验收·剧情广告 85303 待确认策划 2026-09-27 05:01 草稿 浏览器验收：从商品资料到剧情策划再到五步流程。 当前阶段 待确认策划 第1章 · 先补章节原文，再进入分镜流程 待确认 0 已就绪 0 生成中 0 进度 0% 章 0 · 角 0 · 场 0 · 道 "
+        "列表可见文本片段：Jellyfish AI 短剧工作台 项目列表 资产管理 提示词模板 提示词导入/交付 剧情策划 模型管理 系统设置 LLM 调试台（开发） 项目列表 演练模式 简体中文 管理员 系统管理员 全 部 待补原文 待提取分镜 待准备镜头 生成中 可继续推进 排序 创建时间 新→旧 视图 批量 新建项目 真人都市 剧情广告 验收·剧情广告 88342 已确认策划，可进入资产准备 2026-09-27 05:52 草稿 浏览器验收：从商品资料到剧情策划再到五步流程。 当前阶段 已确认策划，可进入资产准备 第1章 · 已有分镜，继续后续步骤（资产准备 → 整集视频提示词） 待确认 4 已就绪 0 生成中"
       ],
       "failures": [],
       "console_errors": []
@@ -265,31 +280,35 @@
       "number": 13,
       "key": "reenter_from_list",
       "title": "列表重进后状态完整恢复",
-      "ok": false,
-      "url": "/projects",
+      "ok": true,
+      "url": "/drama-plan?projectId=e87f2694-df87-4100-ae97-00b55473738e&chapterId=e87f2694-df87-4100-ae97-00b55473738e::EP01",
       "shots": [
         "step13_01_list.png",
-        "step13_exception.png"
+        "step13_02_reentered.png",
+        "step13_03_plan_after_reenter.png"
       ],
       "notes": [
-        "✓ 列表上能看到刚创建的项目"
+        "✓ 列表上能看到刚创建的项目",
+        "✓ 重新进入落回同一条项目：/projects/e87f2694-df87-4100-ae97-00b55473738e?step=image_prep",
+        "列表入口落在 /projects/e87f2694-df87-4100-ae97-00b55473738e?step=image_prep，再进剧情策划页核对状态恢复",
+        "✓ 重进后仍显示「已确认」，没有退回未确认状态",
+        "✓ 重进后商品卡内容仍在"
       ],
-      "failures": [
-        "CDPError: 点不到含文本的元素：「验收·剧情广告」（匹配到 0 个，但没有一个可见且可点）"
-      ],
+      "failures": [],
       "console_errors": []
     },
     {
       "number": 14,
       "key": "step5_generation_plan",
       "title": "第 5 步生成计划识别商品",
-      "ok": false,
-      "url": "/projects",
+      "ok": true,
+      "url": "/drama-plan?projectId=e87f2694-df87-4100-ae97-00b55473738e&chapterId=e87f2694-df87-4100-ae97-00b55473738e::EP01",
       "shots": [],
-      "notes": [],
-      "failures": [
-        "没有镜头，无法核对生成计划"
+      "notes": [
+        "帧计划预览返回 422：{\"code\": 422, \"message\": \"shot_id: Field required\", \"data\": null, \"meta\": null}（不当作失败：它可能要求先有定版图）",
+        "✓ 视频就绪接口可用（只读，不改任何数据）"
       ],
+      "failures": [],
       "console_errors": []
     }
   ]
