@@ -417,3 +417,42 @@ note: 这张图只存在本机（不是公网长期地址），**不能用于后
 
 **因此 ④ 仍算未完成**：后端两级（`asset-readiness` + `asset-workbench`）结论都已在真实数据上成立，
 但"页面上显式标记"这条**没有证据**，不冒充通过。
+
+---
+
+## 追加（第 16 轮）：④ 的页面标记**已通过页面复验**（根因是前两轮改错了渲染点）
+
+### 根因（用 DOM 定位查到的）
+
+前两轮"页面看不到标记"不是数据问题，是我改错了地方。`65-dom-probe*.json` 显示第 2 步资产列表
+真实渲染的是 **`AssetCardGrid` 的卡片**：
+
+```html
+<article data-testid="asset-card" data-asset-name="苏晚棠" …>
+  … 苏晚棠 / 人物 / <span class="ant-tag ant-tag-green ant-tag-borderless">已定版</span> …
+  这一项已经定版  详情 编辑资料 修改提示词 重新生成图片
+```
+
+即：**不是表格列**（我前两轮改的 `AssetProductionArea` 的「定版」列、以及只改 `asset-readiness`
+都不在这条链上）。定位手法值得记下来：先在 DOM 里按"独占文本"找到那枚标签，再沿
+`parentElement` 链拿到同行的业务文案（「这一项已经定版」），用**唯一文案**回查源码
+（`workbenchState.ts:641`）→ 找到消费方 `AssetCardGrid.tsx`。
+
+### 修复（`774d393`）
+
+- `AssetCardGrid.tsx`：卡片右上，`statusKey === 'primary'` 且
+  `image.primary_usable_for_generation !== true` 时多一枚橙色标签「仅本机 · 不能用于后续生成」，
+  Tooltip 给中文修法；结论只用契约给的值；
+- `assetWorkbenchContract.ts`：`AssetWorkbenchImage` 补两字段 + normalizer **兜底 false**
+  （"没验过就不许说可用"）；降级视图 `DegradedSignalAsset` 同样补上并搬运；
+- `ProjectImagePrepPanel.tsx`：同一屏幕另一种视图的「业务状态」列也补上同样标记。
+
+### 复验结果（本轮实测**通过**）
+
+`badge-check` 打开项目 → 资产准备 → 抓 body 文本：出现 **`仅本机 · 不能用于后续生成`**（输出 `true`）。
+`tsc` 对改动文件无错误；前端 710 项通过。
+
+### ④ 判定
+
+**完成**：后端两条读模型（`asset-readiness` + `asset-workbench`）给结论 → 页面卡片上显式标记
+「仅本机 · 不能用于后续生成」→ 页面复验通过。剩余的是 ③ 与提示词起步路径的证据。
