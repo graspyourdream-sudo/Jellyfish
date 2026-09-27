@@ -132,3 +132,71 @@ pr41 实际装 `5.29.3` / `5.9.3`。即 **`pnpm install --frozen-lockfile` 装�
 3. **重试 1 次 S001 视频**（第 3 项因我中断请求而失败，超出原授权次数）。
 
 若不重试，另一条路是**明确改验收口径**：以「演练证据 + 既有产物证据」收口两项头条标准。
+
+
+---
+
+# 追加：新一轮授权执行结果（人物出图链路达成）
+
+## A. 付费前检查（按要求先做完）
+
+### A.1 上游出图服务（「人物及场景生产项目」）
+- 启动：`node src/server.js`；**实际监听 `127.0.0.1:4173`**（0 依赖，无需安装）。
+- 免费健康检查：`GET /api/service/health` → `{"ok":true,"service":"ai-image-tool","queue":{paused:false},"oss":{"configured":true}}`。
+- 能力确认：`GET /api/config` → `sizes = {character:"3:4", characterReference:"16:9", scene:"16:9", prop:"1:1"}`，
+  即**按人物资料与提示词直接生成 16:9 人物参考图**这条能力成立。
+- Jellyfish 侧只走 HTTP：`external_image_client.DEFAULT_SERVICE_URL = "http://127.0.0.1:4173"`
+  （可由 `IMAGE_TOOL_SERVICE_URL` 覆盖）；`service_base_url()` 实测返回该地址；
+  **无任何运行时文件/目录依赖**（所有"人物及场景生产项目"命中都在注释/docstring 里）。
+
+### A.2 上次视频中断的费用排查（结论：无法判定，故未重提）
+- 后端访问日志：只有 `OPTIONS … /image-pipeline/video-submit 200`，**没有 POST 完成记录**；
+- `generation_tasks`：今天**零新增**（最新视频任务为 09-23 的 `audit-shot-1`，与本次无关）；
+- `generation_task_links`：43 条未变；S001 无视频文件关联；`files` 未增；
+- 上游：APIMart 只有 `POST /videos/generations` 与 `GET /tasks/{id}`，**没有"列任务"或"余额/费用"接口**，
+  且**视频请求体里没有幂等键**（`video_prompt`/`model`/帧/音频，`video_submit.py` 无 `attempt`），
+  与图片路径（前端明确记录"attempt 混进幂等键、上游按既有任务去重"）**不同**。
+- 因此**无法排除**上次已在上游建过任务并计费 → 按规则**未提交本次视频**，改为报告证据。
+
+## B. 本轮授权的真实调用（提交 1 次，成功链路达成）
+
+| 项 | 提交次数 | 任务 ID | 结果 |
+|---|---|---|---|
+| 人物出图（苏晚棠） | **1** | 上游 `280d3d60-3b7a-4199-a137-72e00eee8c9e` | 供应商**出图成功**；**OSS 上传 403 AccessDenied** 导致上游标记 `failed` |
+| 上游任务阶段/时间 | — | — | `character` / createdAt `2026-09-27T03:47:11Z` → updatedAt `03:47:54Z`（约 43s） |
+| 供应商错误原文 | — | — | 「出图成功但 OSS 上传失败：OSS 上传返回 HTTP 403 … AccessDenied … bucket acl」 |
+| 产物 | — | — | 上游保留本地图 `/images/苏晚棠_主图_01_06.png`（2048×1152 = **16:9**，3.4MB） |
+
+**是否计费**：供应商侧错误原文写明「**出图成功**」，因此**极可能已计费 1 张**；
+失败发生在**上传 OSS**（bucket ACL 权限），与 Jellyfish 无关。按规则**未重提**。
+
+**采纳与定版（零新增供应商调用）**：用这张**已付费生成**的图走应用自身的采纳端点
+`POST /studio/image-pipeline/adopt`（`set_primary=true`）：
+- 返回 `image_id=46`、`file_id=d8f9f639-4fc1-416e-a215-da279463d739`、**`is_primary=true`**；
+- `files` 138 → **139**（**新增媒体对象 1 个**，在授权上限 2 内）；
+- 页面复核：**「已定版 1」**（原 0）、「还有 17 个资产没有设定版图」（原 18）、
+  苏晚棠卡片按钮变为「重新生成图片」；该次页面 POST 只有只读的 `plan/preview`。
+
+✅ **头条标准①达成：至少一个资产真实走完 提示词→图片→采纳→定版。**
+（说明：生成是真实的付费调用；采纳用的是它产出的真实图片，未额外调用供应商。）
+
+## C. 仍未达成的一项（如实保留）
+
+❌ **至少一个镜头真实走完 绑定→视频→写回→查看**：因 A.2 无法判定上次是否已计费，按规则未重提视频。
+「写回正确镜头 + 可查看」此前仅用**既有产物**验证过（§3）。
+
+## D. 环境清理（单独 commit `4359bee`）
+
+- `git rm --cached backend/.venv front/node_modules` → 两条**机器相关符号链接**不再被跟踪；
+  路径继续由 `.gitignore`（`node_modules/`、`.venv/`）忽略。
+- 本地保留：`backend/.venv` 为**本 worktree 真实独立环境**（`app.__file__` 指向本 worktree）；
+  `front/node_modules` 由 `pnpm install` 重建（本提交不含任何依赖内容）。
+- **验证**：从本分支新建 worktree（`git worktree add … HEAD`）后，`backend/.venv` 与
+  `front/node_modules` **均不存在** → 不再自动指向主仓或其它 worktree。
+- **与另一分支的冲突说明**：本提交只**删除**两条链接、不改源码。若 `feat/drama-ad-mvp` 也删同两条链接，
+  属"双方同向删除"，Git 一般可自动合并；若对方**改过**这两条链接，才会出现 modify/delete 冲突（需人工裁决）。
+
+## E. 本轮守卫状态与推送
+
+- 最终守卫：`mode=dry_run`、`is_real_mode=false`、`dotenv_real_mode=false`、**四出口全 blocked**；无 `.env` 落盘。
+- 分支 `feat/main-flow-closure`：本地 = 远端 = 推送见报告。
