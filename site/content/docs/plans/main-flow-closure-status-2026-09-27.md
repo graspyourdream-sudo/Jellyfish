@@ -727,3 +727,27 @@ detail.recoverable = True ｜ detail.artifact_state = recoverable ｜ detail.loc
 候选是 `pickResultForAsset` / `dedupeResults` 挑行时选了另一行，或该路径根本没走
 `resolveResultStatus` 的 `image_url` 分支。下一轮用桩上游把**提交响应原文**与
 **卡片上的 task 对象**同时打出来对比，就能一次定死——依然是零成本。
+
+### 第 26 轮：用真实回包**排除了整条前端映射链**，缺口锁定在"卡片拿到的 task 对象"
+
+这一轮把上一轮那个"一个字段"的谜题又往下钉了一层（全程受控桩，零成本）：
+
+**已排除（都有实测）**
+
+1. **HTTP 回包是对的**：直接打 `POST /studio/image-pipeline/submit`（桩上游），响应里
+   `results[0]` = `{source_asset_id: 'asset_1790138604308_character', outcome: 'partial_failed',
+   image_url: 'http://127.0.0.1:4317/images/stub-artifact.png', oss_url: '', service_task_id: 'stub-task-1'}`；
+2. **前端纯函数也是对的**：把**同一份回包**喂给前端自己的函数（Node 里直接 import 真源码）：
+   `pickResultForAsset` 选中同一行 → `resolveResultStatus` 得到 `status=failed / outcome=partial_failed /
+   imageUrl=http://127.0.0.1:4317/images/stub-artifact.png` → **`canAdoptResult = true`**、
+   **`仅本机标签应该出现 = true`**；
+3. **批量流程用的就是这两个函数**（`AssetProductionArea.tsx:943-957`），**结果区渲染的也确实是
+   `AssetResultCard`**（`:2452`），而且卡片里没有任何"失败就早返回"的分支。
+
+**因此缺口被锁定在**：**卡片实际拿到的那个 `task` 对象里 `imageUrl` 是空的**——即
+`updateTask(taskKey, { imageUrl: normalized.imageUrl, ... })` 之后，落在这个卡片上的 task
+仍然没有 `imageUrl`（键不匹配，或后续某次更新把它清掉了）。这正是下一轮要一次定死的地方：
+在结果区把 `visibleCards` 里每个 task 的关键字段（key / status / outcome / imageUrl）打到页面上
+（临时自检，或读 React DevTools 等价的 DOM 探针），与回包对照即可。
+
+**本轮收尾**：桩已停、后端恢复 `dry_run`（四出口 blocked）、隔离库未受影响。
