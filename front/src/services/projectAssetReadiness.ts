@@ -31,6 +31,20 @@ export type ProjectAssetReadinessItem = {
   thumbnail: string
   /** 当前首选图的行 ID —— 「设为定版」的默认目标 */
   image_id: number | null
+  /**
+   * 定版图的公网长期地址（新）。空串 = 定版图只在本机 —— 既不是长期资产，
+   * 也不能用于后续生成（出视频等下游环节取不到它）。
+   */
+  primary_long_term_url?: string
+  /**
+   * 定版图能否用于后续生成（新）：只有公网 http(s):// 或 asset:// 才是 true；未定版时为 false。
+   *
+   * 为什么要有：只有「已定版」这一个标签会误导——真实演练里那张定版图只在本机，
+   * 下游出视频根本取不到。
+   */
+  primary_usable_for_generation?: boolean
+  /** 定版图不可用于生成时的中文原因与修法（新）；可用时为空串 */
+  primary_reachability_note?: string
 }
 
 export type ProjectAssetReadinessSummary = {

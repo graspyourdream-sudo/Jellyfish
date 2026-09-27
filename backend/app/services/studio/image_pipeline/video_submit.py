@@ -561,6 +561,81 @@ async def submit_video(
             guard_status=dry_run.short_status(),
         )
 
+    # ------------------------------------------------------------------
+    # 幂等（**在花任何钱之前**）：同一镜头 + 同一参数 + 同一 attempt ＝ 同一轮。
+    # 命中已存在的任务就直接复用，不调供应商、不产生新费用。
+    # 放在出口守卫**之前**是有意的：命中缓存不产生出网请求，也就没有新的花费需要守；
+    # 真正要发请求的那条路（下面）依然必须通过 assert_outbound_allowed。
+    # ------------------------------------------------------------------
+    from app.services.studio.image_pipeline import video_idempotency as video_idem
+
+    attempt = int(getattr(body, "attempt", 0) or 0)
+    idem_key = video_idem.build_video_idempotency_key(
+        shot_id=body.shot_id,
+        prompt=str(body.prompt or ""),
+        reference_mode=str(body.reference_mode or ""),
+        images=list(body.images),
+        ratio=str(body.ratio or ""),
+        duration_seconds=body.duration_seconds,
+        generate_audio=body.generate_audio,
+        attempt=attempt,
+    )
+    async with video_idem.key_lock(idem_key):
+        existing = await video_idem.find_task_by_key(db, key=idem_key)
+        if existing is not None:
+            restored = video_idem.read_from_task(existing)
+            return VideoSubmitRead(
+                shot_id=body.shot_id,
+                provider=restored["provider"] or plan.provider,
+                status=restored["status"],
+                provider_task_id=restored["provider_task_id"],
+                url=restored["url"],
+                elapsed_ms=restored["elapsed_ms"],
+                error=restored["error"],
+                attempt=attempt,
+                deduplicated=True,
+                source_task_id=idem_key,
+                task_id=restored["task_id"],
+                warnings=[
+                    *warnings,
+                    "本轮（同一镜头＋同一参数＋同一 attempt）已经提交过，直接复用既有任务，"
+                    "没有再次调用供应商、没有再次计费。要真的再生成一次请点「重新生成」（attempt +1）。",
+                ],
+                guard_status=dry_run.short_status(),
+                note=(
+                    "复用路径：结果来自已经落库的任务行，刷新页面同样能恢复。"
+                    "视频地址为供应商临时地址，长期资产需落 OSS。"
+                ),
+            )
+
+        return await _submit_video_once(
+            db,
+            body=body,
+            plan=plan,
+            warnings=warnings,
+            timeout_seconds=timeout_seconds,
+            task_factory=task_factory,
+            run_args_builder=run_args_builder,
+            preflight=preflight,
+            idem_key=idem_key,
+            attempt=attempt,
+        )
+
+
+async def _submit_video_once(
+    db: AsyncSession,
+    *,
+    body: VideoSubmitPlanRequest,
+    plan: Any,
+    warnings: list[str],
+    timeout_seconds: float,
+    task_factory: Callable[[Any, Any], Any] | None,
+    run_args_builder: Callable[..., Any] | None,
+    preflight: Callable[..., Any] | None,
+    idem_key: str,
+    attempt: int,
+) -> VideoSubmitRead:
+    """**真正会花钱的那一次**提交（调用方已确保同一幂等键下没有别的请求在跑）。"""
     # 真实提交：这里才会产生费用，必须已被显式确认。
     dry_run.assert_outbound_allowed(f"直提出视频 shot_id={body.shot_id}", outlet=dry_run.OUTLET_VIDEO)
 
@@ -641,6 +716,21 @@ async def submit_video(
     if factory is None:
         from app.core.tasks.video_generation_tasks import VideoGenerationTask as factory  # type: ignore[assignment]
 
+    # 走到这里说明：守卫已放行、能力校验与媒体预检都过了 —— 这是**最后一次**不花钱的机会。
+    # 先落一条 running 任务行（幂等键在里面），再发请求：这样"发出去了但没等到回复"
+    # 这种最危险的情形也能被同一轮的下一次提交识别出来，而不是再花一次钱。
+    from app.services.studio.image_pipeline import video_idempotency as video_idem
+
+    submission = await video_idem.open_submission(
+        db,
+        key=idem_key,
+        shot_id=body.shot_id,
+        attempt=attempt,
+        provider=str(run_args.get("provider") or plan.provider or ""),
+        base_url=str(run_args.get("base_url") or ""),
+        input_payload=input_payload,
+    )
+
     provider_config = ProviderConfig(
         provider=run_args["provider"],
         api_key=run_args["api_key"],
@@ -654,12 +744,25 @@ async def submit_video(
         await asyncio.wait_for(task.run(), timeout=max(1.0, float(timeout_seconds)))
     except asyncio.TimeoutError:
         elapsed = int((time.monotonic() - started) * 1000)
+        await video_idem.finalize_submission(
+            db,
+            submission,
+            status="timeout",
+            provider_task_id=str(getattr(task, "_provider_task_id", "") or ""),
+            error=f"等待超过 {timeout_seconds}s 仍未完成；provider 侧任务可能仍在进行。",
+            elapsed_ms=elapsed,
+            warnings=warnings,
+        )
         return VideoSubmitRead(
             shot_id=body.shot_id,
             provider=plan.provider,
             status="timeout",
+            provider_task_id=str(getattr(task, "_provider_task_id", "") or ""),
             error=f"等待超过 {timeout_seconds}s 仍未完成；provider 侧任务可能仍在进行。",
             elapsed_ms=elapsed,
+            attempt=attempt,
+            source_task_id=idem_key,
+            task_id=str(submission.id or ""),
             warnings=warnings,
             guard_status=dry_run.short_status(),
         )
@@ -673,23 +776,53 @@ async def submit_video(
             error = str(status_info.get("error") or "")
         except Exception:  # noqa: BLE001 - 取错误信息失败不能盖住主流程
             error = ""
+        error = error or "视频生成任务未返回结果。"
+        await video_idem.finalize_submission(
+            db,
+            submission,
+            status="failed",
+            provider_task_id=str(getattr(task, "_provider_task_id", "") or ""),
+            error=error,
+            elapsed_ms=elapsed,
+            warnings=warnings,
+        )
         return VideoSubmitRead(
             shot_id=body.shot_id,
             provider=plan.provider,
             status="failed",
-            error=error or "视频生成任务未返回结果。",
+            provider_task_id=str(getattr(task, "_provider_task_id", "") or ""),
+            error=error,
             elapsed_ms=elapsed,
+            attempt=attempt,
+            source_task_id=idem_key,
+            task_id=str(submission.id or ""),
             warnings=warnings,
             guard_status=dry_run.short_status(),
         )
 
+    final_status = str(getattr(result, "status", "") or "succeeded")
+    provider_task_id = str(getattr(result, "provider_task_id", "") or "")
+    url = str(getattr(result, "url", "") or "")
+    await video_idem.finalize_submission(
+        db,
+        submission,
+        status=final_status,
+        provider_task_id=provider_task_id,
+        url=url,
+        elapsed_ms=elapsed,
+        warnings=warnings,
+    )
+
     return VideoSubmitRead(
         shot_id=body.shot_id,
         provider=str(getattr(result, "provider", "") or plan.provider),
-        status=str(getattr(result, "status", "") or "succeeded"),
-        provider_task_id=str(getattr(result, "provider_task_id", "") or ""),
-        url=str(getattr(result, "url", "") or ""),
+        status=final_status,
+        provider_task_id=provider_task_id,
+        url=url,
         elapsed_ms=elapsed,
+        attempt=attempt,
+        source_task_id=idem_key,
+        task_id=str(submission.id or ""),
         warnings=warnings,
         guard_status=dry_run.short_status(),
     )

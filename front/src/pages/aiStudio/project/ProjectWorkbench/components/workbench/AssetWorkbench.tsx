@@ -622,6 +622,10 @@ function toSignalAssets(data: AssetWorkbenchResponse | null): ProjectSignalAsset
       hasImage: item.image?.has_image === true,
       thumbnail: item.image?.thumbnail ?? '',
       hasPrimary: item.image?.has_primary === true,
+      // 定版图能不能用于后续生成：后端已在契约里给出结论，这里只搬运（不许自己猜）
+      primaryUsableForGeneration: (item.image as Record<string, unknown> | undefined)?.primary_usable_for_generation === true,
+      primaryReachabilityNote:
+        String((item.image as Record<string, unknown> | undefined)?.primary_reachability_note ?? '') || '',
       imageId: typeof item.image?.image_id === 'number' ? item.image.image_id : null,
       hasImagePrompt: Boolean(String(item.prompt?.text ?? '').trim()),
       hasPendingCandidate: false,

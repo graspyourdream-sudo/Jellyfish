@@ -612,6 +612,10 @@ def test_image_and_task_states_drive_the_workbench_status() -> None:
         "image_id": by_name["丙有图"]["image"]["image_id"],
         "thumbnail": by_name["丙有图"]["image"]["thumbnail"],
         "image_count": 1,
+        # 定版图可达性（新增）：这张没有定版 → 一律空值/false，不谈"能不能用于生成"
+        "primary_long_term_url": "",
+        "primary_usable_for_generation": False,
+        "primary_reachability_note": "",
     }
     assert by_name["丙有图"]["image"]["image_id"] is not None
     assert by_name["丁定版"]["image"]["has_primary"] is True

@@ -20,6 +20,9 @@ import {
 } from '@ant-design/icons'
 import {
   ASSET_TYPE_LABEL,
+  canAdoptResult,
+  canSetPrimaryResult,
+  describeStorageReachability,
   describeTaskStatus,
   isPlaceholderUrl,
   type ProductionAsset,
@@ -66,6 +69,8 @@ export function AssetResultCard(props: AssetResultCardProps) {
   const { task, asset, busy } = props
   const [imageBroken, setImageBroken] = useState(false)
   const status = describeTaskStatus(task.status)
+  /** 这结果能不能当**长期资产**用、能不能进后续生成（没有公网长期地址就是"仅本机"） */
+  const storageReachability = describeStorageReachability(task)
   /** 按类型取的结果文案：人物 = 参考图；场景/道具/服装 = 各自的图名（不让场景出现「参考图」） */
   const copy = resultArtifactCopy(task.assetType, {
     resultKind: task.resultKind,
@@ -95,11 +100,13 @@ export function AssetResultCard(props: AssetResultCardProps) {
       })
     : null
   const promptBlocked = promptQualityVerdict?.status === 'unusable'
-  const canAdopt = task.status === 'done' && !task.adoptedImageId
+  // 采纳条件走纯函数：部分成功（有图但存储没成功）同样必须能采纳 —— 那张图已经计费了
+  const canAdopt = canAdoptResult(task)
   // 「设为定版」在结果可用时就可以点：它内部会先把这张保存进资产、再设为定版；
   // 资产已有定版时会先弹二次确认（硬边界 B），不会静默替换。
   // 注意：提示词不可用**不拦**这一步 —— 那是"采纳已经生成的这张图"，不是再花钱出图。
-  const canSetPrimary = task.status === 'done' && !task.isPrimary
+  // 与采纳同一类口径：部分成功（有图但存储没成功）也必须能设成定版，否则用户把图救回来却卡在最后一步
+  const canSetPrimary = canSetPrimaryResult(task)
   // 但**再生成**（重新生成 / 重试 / 返工）会被拦住：提示词不可用时再出图只会再浪费一次计费调用
   const canRetry = task.status === 'failed' && !promptBlocked
   const canRefresh = task.status === 'generating' || task.status === 'submitting'
@@ -161,6 +168,19 @@ export function AssetResultCard(props: AssetResultCardProps) {
               <Tag color="blue" bordered={false} className="mr-0">
                 已保存进资产
               </Tag>
+            ) : null}
+            {/*
+              长期存储可达性：真实演练里出现过「图出来了、但长期存储 403 失败」——
+              那时页面把这张只在本机的图当普通结果展示，用户会以为它就是项目的长期资产、
+              后续出视频能直接拿它当参考帧（其实取不到）。
+              这里按后端回包如实标注：没有长期地址就是"仅本机、不能用于后续生成"。
+            */}
+            {storageReachability.localOnly && task.imageUrl ? (
+              <Tooltip title={storageReachability.note}>
+                <Tag color="orange" bordered={false} className="mr-0">
+                  仅本机 · 不能用于后续生成
+                </Tag>
+              </Tooltip>
             ) : null}
           </div>
 

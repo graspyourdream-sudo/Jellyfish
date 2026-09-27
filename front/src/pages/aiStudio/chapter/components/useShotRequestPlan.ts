@@ -7,7 +7,7 @@
  * 「生成视频」「导出绑定提示词」四块共用同一份 plan 状态，不再各拉一次、各判一次。
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { message } from 'antd'
 import { REFERENCE_MODE, labelFor, videoModelBusinessName as videoModelBusinessNameShared } from '../../components/enumLabels.ts'
 import { showUserWarning, toUserFacingText } from '../../components/userFacingMessage.ts'
@@ -87,6 +87,13 @@ export type UseShotRequestPlanResult = {
   generateBlockedReason: string
   generating: boolean
   doGenerate: () => Promise<void>
+  /**
+   * 明确「重新生成」：把轮次 +1（会真的再产生一次费用）。
+   *
+   * 与 doGenerate 的区别只在轮次：doGenerate 在同一轮里重复点只会复用既有任务、不重复计费，
+   * 所以"结果不满意"必须走这个入口，否则会表现为"点了没反应"。
+   */
+  doRegenerate: () => Promise<void>
   /** 计划里缺失的帧类型（供状态文案复用，不重复计算） */
   missingFrameTypes: string[]
   unusableFrameTypes: string[]
@@ -204,6 +211,20 @@ export function useShotRequestPlan(args: {
 
   const generateDisabled = Boolean(generateBlockedReason) || planLoading
 
+  /**
+   * 出视频的「第几轮」。
+   *
+   * 后端把「镜头 + 生成参数 + attempt」哈希成幂等键：同一轮重复点生成只会**复用**既有任务、
+   * 不重复计费；只有明确点「重新生成」把 attempt 加 1，才会真的再产生一次费用。
+   * 用 ref 而不是 state：doGenerate 是 useCallback 闭包，同一事件里读不到刚 set 的 state，
+   * 会出现"点了重新生成却还是命中了旧任务"。
+   */
+  const attemptRef = useRef(0)
+  useEffect(() => {
+    // 换镜头 = 换一轮，从第 0 轮重新开始计数（键里本来也带 shot_id，这里只是让提示语不误导）
+    attemptRef.current = 0
+  }, [shotId])
+
   const doGenerate = useCallback(async () => {
     if (generateBlockedReason) {
       message.error(generateBlockedReason)
@@ -221,9 +242,23 @@ export function useShotRequestPlan(args: {
         ratio: plan.ratio || '16:9',
         duration_seconds: plan.seconds ?? undefined,
         timeout_seconds: 900,
+        attempt: attemptRef.current,
       })
       if (result.status === 'dry_run') {
         message.info('演练模式：没有真实生成、没有产生费用，也不会写入任何数据。', 6)
+        return
+      }
+      if (result.deduplicated) {
+        // 命中同一轮的既有任务：**没有**再调用、没有产生新费用。产物在首次提交时
+        // 已经登记并挂到本镜，这里不能再登记一次（否则会多出一条素材记录）。
+        message.info(
+          '本轮已经提交过，直接复用既有任务，没有重复扣费。要真的再生成一次请点「重新生成」。',
+          8,
+        )
+        if (result.status === 'completed' && result.url) {
+          await reloadRow()
+          await onGenerated?.()
+        }
         return
       }
       if (result.status !== 'completed' || !result.url) {
@@ -247,6 +282,13 @@ export function useShotRequestPlan(args: {
     }
   }, [generateBlockedReason, onGenerated, plan, referenceMode, reloadRow, savedPrompt, shotId])
 
+  /** 明确「重新生成」：把轮次 +1，才会真的再产生一次费用。 */
+  const doRegenerate = useCallback(async () => {
+    attemptRef.current += 1
+    message.info(`已开始第 ${attemptRef.current + 1} 轮生成（重新生成会真的再产生一次费用）。`, 6)
+    await doGenerate()
+  }, [doGenerate])
+
   return {
     row,
     rowLoading,
@@ -263,6 +305,7 @@ export function useShotRequestPlan(args: {
     generateBlockedReason,
     generating,
     doGenerate,
+    doRegenerate,
     missingFrameTypes: plan?.missing_frame_types ?? [],
     unusableFrameTypes: plan?.unusable_frame_types ?? [],
   }

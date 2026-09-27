@@ -122,9 +122,28 @@ export function AssetCardGrid(props: AssetCardGridProps) {
                   <div className="text-[11px] text-gray-400">{WORKBENCH_TAB_LABEL[type]}</div>
                 </div>
               </div>
-              <Tag bordered={false} color={TONE_COLOR[WORKBENCH_STATUS_TONE[statusKey]]}>
-                {label}
-              </Tag>
+              <div className="flex flex-col items-end gap-1">
+                <Tag bordered={false} color={TONE_COLOR[WORKBENCH_STATUS_TONE[statusKey]]}>
+                  {label}
+                </Tag>
+                {/*
+                  只写「已定版」会误导：定版图是公网长期资产、还是只在本机，是另一件事。
+                  真实演练里那张定版图只存在本机 —— 后续出视频的下游根本取不到它。
+                  结论由后端（`asset-workbench` 契约）给，这里只如实展示，前端不猜。
+                */}
+                {statusKey === 'primary' && item.image?.primary_usable_for_generation !== true ? (
+                  <Tooltip
+                    title={
+                      String(item.image?.primary_reachability_note ?? '') ||
+                      '这张定版图不是公网长期地址，不能用于后续生成：出视频等下游环节取不到它。'
+                    }
+                  >
+                    <Tag color="orange" bordered={false} className="mr-0">
+                      仅本机 · 不能用于后续生成
+                    </Tag>
+                  </Tooltip>
+                ) : null}
+              </div>
             </div>
 
             <div

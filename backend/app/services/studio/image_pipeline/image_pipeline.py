@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import asyncio
 import hashlib
 import re
@@ -51,6 +53,9 @@ from app.services.studio.llm_orchestration.registry import (
     ImagePromptSlotSpec,
 )
 from app.schemas.studio.llm_orchestration import EntityProfileInput
+
+
+_logger = logging.getLogger(__name__)
 
 # 画幅 / 槽位 / 结果类型标签的**唯一**分流表见 ``asset_strategies``：
 # 「按资产类型分流提示词模板 + 画幅 + 结果类型」只有那一份实现，本模块不再自己写一套。
@@ -358,11 +363,17 @@ async def _load_asset_rows(
 
     if asset_type == "character":
         stmt = select(Character).where(Character.project_id == project_id).order_by(Character.id)
+    # 注意：这三条都 join 了「项目关联表」，而关联表里**允许出现重复行**
+    # （实测：本项目的场景有 1 条重复、道具 3 条重复）。没有 distinct 时，一个资产会被装成
+    # **两个一模一样的 target** → 两次 create → 结果区两条相同项。
+    # 真实上游会按幂等键去重、所以不会重复计费，但**换一个不去重的上游就是双倍计费**，
+    # 而且结果区一定会出现重复项。所以这里必须去重（按主键 distinct，语义就是"一个资产一次"）。
     elif asset_type == "scene":
         stmt = (
             select(Scene)
             .join(ProjectSceneLink, ProjectSceneLink.scene_id == Scene.id)
             .where(ProjectSceneLink.project_id == project_id)
+            .distinct()
             .order_by(Scene.id)
         )
     elif asset_type == "prop":
@@ -370,6 +381,7 @@ async def _load_asset_rows(
             select(Prop)
             .join(ProjectPropLink, ProjectPropLink.prop_id == Prop.id)
             .where(ProjectPropLink.project_id == project_id)
+            .distinct()
             .order_by(Prop.id)
         )
     elif asset_type == "costume":
@@ -377,6 +389,7 @@ async def _load_asset_rows(
             select(Costume)
             .join(ProjectCostumeLink, ProjectCostumeLink.costume_id == Costume.id)
             .where(ProjectCostumeLink.project_id == project_id)
+            .distinct()
             .order_by(Costume.id)
         )
     else:
@@ -771,8 +784,65 @@ async def submit_targets(
         detail = None
         if wait_seconds and wait_seconds > 0 and task.service_task_id:
             detail = await poll_task(task.service_task_id, wait_seconds=wait_seconds, transport=transport)
+        elif task.service_task_id and not _success_with_address(task):
+            # **不等待也要问一次真相**（只读、免费）：
+            #
+            # 真实演练（2026-09-27）暴露的缺口：批量出图路径的 `wait_seconds=0`，
+            # 于是 create 响应之后**从不拉一次任务详情** → `local_path` / `oss_url` /
+            # 上游真实原因全丢，结果只能按 create 响应的 status 判成"失败"。
+            # 而那一单其实是"图已经生成并已计费、只是上游存不下来"
+            # （上游任务里明摆着有 `local_path=/images/乌鸦_主图_01_03.png`）——
+            # 页面因此既不显示可恢复信息，也给不出"采纳"这张图的入口。
+            #
+            # 这里补一次**状态查询**（不是重新出图、不产生费用），把真相拿回来。
+            try:
+                detail = await client.get_asset_image_task(task.service_task_id, transport=transport)
+            except Exception as exc:  # noqa: BLE001 - 查不到详情不能盖住主流程，但要在 warnings 里说
+                _logger.warning("拉取出图任务详情失败（service_task_id=%s）：%s", task.service_task_id, exc)
+                detail = None
         results.append(_result_from_submission(target, task=task, detail=detail))
     return results
+
+
+def _success_with_address(task: client.ServiceTaskResult) -> bool:
+    """create 响应是否**既明确成功、又已经带着产物地址**——只有这种才不必再查详情。
+
+    第 33 轮实测补上的缺口：改前只判"明确成功"，于是**成功但 create 回包没带地址**的那种
+    （真实上游/桩都会这样：create 只回服务任务号与状态）就不再查详情 →
+    `oss_url` / `image_url` 全丢 → 结果卡片**没有可用图片地址**，页面因此连「采纳」都给不出来，
+    一张真的出好了的图等于白丢。所以：明确成功 **且** 回包里已经有地址，才跳过查询；
+    其余一律补一次只读的状态查询（不重新出图、不产生费用）。
+    """
+    if not _looks_like_success(task):
+        return False
+    return _has_artifact_address(task)
+
+
+def _has_artifact_address(task: client.ServiceTaskResult) -> bool:
+    """create 回包里是否已经带产物地址（``oss_url`` / ``images[].local_path``）。"""
+    raw = getattr(task, "raw", None)
+    if isinstance(raw, dict):
+        if str(raw.get("oss_url") or "").strip():
+            return True
+        images = raw.get("images")
+        if isinstance(images, list):
+            for item in images:
+                if isinstance(item, dict) and (
+                    str(item.get("oss_url") or "").strip() or str(item.get("local_path") or "").strip()
+                ):
+                    return True
+    return False
+
+
+def _looks_like_success(task: client.ServiceTaskResult) -> bool:
+    """create 响应是否已经**明确**是成功。
+
+    只有认得出来的成功 token 才算"明确成功"；认不出来（空串或陌生词）一律当作
+    "需要查一次详情"——上游 create 响应的 ``ok`` 默认是 True，不足以单独作为成功证据
+    （真实演练里 create 返回 ok=true、status=failed，图其实已经生成）。
+    """
+    status = str(getattr(task, "status", "") or "").strip().lower()
+    return status in {"done", "succeeded", "success", "completed"}
 
 
 def _result_from_submission(
@@ -805,6 +875,8 @@ def _result_from_submission(
         oss_url=oss_url,
         dry_run=False,
         error_message=upstream_error or str(task.message or ""),
+        # 本机上还留着图 → 即使上游报 failed，也属于"部分成功、图可以救"
+        recoverable_artifact=bool(local_path),
     )
     # 失败时优先说真话：上游的 error_message 排在笼统的创建响应 message 之前
     message = upstream_error or (
@@ -837,6 +909,45 @@ def _result_from_submission(
             "http_status": _http_status_from_text(upstream_error) if upstream_error else None,
             "oss_url": oss_url,
             "local_path": local_path,
+            "recoverable": bool(local_path) and outcome == OUTCOME_PARTIAL_FAILED,
+            "recoverable_hint": (
+                "图已经生成出来了（还在出图服务本机），只是长期存储没成功："
+                "可以直接采纳它，或修好存储后回填。"
+                if local_path and outcome == OUTCOME_PARTIAL_FAILED
+                else ""
+            ),
+            # —— 存储失败但**拿不到**可恢复产物时，也要如实说清"钱可能已经花了" ——
+            #
+            # 真实演练（2026-09-27 第二次授权出图，对象「乌鸦」）：上游又一次 403
+            # （bucket acl），但这一单的详情里**没有**返回本机图路径 —— 于是这条结果既不是
+            # 「部分成功」（没证据说图还能救），也不该只写一句「生成失败」（那会让人以为没花钱、
+            # 也没图）。字段口径：storage_failure 说明失败落在存储环节；artifact_state 说明
+            # 我们**能不能确认**产物还在（recoverable / unknown），不猜。
+            "storage_failure": bool(
+                outcome in {OUTCOME_FAILED, OUTCOME_PARTIAL_FAILED}
+                and _looks_like_oss_failure(upstream_error)
+            ),
+            "artifact_state": (
+                "recoverable"
+                if (local_path and outcome == OUTCOME_PARTIAL_FAILED)
+                else "unknown"
+                if (
+                    outcome in {OUTCOME_FAILED, OUTCOME_PARTIAL_FAILED}
+                    and _looks_like_oss_failure(upstream_error)
+                )
+                else ""
+            ),
+            "artifact_note": (
+                "这一单的失败发生在**长期存储**环节（上游存储返回了拒绝）："
+                "图很可能已经生成并**已经计费**，但本次回包没有给出本机图路径，"
+                "所以**无法确认**它还能不能取回。重试之前请先让管理员确认上游那一单能否取回。"
+                if (
+                    not local_path
+                    and outcome in {OUTCOME_FAILED, OUTCOME_PARTIAL_FAILED}
+                    and _looks_like_oss_failure(upstream_error)
+                )
+                else ""
+            ),
             "images": images,
             "status": status,
             "source_message": str(task.message or ""),
@@ -1065,8 +1176,17 @@ def normalize_outcome(
     oss_url: str = "",
     dry_run: bool = False,
     error_message: str = "",
+    recoverable_artifact: bool = False,
 ) -> str:
-    """把「上游状态 + ok 布尔 + 是否拿到长期地址」归一成一个明确的 outcome。"""
+    """把「上游状态 + ok 布尔 + 是否拿到长期地址」归一成一个明确的 outcome。
+
+    ``recoverable_artifact``（新）：本次是否**还留着能用的产物**（例如出图服务本机上那张图）。
+    为什么需要它：真实演练里出图服务把「图已经出来了、但它自己 OSS 上传 403」这件事报成
+    ``status=failed``，只从状态看就是"全失败"——可图明明在、而且**已经计费**了。
+    把它降级成 ``failed`` 会让页面只剩一句失败、用户以为白花了钱、也就不会去"采纳"那张图。
+    因此：状态是失败、但错误文本是存储相关、且**确实有可恢复产物**时，结论必须是
+    ``partial_failed``（部分成功）——既如实说明存储没成，又明确告诉用户图还在、可以救。
+    """
     if dry_run:
         outcome = OUTCOME_DRY_RUN
     else:
@@ -1079,6 +1199,13 @@ def normalize_outcome(
             outcome = OUTCOME_FAILED
         if outcome == OUTCOME_OK and not str(oss_url or "").strip() and _looks_like_oss_failure(error_message):
             # 状态说成功、却没有任何长期地址，而且错误文本是 OSS 相关 → 属于部分失败
+            outcome = OUTCOME_PARTIAL_FAILED
+        if (
+            outcome == OUTCOME_FAILED
+            and recoverable_artifact
+            and _looks_like_oss_failure(error_message)
+        ):
+            # 状态说失败，但产物还在且失败原因是存储 → 部分成功（别把已经花了钱的图报成全灭）
             outcome = OUTCOME_PARTIAL_FAILED
     return outcome
 

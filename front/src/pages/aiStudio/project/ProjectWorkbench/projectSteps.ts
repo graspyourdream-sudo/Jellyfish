@@ -232,10 +232,21 @@ export type ProjectStepResolution = {
   missing: string[]
 }
 
-const NEXT_ACTION_LABEL: Record<ProjectStepKey, string> = {
+/**
+ * 每一步「继续」按钮的**动作名**（导出仅为让护栏测试能逐条检查）。
+ *
+ * 前缀「继续：」**不在本表里**，由 :func:`buildContinueLabel` 统一加。
+ */
+export const PROJECT_STEP_ACTION_LABELS: Record<ProjectStepKey, string> = {
   script: '剧本与分镜',
   extract_assets: '开始资产准备',
-  image_prep: '继续资产准备',
+  /**
+   * 这里是**动作名**：两个消费点（`index.tsx` 的主按钮、`ProjectStepSummaryStrip.tsx`）
+   * 都会自己加「继续：」前缀，所以本表的值里**不许**再自带「继续」——
+   * 否则主按钮渲染成「继续：继续资产准备」（真实浏览器走查发现）。
+   * 有测试逐条钉住"前缀拼起来不出现重复的继续"。
+   */
+  image_prep: '资产准备',
   video_prompt: '编写视频提示词',
   binding: '关联绑定资产',
   generate_deliver: '进入生成与交付',
@@ -255,7 +266,7 @@ function buildResolution(step: ProjectStepKey, reason: string, missing: string[]
     step,
     label: getProjectStepMeta(step).label,
     reason,
-    nextActionLabel: NEXT_ACTION_LABEL[step],
+    nextActionLabel: PROJECT_STEP_ACTION_LABELS[step],
     missing,
   }
 }
@@ -398,4 +409,16 @@ export function resolveProjectStep(input?: ProjectStepInput | null): ProjectStep
     missing.push(`还有 ${totalAssets - assetImageCount} 个资产没有参考图片`)
   }
   return buildResolution('generate_deliver', '主流程前置条件已就绪，可以进入视频生成与交付', missing)
+}
+
+/**
+ * 「继续」主按钮的完整文案（**前缀只在本函数里加**）。
+ *
+ * 为什么必须收敛成一处：主按钮有两个渲染点（`index.tsx`、`ProjectStepSummaryStrip.tsx`），
+ * 各自拼前缀时只要动作名里自带「继续」，就会渲染出「继续：继续资产准备」这种叠加文案
+ * （真实浏览器走查发现，见 projectSteps.test.ts 的护栏）。
+ */
+export function buildContinueLabel(nextActionLabel: string): string {
+  const action = String(nextActionLabel || '').trim()
+  return action ? `继续：${action}` : '继续'
 }

@@ -185,6 +185,10 @@ async def list_entity_images_paginated(
     )
     items, total = await paginate(db, stmt=stmt, page=page, page_size=page_size)
     payload = [spec.image_read_model.model_validate(x).model_dump() for x in items]
+    # 补可达性：这张图是公网长期资产、还是只在本机（不可用于后续生成）——见 image_reachability
+    from app.services.studio.image_reachability import annotate_image_rows
+
+    await annotate_image_rows(db, payload)
     return payload, total
 
 

@@ -37,6 +37,10 @@ export type ProjectSignalAsset = {
   thumbnail: string
   /** 是否已设为定版（`*_images.is_primary`，且该行确实有图片文件） */
   hasPrimary: boolean
+  /** 定版图能否用于后续生成（后端 `asset-readiness` 的结论）；未定版时后端给 false。 */
+  primaryUsableForGeneration?: boolean
+  /** 定版图不可用于生成时的中文原因与修法。 */
+  primaryReachabilityNote?: string
   /** 当前首选图的行 ID（用于「设为定版」这个唯一主操作）；null = 没有图片 */
   imageId: number | null
   /** 已保存图片提示词（实体 `image_prompts` 里有非空槽位） */
@@ -241,6 +245,8 @@ export function useProjectStepSignals(args: {
           hasImage: item.has_image === true,
           thumbnail: item.thumbnail ?? '',
           hasPrimary: item.has_primary === true,
+          primaryUsableForGeneration: item.primary_usable_for_generation === true,
+          primaryReachabilityNote: item.primary_reachability_note || '',
           imageId: typeof item.image_id === 'number' ? item.image_id : null,
           hasImagePrompt: item.has_image_prompt === true,
           hasPendingCandidate: item.has_pending_candidate === true,

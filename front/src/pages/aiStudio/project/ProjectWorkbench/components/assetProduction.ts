@@ -188,6 +188,15 @@ export type ProductionAsset = {
   hasImage: boolean
   /** 已设为定版 */
   hasPrimary: boolean
+  /**
+   * 定版图能不能用于**后续生成**（来自 `asset-readiness` 的后端结论）。
+   *
+   * 为什么要有：只有「已定版」这一个标签会误导——定版图是公网长期资产、还是只在本机，
+   * 是另一件事（真实演练里那张定版图只在本机，出视频下游根本取不到）。
+   */
+  primaryUsableForGeneration: boolean
+  /** 定版图不可用时的中文原因与修法（可用时为空串）。 */
+  primaryReachabilityNote: string
   /** 已保存图片提示词 */
   hasImagePrompt: boolean
   /** 当前首选图的行 ID（「设为定版」的默认目标）；null = 还没有图片 */
@@ -214,6 +223,8 @@ export function toProductionAssets(
     imageId: number | null
     thumbnail: string
     hasPendingCandidate: boolean
+    primaryUsableForGeneration?: boolean
+    primaryReachabilityNote?: string
   }[],
 ): ProductionAsset[] {
   return assets.map((asset) => ({
@@ -223,6 +234,10 @@ export function toProductionAssets(
     name: asset.name || asset.id,
     hasImage: asset.hasImage === true,
     hasPrimary: asset.hasPrimary === true,
+    // 兜底为 false（"没验过就不许说可用"）：后端没给结论时，页面宁可标"不能用于生成"，
+    // 也不能默认说它可用。
+    primaryUsableForGeneration: asset.primaryUsableForGeneration === true,
+    primaryReachabilityNote: asset.primaryReachabilityNote || '',
     hasImagePrompt: asset.hasImagePrompt === true,
     imageId: typeof asset.imageId === 'number' ? asset.imageId : null,
     thumbnail: asset.thumbnail || '',
@@ -1138,6 +1153,24 @@ export function isPubliclyReachableUrl(url: string): boolean {
   return !PRIVATE_HOST_PATTERNS.some((pattern) => pattern.test(host))
 }
 
+/** 失败原文看起来像"长期存储被拒"吗（上游 OSS 403 / AccessDenied / 上传失败）。 */
+const STORAGE_FAILURE_MARKERS = ['oss', 'accessdenied', 'bucket', '上传失败', '存储', '403']
+export function looksLikeStorageFailure(text: string): boolean {
+  const lowered = String(text || '').toLowerCase()
+  return STORAGE_FAILURE_MARKERS.some((marker) => lowered.includes(marker))
+}
+
+/**
+ * 存储失败、但**拿不到**本机图时，必须把"钱可能已经花了"说清楚。
+ *
+ * 真实演练（2026-09-27 第二次授权出图，对象「乌鸦」）：上游又一次 403（bucket acl），
+ * 但这一单没有返回本机图路径 —— 结果既不能说"部分成功"（没证据说图还能救），
+ * 也不该只写一句"生成失败"（那会让人以为没花钱、也没图）。
+ */
+export const STORAGE_FAILURE_UNKNOWN_NOTE =
+  '注意：这次失败发生在长期存储环节，图很可能已经生成并**已经计费**，' +
+  '但没有拿到可用的图地址，无法确认还能不能取回；重试之前请先确认上游那一单。'
+
 /** 失败原因：优先上游真话，其次按归一化口径给出可执行的说明；一律屏蔽内部标识。 */
 export function describeFailureReason(result: Pick<SubmitResultLike, 'error_message' | 'message' | 'outcome'>): string {
   const text = String(result.error_message || result.message || '').trim()
@@ -1147,6 +1180,135 @@ export function describeFailureReason(result: Pick<SubmitResultLike, 'error_mess
     return '图片已经生成，但没有完成长期存储，因此暂时不可用；可以稍后刷新这一项，或重新生成。'
   }
   return '生成失败，但没有拿到具体原因；可在结果卡片上点「查看详情」核对。'
+}
+
+/**
+ * 这条结果能不能「设为定版」。
+ *
+ * 与 :func:`canAdoptResult` 是**同一类**修复：卡片原本写死 `task.status === 'done'`，
+ * 于是"部分成功（图已生成、只是长期存储没成功）"这条结果**采纳进来之后也设不了定版**——
+ * 用户把图救回来了，却卡在最后一步，只能去别的页面绕。这是第 27 轮用受控桩上游实测到的。
+ *
+ * 口径：已定版的不再给；其余凡是有可用图片地址（含**部分成功**）就给，让用户能把救回来的图定下来。
+ */
+export function canSetPrimaryResult(task: {
+  status: ProductionTask['status']
+  outcome?: string
+  imageUrl?: string
+  ossUrl?: string
+  adoptedUrl?: string
+  isPrimary?: boolean
+}): boolean {
+  if (task.isPrimary === true) return false
+  if (!hasUsableResultAddress(task)) return false
+  if (task.status === 'done') return true
+  return String(task.outcome || '') === 'partial_failed'
+}
+
+/**
+ * 这条结果能不能「采纳」。
+ *
+ * 真实演练（2026-09-27）暴露的阻塞：卡片上的采纳条件原本写死 `status === 'done'`，
+ * 于是"图已经生成、只是长期存储没成功（部分成功）"这条**明明有图**的结果没有采纳入口——
+ * 而它恰恰是花了钱、最需要被救回来的那一种。
+ * 后端那条记录的 `recoverable_hint` 写的就是"可以直接采纳它"，页面却给不出按钮。
+ *
+ * 口径：
+ * - 已采纳过 → 不再给（避免重复登记产物）；
+ * - 有**可用**图片地址（非空、且不是演练占位）→ 可以采纳（含部分成功）；
+ * - 其它（纯失败、没有图）→ 不给。
+ */
+export function canAdoptResult(task: {
+  status: ProductionTask['status']
+  outcome?: string
+  imageUrl?: string
+  ossUrl?: string
+  adoptedUrl?: string
+  adoptedImageId?: number | null
+}): boolean {
+  if (task.adoptedImageId !== null && task.adoptedImageId !== undefined) return false
+  if (!hasUsableResultAddress(task)) return false
+  if (task.status === 'done') return true
+  return String(task.outcome || '') === 'partial_failed'
+}
+
+/**
+ * 这条结果有没有**可用**的图片地址。
+ *
+ * 第 35 轮实测踩到的坑：改前两个判定只看 `imageUrl`，可是**正常成功**的结果地址在 `ossUrl`
+ * （公网长期地址），`imageUrl` 是空的 —— 于是"出图成功"的卡片**既没有「采纳」也没有「设为定版」**，
+ * 页面只剩「查看详情」，等于把一张真出好的图锁死在结果区里。
+ * 三个阶段各有一个字段：临时（image_url）/ 长期（oss_url）/ 已采纳（adoptedUrl），
+ * 判定必须都认。
+ */
+function hasUsableResultAddress(task: {
+  imageUrl?: string
+  ossUrl?: string
+  adoptedUrl?: string
+}): boolean {
+  for (const raw of [task.ossUrl, task.imageUrl, task.adoptedUrl]) {
+    const value = String(raw || '').trim()
+    if (value && !isPlaceholderUrl(value)) return true
+  }
+  return false
+}
+
+/**
+ * 失败原因 + （存储失败时的）"可能已计费"提醒；卡片用这个，别只写一句失败。
+ *
+ * **必须看结果里到底有没有可取回的地址**：第 23 轮用受控桩上游复现时发现，
+ * 改前这条提醒是**无条件**追加的——于是即使后端明明回了一个可取回的本机图地址，
+ * 卡片也会写"没有拿到可用的图地址"，把"能救"说成"没拿到地址"，同样误导。
+ * 口径：有可用地址（非空、非演练占位）→ 只报失败原因；确实没有 → 才加那句提醒。
+ */
+export function describeFailureReasonWithStorageNote(
+  result: Pick<SubmitResultLike, 'error_message' | 'message' | 'outcome'> & {
+    image_url?: string
+    oss_url?: string
+    /** 查询回包里的本机图地址（与 image_url 同义，两个读模型各叫一个名） */
+    local_path?: string
+  },
+): string {
+  const base = describeFailureReason(result)
+  if (!looksLikeStorageFailure(base)) return base
+  const usable =
+    String(result.oss_url || '').trim() ||
+    String(result.image_url || '').trim() ||
+    String(result.local_path || '').trim()
+  if (usable && !isPlaceholderUrl(usable)) return base
+  return `${base} ${STORAGE_FAILURE_UNKNOWN_NOTE}`
+}
+
+/**
+ * 长期存储可达性：这张结果图能不能当**长期资产**、能不能进后续生成。
+ *
+ * 为什么需要（真实演练 2026-09-27）：出图服务把图生成出来了（已计费），但它自己上传 OSS 被拒
+ * （HTTP 403 AccessDenied / bucket acl）。页面当时把这张**只在本机**的图当普通结果展示，
+ * 用户会以为它就是项目的长期资产、后续出视频能直接拿它当参考帧——实际上下游根本取不到，
+ * 真发出去就是花钱买一次注定失败的调用。
+ *
+ * 判定只看后端回包，不猜：
+ *
+ * - 有 `ossUrl`（公网长期地址）→ 既是长期资产，也能进后续生成；
+ * - 没有 `ossUrl` 但有 `imageUrl`（本机/临时地址）→ **仅本机**，不可用于后续生成；
+ * - 都没有 → 不标（没有产物可谈）。
+ */
+export function describeStorageReachability(
+  task: Pick<ProductionTask, 'ossUrl' | 'imageUrl'>,
+): { localOnly: boolean; note: string } {
+  const ossUrl = String(task.ossUrl || '').trim()
+  const imageUrl = String(task.imageUrl || '').trim()
+  if (ossUrl) return { localOnly: false, note: '' }
+  if (!imageUrl) return { localOnly: false, note: '' }
+  // 演练占位地址不是"只在本机的图"，它压根不是图：不能给它贴「仅本机 · 不能用于后续生成」——
+  // 那会把"演练没出图"说成"出图了但存不下来"，比不标更误导。
+  if (isPlaceholderUrl(imageUrl)) return { localOnly: false, note: '' }
+  return {
+    localOnly: true,
+    note:
+      '这张图只存在本机（不是公网长期地址），不能用于后续生成：出视频等下游环节取不到它。' +
+      '可以先采纳它把图留在项目里，修好长期存储后再回填公网地址。',
+  }
 }
 
 /**
@@ -1187,7 +1349,7 @@ export function resolveResultStatus(
     }
   }
   if (outcome === 'failed' || outcome === 'partial_failed') {
-    return { ...base, status: 'failed', reason: describeFailureReason(result) }
+    return { ...base, status: 'failed', reason: describeFailureReasonWithStorageNote(result) }
   }
   if (outcome === 'running' || outcome === 'unknown' || (!outcome && result.ok !== false && serviceTaskId)) {
     if (serviceTaskId) {
@@ -1212,7 +1374,7 @@ export function resolveResultStatus(
   if (serviceTaskId) {
     return { ...base, status: 'generating', reason: '已提交给出图服务，正在生成；可以点「刷新进度」查看结果。' }
   }
-  return { ...base, status: 'failed', reason: describeFailureReason(result) }
+  return { ...base, status: 'failed', reason: describeFailureReasonWithStorageNote(result) }
 }
 
 /* -------------------------------------------------------- 提交结果去重/挑选 */
@@ -1285,7 +1447,14 @@ export function pickResultForAsset<T extends SubmitResultRow>(
       status: 'failed',
       ossUrl,
       imageUrl: localPath,
-      errorMessage: describeFailureReason({ error_message: query.error_message, outcome: rawStatus }),
+      // 地址必须一起传：否则"有可取回的图"也会被写成"没拿到地址"（第 24 轮桩上游复现到的误报，
+      // 这条查询路径当时正是漏传的那一处）
+      errorMessage: describeFailureReasonWithStorageNote({
+        error_message: query.error_message,
+        outcome: rawStatus,
+        local_path: localPath,
+        image_url: localPath,
+      }),
       outcome: rawStatus,
     }
   }
@@ -1531,6 +1700,8 @@ export function collectUserFacingTexts(): string[] {
       name: '甲',
       hasImage: false,
       hasPrimary: false,
+      primaryUsableForGeneration: false,
+      primaryReachabilityNote: '',
       hasImagePrompt: false,
       imageId: null,
       thumbnail: '',
@@ -1543,6 +1714,8 @@ export function collectUserFacingTexts(): string[] {
       name: '乙',
       hasImage: true,
       hasPrimary: true,
+      primaryUsableForGeneration: false,
+      primaryReachabilityNote: '',
       hasImagePrompt: true,
       imageId: 7,
       thumbnail: '/x.png',
@@ -1555,6 +1728,8 @@ export function collectUserFacingTexts(): string[] {
       name: '丙',
       hasImage: true,
       hasPrimary: false,
+      primaryUsableForGeneration: false,
+      primaryReachabilityNote: '',
       hasImagePrompt: true,
       imageId: 9,
       thumbnail: '/y.png',

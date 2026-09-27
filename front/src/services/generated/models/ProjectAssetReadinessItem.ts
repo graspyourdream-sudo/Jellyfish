@@ -42,5 +42,17 @@ export type ProjectAssetReadinessItem = {
      * 当前首选图的行 ID（「设为定版」的默认目标）
      */
     image_id?: (number | null);
-};
 
+    /**
+     * 定版图的公网长期地址；空串 = 只在本机（既不是长期资产，也不能用于后续生成）
+     */
+    primary_long_term_url?: string;
+    /**
+     * 定版图能否用于后续生成：只有公网 http(s):// 或 asset:// 才是 true；未定版时为 false
+     */
+    primary_usable_for_generation?: boolean;
+    /**
+     * 定版图不可用于生成时的中文原因与修法；可用时为空串
+     */
+    primary_reachability_note?: string;
+};

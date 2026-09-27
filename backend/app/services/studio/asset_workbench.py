@@ -240,7 +240,9 @@ async def _load_image_stats(
         .scalars()
         .all()
     )
-    stats: dict[str, dict[str, Any]] = defaultdict(lambda: {"count": 0, "has_primary": False})
+    stats: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"count": 0, "has_primary": False, "primary_file_id": ""}
+    )
     for row in rows:
         if not str(row.file_id or "").strip():
             continue
@@ -248,16 +250,39 @@ async def _load_image_stats(
         stats[key]["count"] += 1
         if bool(row.is_primary):
             stats[key]["has_primary"] = True
+            # 与页面「首选图」同口径：同一资产多行 is_primary 时取 id 最大的那行
+            # （查询是升序遍历，这里直接覆盖即可）
+            stats[key]["primary_file_id"] = str(row.file_id or "")
+
+    # 定版图那个文件到底是公网长期地址、还是只在本机（→ 不能用于后续生成）。
+    # 与 asset-readiness 共用同一处判定，避免两个读模型各说一套。
+    from app.services.studio.image_reachability import (
+        assess_storage_key,
+        storage_keys_by_file_id,
+    )
+
+    primary_keys = await storage_keys_by_file_id(
+        db, [str(stat.get("primary_file_id") or "") for stat in stats.values()]
+    )
+
     result: dict[str, dict[str, Any]] = {}
     for asset_id in sorted(set(asset_ids)):
-        stat = stats.get(asset_id) or {"count": 0, "has_primary": False}
+        stat = stats.get(asset_id) or {"count": 0, "has_primary": False, "primary_file_id": ""}
         info = infos.get(asset_id) or {}
+        has_primary = bool(stat["has_primary"])
+        reachability = assess_storage_key(primary_keys.get(str(stat.get("primary_file_id") or ""), ""))
         result[asset_id] = {
             "has_image": bool(stat["count"]),
-            "has_primary": bool(stat["has_primary"]),
+            "has_primary": has_primary,
             "image_id": info.get("image_id"),
             "thumbnail": str(info.get("thumbnail") or ""),
             "image_count": int(stat["count"]),
+            # 未定版时给空值/false：不谈"定版图能不能用于生成"，避免页面误标
+            "primary_long_term_url": reachability.long_term_url if has_primary else "",
+            "primary_usable_for_generation": (
+                reachability.usable_for_generation if has_primary else False
+            ),
+            "primary_reachability_note": reachability.note if has_primary else "",
         }
     return result
 

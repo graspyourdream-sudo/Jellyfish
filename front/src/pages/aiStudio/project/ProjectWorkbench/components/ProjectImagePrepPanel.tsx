@@ -263,7 +263,7 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
     {
       title: '业务状态',
       key: 'prepStatus',
-      width: 210,
+      width: 260,
       render: (_: unknown, record) => {
         const status = statusByAsset.get(assetKey(record)) ?? ASSET_PREP_STATUSES.pending_candidate
         const color =
@@ -273,6 +273,23 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
             <Tag color={color} bordered={false}>
               {status.label}
             </Tag>
+            {/*
+              只写「已定版」会误导：定版图到底是公网长期资产、还是只在本机，是另一件事。
+              真实演练里那张定版图只存在本机，后续出视频的下游根本取不到它——
+              所以这里按后端（`asset-readiness`）给的结论如实标出来，不靠前端猜。
+            */}
+            {record.hasPrimary && record.primaryUsableForGeneration !== true ? (
+              <Tooltip
+                title={
+                  record.primaryReachabilityNote ||
+                  '这张定版图不是公网长期地址，不能用于后续生成：出视频等下游环节取不到它。'
+                }
+              >
+                <Tag color="orange" bordered={false}>
+                  仅本机 · 不能用于后续生成
+                </Tag>
+              </Tooltip>
+            ) : null}
             <span className="text-[11px] text-gray-400">{`下一步：${status.nextActionLabel}`}</span>
           </Space>
         )

@@ -8,7 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { resolveProjectStep } from './projectSteps.ts'
+import { PROJECT_STEP_ACTION_LABELS, buildContinueLabel, resolveProjectStep } from './projectSteps.ts'
 
 function baseInput(assetCount: number, primaryCount: number | null) {
   return {
@@ -56,4 +56,35 @@ test('提示词起步的项目：不要求剧本/分镜，先落整集提示词'
     assetCounts: { characters: 0, scenes: 0, props: 0 },
   })
   assert.equal(resolution.step, 'video_prompt')
+})
+
+/* ----------------------------------------------- 「继续」按钮文案护栏（真实走查发现） */
+
+test('「继续」按钮文案不许出现叠加的「继续」（真实浏览器走查：曾渲染成「继续：继续资产准备」）', () => {
+  /*
+   背景：动作名表 PROJECT_STEP_ACTION_LABELS 与「继续：」前缀是两个来源，
+   主按钮又有两个渲染点（index.tsx / ProjectStepSummaryStrip.tsx）。
+   只要动作名自带「继续」，就会渲染成「继续：继续资产准备」——
+   这条护栏逐条拼一遍，保证任何时候都不会再叠加。
+  */
+  const keys = Object.keys(PROJECT_STEP_ACTION_LABELS) as (keyof typeof PROJECT_STEP_ACTION_LABELS)[]
+  assert.ok(keys.length >= 6, '动作名表应覆盖全部步骤')
+  for (const key of keys) {
+    const label = buildContinueLabel(PROJECT_STEP_ACTION_LABELS[key])
+    assert.equal(
+      label.split('继续').length - 1,
+      1,
+      `步骤 ${String(key)} 的按钮文案「${label}」里「继续」出现了多次`,
+    )
+    assert.ok(label.startsWith('继续：'), `步骤 ${String(key)} 的按钮应带「继续：」前缀`)
+    assert.ok(label.length > '继续：'.length, `步骤 ${String(key)} 的动作名不能是空的`)
+  }
+})
+
+test('buildContinueLabel：空动作名时只给「继续」，不产生「继续：」这种半截文案', () => {
+  assert.equal(buildContinueLabel(''), '继续')
+  assert.equal(buildContinueLabel('   '), '继续')
+  assert.equal(buildContinueLabel('资产准备'), '继续：资产准备')
+  // 前后空白被去掉（动作名来自表，不该带空白进 UI）
+  assert.equal(buildContinueLabel(' 资产准备 '), '继续：资产准备')
 })
