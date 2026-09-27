@@ -190,7 +190,14 @@ async def build_shot_context(
         asset_names = await _linked_asset_names(db, shot_id=shot_id)
         if asset_names:
             shot_info["assets"] = asset_names
-            for kind, label in (("character", "人物"), ("scene", "场景"), ("prop", "道具"), ("costume", "服装")):
+            for kind, label in (
+                ("character", "人物"),
+                ("scene", "场景"),
+                ("prop", "道具"),
+                ("costume", "服装"),
+                # 商品是第五类资产：镜头上下文里必须看得见它（见 `_linked_asset_names` 的说明）
+                ("product", "商品"),
+            ):
                 names = asset_names.get(kind) or []
                 if names:
                     lines.append(f"{label}资产：" + "、".join(names))
@@ -201,11 +208,20 @@ async def build_shot_context(
 
 
 async def _linked_asset_names(db: AsyncSession, *, shot_id: str) -> dict[str, list[str]]:
-    """取镜头已绑定的资产名（人物/场景/道具/服装）。只读。"""
+    """取镜头已绑定的资产名（人物/场景/道具/服装/**商品**）。只读。
+
+    商品（`product`）是第五类资产，必须在这里出现：镜头级商品关联
+    （``project_product_links.shot_id`` 非空的行）是「这一镜里出现了商品」的**唯一表达**
+    （见 `Product` / `ProjectProductLink` 的模型口径）。少了这个桶，
+    快捷能力拿到的镜头上下文会把商品**静默丢掉** —— 剧情广告这条链要求商品
+    出现在足够多的镜头里，漏掉它等于让模型在不知道有商品的前提下写提示词。
+    """
     from app.models.studio import (
         Character,
         Costume,
+        Product,
         ProjectCostumeLink,
+        ProjectProductLink,
         ProjectPropLink,
         ProjectSceneLink,
         Prop,
@@ -213,7 +229,15 @@ async def _linked_asset_names(db: AsyncSession, *, shot_id: str) -> dict[str, li
         ShotCharacterLink,
     )
 
-    out: dict[str, list[str]] = {"character": [], "scene": [], "prop": [], "costume": []}
+    out: dict[str, list[str]] = {
+        "character": [],
+        "scene": [],
+        "prop": [],
+        "costume": [],
+        # 桶必须先存在：即使这一镜没有商品，也要给出空列表，
+        # 让"商品这一路确实查过了"可被测试与调用方看见（不是漏查）。
+        "product": [],
+    }
 
     char_ids = (
         await db.execute(select(ShotCharacterLink.character_id).where(ShotCharacterLink.shot_id == shot_id))
@@ -226,6 +250,8 @@ async def _linked_asset_names(db: AsyncSession, *, shot_id: str) -> dict[str, li
         ("scene", ProjectSceneLink, "scene_id", Scene),
         ("prop", ProjectPropLink, "prop_id", Prop),
         ("costume", ProjectCostumeLink, "costume_id", Costume),
+        # 列名与 `entity_specs.LINK_MODEL_BY_ENTITY["product"]` 同口径。
+        ("product", ProjectProductLink, "product_id", Product),
     ):
         ids = (
             await db.execute(select(getattr(link_model, field)).where(link_model.shot_id == shot_id))
