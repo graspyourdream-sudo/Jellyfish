@@ -6677,6 +6677,17 @@ function Inspector(props: {
                         >
                           生成视频
                         </Button>
+                        <Tooltip title="同一轮重复点「生成视频」只会复用已完成的任务、不会重复计费；要真的再生成一次用这个（会再产生一次费用）">
+                          <Button
+                            size="small"
+                            danger
+                            loading={requestPlan.generating}
+                            disabled={requestPlan.generateDisabled}
+                            onClick={() => void requestPlan.doRegenerate()}
+                          >
+                            重新生成（下一轮）
+                          </Button>
+                        </Tooltip>
                         <Button size="small" onClick={() => void openVideoPromptPreview()}>
                           查看完整请求（可保存提示词）
                         </Button>
