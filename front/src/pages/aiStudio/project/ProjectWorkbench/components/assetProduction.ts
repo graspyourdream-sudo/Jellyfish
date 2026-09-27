@@ -1217,11 +1217,16 @@ export function describeFailureReasonWithStorageNote(
   result: Pick<SubmitResultLike, 'error_message' | 'message' | 'outcome'> & {
     image_url?: string
     oss_url?: string
+    /** 查询回包里的本机图地址（与 image_url 同义，两个读模型各叫一个名） */
+    local_path?: string
   },
 ): string {
   const base = describeFailureReason(result)
   if (!looksLikeStorageFailure(base)) return base
-  const usable = String(result.oss_url || '').trim() || String(result.image_url || '').trim()
+  const usable =
+    String(result.oss_url || '').trim() ||
+    String(result.image_url || '').trim() ||
+    String(result.local_path || '').trim()
   if (usable && !isPlaceholderUrl(usable)) return base
   return `${base} ${STORAGE_FAILURE_UNKNOWN_NOTE}`
 }
@@ -1394,7 +1399,14 @@ export function pickResultForAsset<T extends SubmitResultRow>(
       status: 'failed',
       ossUrl,
       imageUrl: localPath,
-      errorMessage: describeFailureReasonWithStorageNote({ error_message: query.error_message, outcome: rawStatus }),
+      // 地址必须一起传：否则"有可取回的图"也会被写成"没拿到地址"（第 24 轮桩上游复现到的误报，
+      // 这条查询路径当时正是漏传的那一处）
+      errorMessage: describeFailureReasonWithStorageNote({
+        error_message: query.error_message,
+        outcome: rawStatus,
+        local_path: localPath,
+        image_url: localPath,
+      }),
       outcome: rawStatus,
     }
   }

@@ -153,3 +153,12 @@ test('存储失败且确实没有地址 → 才加那句"可能已计费"的提�
   })
   assert.match(text, /没有拿到可用的图地址/)
 })
+
+test('查询回包路径：local_path 也要被认作"有可取回地址"（改前这条路径漏传，导致误报）', () => {
+  const withAddr = describeFailureReasonWithStorageNote({
+    error_message: '出图成功但 OSS 上传失败：HTTP 403 AccessDenied',
+    outcome: 'partial_failed',
+    local_path: '/images/乌鸦_主图_01_03.png',
+  })
+  assert.doesNotMatch(withAddr, /没有拿到可用的图地址/)
+})

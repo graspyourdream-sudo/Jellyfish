@@ -708,3 +708,22 @@ detail.recoverable = True ｜ detail.artifact_state = recoverable ｜ detail.loc
 它只搬了 `error_message` 与 `outcome`，`imageUrl` 另取自 `query.local_path`；
 需要核对该查询回包是否真的带 `local_path`（若不带，则要在后端那条查询路由上补），
 补上之后页面才会既显示「部分成功 + 可恢复」，又给出「采纳」入口。
+
+### 第 25 轮：把"查询路径"漏传地址这一处补齐；并把剩下那个谜题缩到**一个**具体字段
+
+按上一轮的目标逐层核对，结论如下（都是读代码/只读接口得出的，零成本）：
+
+1. **后端查询路由是好的**：`GET /studio/image-pipeline/task/{service_task_id}` 的响应**包含**
+   `local_path` / `oss_url` / `status` / `error_message` / `images`；
+2. **前端查询映射也是好的**：`resolveTaskQueryPatch` 会把 `local_path` 映成 `imageUrl`；
+3. **但那一处调用漏传了地址**（真 bug，已修）：它只传了 `error_message` 与 `outcome`，
+   于是第 24 轮修好的"有条件提醒"在这条路径上**永远看不到地址**、又会退化成误报。
+   现在把 `local_path` / `image_url` 一并传入，并让提醒把 `local_path` 也认作可取回地址。
+   新增 1 项测试（该文件 17 项通过）。
+
+**剩下那个谜题已缩到"一个字段"**：桩上游复现时，卡片里 `task.imageUrl` 是空的
+（证据：卡片上没有「仅本机」标签），但同一次提交的**后端回包确实带 `image_url`**。
+也就是说问题在「批量提交响应 → 结果卡片」这一步的**取值**上：
+候选是 `pickResultForAsset` / `dedupeResults` 挑行时选了另一行，或该路径根本没走
+`resolveResultStatus` 的 `image_url` 分支。下一轮用桩上游把**提交响应原文**与
+**卡片上的 task 对象**同时打出来对比，就能一次定死——依然是零成本。
