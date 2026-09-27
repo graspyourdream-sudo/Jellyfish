@@ -13,7 +13,20 @@
 
 import { callApi } from './llmPipelineApi'
 
-export type ProjectAssetReadinessType = 'character' | 'scene' | 'prop' | 'costume'
+/**
+ * 项目里的资产类型（本模块**手写**的那一份）。
+ *
+ * ⚠️ 这份联合类型必须与生成客户端 `generated/models/ProjectAssetReadinessItem.ts` 的
+ * `asset_type` **逐值相同**：商品（`product`）是第五类资产，后端
+ * `project_asset_readiness._build_specs()` 已经把 `Product` / `ProjectProductLink`
+ * 的规格放进同一份清单。少了 `'product'` 不会报任何错，只会表现为
+ * "页面读到的行数比后端少一行"。
+ *
+ * 这正是它此前漂移的形态（本模块停在四类、后端已五类）。
+ * `projectAssetReadiness.contract.test.ts` 用**类型级对拍**（编译期）
+ * + **生成客户端源码扫描**（运行期）两条一起钉住，两边再变一次都会立刻红。
+ */
+export type ProjectAssetReadinessType = 'character' | 'scene' | 'prop' | 'costume' | 'product'
 
 export type ProjectAssetReadinessItem = {
   asset_type: ProjectAssetReadinessType
