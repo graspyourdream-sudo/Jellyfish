@@ -20,6 +20,7 @@ import {
 } from '@ant-design/icons'
 import {
   ASSET_TYPE_LABEL,
+  describeStorageReachability,
   describeTaskStatus,
   isPlaceholderUrl,
   type ProductionAsset,
@@ -66,6 +67,8 @@ export function AssetResultCard(props: AssetResultCardProps) {
   const { task, asset, busy } = props
   const [imageBroken, setImageBroken] = useState(false)
   const status = describeTaskStatus(task.status)
+  /** 这结果能不能当**长期资产**用、能不能进后续生成（没有公网长期地址就是"仅本机"） */
+  const storageReachability = describeStorageReachability(task)
   /** 按类型取的结果文案：人物 = 参考图；场景/道具/服装 = 各自的图名（不让场景出现「参考图」） */
   const copy = resultArtifactCopy(task.assetType, {
     resultKind: task.resultKind,
@@ -161,6 +164,19 @@ export function AssetResultCard(props: AssetResultCardProps) {
               <Tag color="blue" bordered={false} className="mr-0">
                 已保存进资产
               </Tag>
+            ) : null}
+            {/*
+              长期存储可达性：真实演练里出现过「图出来了、但长期存储 403 失败」——
+              那时页面把这张只在本机的图当普通结果展示，用户会以为它就是项目的长期资产、
+              后续出视频能直接拿它当参考帧（其实取不到）。
+              这里按后端回包如实标注：没有长期地址就是"仅本机、不能用于后续生成"。
+            */}
+            {storageReachability.localOnly && task.imageUrl ? (
+              <Tooltip title={storageReachability.note}>
+                <Tag color="orange" bordered={false} className="mr-0">
+                  仅本机 · 不能用于后续生成
+                </Tag>
+              </Tooltip>
             ) : null}
           </div>
 

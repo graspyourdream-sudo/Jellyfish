@@ -1150,6 +1150,35 @@ export function describeFailureReason(result: Pick<SubmitResultLike, 'error_mess
 }
 
 /**
+ * 长期存储可达性：这张结果图能不能当**长期资产**、能不能进后续生成。
+ *
+ * 为什么需要（真实演练 2026-09-27）：出图服务把图生成出来了（已计费），但它自己上传 OSS 被拒
+ * （HTTP 403 AccessDenied / bucket acl）。页面当时把这张**只在本机**的图当普通结果展示，
+ * 用户会以为它就是项目的长期资产、后续出视频能直接拿它当参考帧——实际上下游根本取不到，
+ * 真发出去就是花钱买一次注定失败的调用。
+ *
+ * 判定只看后端回包，不猜：
+ *
+ * - 有 `ossUrl`（公网长期地址）→ 既是长期资产，也能进后续生成；
+ * - 没有 `ossUrl` 但有 `imageUrl`（本机/临时地址）→ **仅本机**，不可用于后续生成；
+ * - 都没有 → 不标（没有产物可谈）。
+ */
+export function describeStorageReachability(
+  task: Pick<ProductionTask, 'ossUrl' | 'imageUrl'>,
+): { localOnly: boolean; note: string } {
+  const ossUrl = String(task.ossUrl || '').trim()
+  const imageUrl = String(task.imageUrl || '').trim()
+  if (ossUrl) return { localOnly: false, note: '' }
+  if (!imageUrl) return { localOnly: false, note: '' }
+  return {
+    localOnly: true,
+    note:
+      '这张图只存在本机（不是公网长期地址），不能用于后续生成：出视频等下游环节取不到它。' +
+      '可以先采纳它把图留在项目里，修好长期存储后再回填公网地址。',
+  }
+}
+
+/**
  * 提交响应（单条结果）→ 任务状态。
  *
  * `assetType` 用来兜底结果类型标签：后端**已经**回了 `result_kind` / `result_label`（优先采用），
