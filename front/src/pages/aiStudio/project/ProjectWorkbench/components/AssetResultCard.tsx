@@ -21,6 +21,7 @@ import {
 import {
   ASSET_TYPE_LABEL,
   canAdoptResult,
+  canSetPrimaryResult,
   describeStorageReachability,
   describeTaskStatus,
   isPlaceholderUrl,
@@ -104,7 +105,8 @@ export function AssetResultCard(props: AssetResultCardProps) {
   // 「设为定版」在结果可用时就可以点：它内部会先把这张保存进资产、再设为定版；
   // 资产已有定版时会先弹二次确认（硬边界 B），不会静默替换。
   // 注意：提示词不可用**不拦**这一步 —— 那是"采纳已经生成的这张图"，不是再花钱出图。
-  const canSetPrimary = task.status === 'done' && !task.isPrimary
+  // 与采纳同一类口径：部分成功（有图但存储没成功）也必须能设成定版，否则用户把图救回来却卡在最后一步
+  const canSetPrimary = canSetPrimaryResult(task)
   // 但**再生成**（重新生成 / 重试 / 返工）会被拦住：提示词不可用时再出图只会再浪费一次计费调用
   const canRetry = task.status === 'failed' && !promptBlocked
   const canRefresh = task.status === 'generating' || task.status === 'submitting'

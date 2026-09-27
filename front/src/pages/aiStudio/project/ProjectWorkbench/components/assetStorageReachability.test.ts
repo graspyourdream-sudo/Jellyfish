@@ -14,6 +14,7 @@ import test from 'node:test'
 
 import {
   canAdoptResult,
+  canSetPrimaryResult,
   describeFailureReasonWithStorageNote,
   describeStorageReachability,
 } from './assetProduction.ts'
@@ -161,4 +162,23 @@ test('查询回包路径：local_path 也要被认作"有可取回地址"（改�
     local_path: '/images/乌鸦_主图_01_03.png',
   })
   assert.doesNotMatch(withAddr, /没有拿到可用的图地址/)
+})
+
+test('部分成功的图采纳后必须能设成定版（第27轮桩上游实测：改前设不了，卡在最后一步）', () => {
+  assert.equal(
+    canSetPrimaryResult({
+      status: 'failed',
+      outcome: 'partial_failed',
+      imageUrl: 'http://127.0.0.1:4317/images/stub-artifact.png',
+      isPrimary: false,
+      adoptedUrl: '',
+    }),
+    true,
+  )
+})
+
+test('没有图 / 演练占位 / 已是定版 → 不给设成定版入口', () => {
+  assert.equal(canSetPrimaryResult({ status: 'failed', outcome: 'partial_failed', imageUrl: '', isPrimary: false, adoptedUrl: '' }), false)
+  assert.equal(canSetPrimaryResult({ status: 'done', outcome: 'ok', imageUrl: 'https://dry-run.invalid/a.png', isPrimary: false, adoptedUrl: '' }), false)
+  assert.equal(canSetPrimaryResult({ status: 'done', outcome: 'ok', imageUrl: 'https://cdn.example.com/a.png', isPrimary: true, adoptedUrl: '' }), false)
 })

@@ -1183,6 +1183,25 @@ export function describeFailureReason(result: Pick<SubmitResultLike, 'error_mess
 }
 
 /**
+ * 这条结果能不能「设为定版」。
+ *
+ * 与 :func:`canAdoptResult` 是**同一类**修复：卡片原本写死 `task.status === 'done'`，
+ * 于是"部分成功（图已生成、只是长期存储没成功）"这条结果**采纳进来之后也设不了定版**——
+ * 用户把图救回来了，却卡在最后一步，只能去别的页面绕。这是第 27 轮用受控桩上游实测到的。
+ *
+ * 口径：已定版的不再给；其余凡是有可用图片地址（含**部分成功**）就给，让用户能把救回来的图定下来。
+ */
+export function canSetPrimaryResult(
+  task: Pick<ProductionTask, 'status' | 'outcome' | 'imageUrl' | 'isPrimary' | 'adoptedUrl'>,
+): boolean {
+  if (task.isPrimary === true) return false
+  const imageUrl = String(task.imageUrl || '').trim() || String(task.adoptedUrl || '').trim()
+  if (!imageUrl || isPlaceholderUrl(imageUrl)) return false
+  if (task.status === 'done') return true
+  return String(task.outcome || '') === 'partial_failed'
+}
+
+/**
  * 这条结果能不能「采纳」。
  *
  * 真实演练（2026-09-27）暴露的阻塞：卡片上的采纳条件原本写死 `status === 'done'`，
