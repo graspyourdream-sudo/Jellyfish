@@ -80,7 +80,8 @@ import {
   StudioShotLinksService,
   StudioShotsService,
 } from '../../../services/generated'
-import { StudioEntitiesApi } from '../../../services/studioEntities'
+import { createShotProductLink, StudioEntitiesApi } from '../../../services/studioEntities'
+import { defaultTaskActionErrorMessage } from '../components/taskActionHelpers'
 import type {
   CameraAngle,
   CameraMovement,
@@ -3658,8 +3659,10 @@ function Inspector(props: {
       }
     }
     const overviewItems = shotAssetsOverview?.items ?? []
-    const bucket = (type: 'character' | 'scene' | 'prop' | 'costume') =>
-      overviewItems.filter((item) => item.type === type)
+    /* 类型放宽到 `string`：镜头资产概览里还有**商品**（第五类资产）。
+       逐项比较用 `String(...)` 读，避免把生成客户端里那份还没更新的类型联合当判据。 */
+    const bucket = (type: 'character' | 'scene' | 'prop' | 'costume' | 'product') =>
+      overviewItems.filter((item) => String((item as { type?: string }).type ?? '') === type)
 
     const checks = [
       {
@@ -3685,6 +3688,12 @@ function Inspector(props: {
         label: '服装',
         importance: '影响角色外观连续性，尤其在多镜头或生成多版本时更明显。',
         candidates: bucket('costume'),
+      },
+      {
+        key: 'products' as const,
+        label: '商品',
+        importance: '影响商品在成片里的呈现：剧情广告要求商品出现在足够多的镜头里，缺关联会漏掉。',
+        candidates: bucket('product'),
       },
     ].map((item) => {
       const entries = item.candidates.map((candidate) => ({
@@ -3738,8 +3747,25 @@ function Inspector(props: {
     const costumeNames = uniqueNames(
       overviewItems.filter((item) => item.type === 'costume' && item.candidate_status === 'pending').map((item) => item.name),
     )
+    /* 商品是第五类资产：它同样要参与"项目里/资产库里有没有同名资产"的对账，
+       否则商品候选在诊断里永远显示不出「需新建 / 资产库已有 / 已关联」。 */
+    const productNames = uniqueNames(
+      overviewItems
+        .filter(
+          (item) =>
+            String((item as { type?: string }).type ?? '') === 'product' &&
+            item.candidate_status === 'pending',
+        )
+        .map((item) => item.name),
+    )
 
-    if (characterNames.length === 0 && sceneNames.length === 0 && propNames.length === 0 && costumeNames.length === 0) {
+    if (
+      characterNames.length === 0 &&
+      sceneNames.length === 0 &&
+      propNames.length === 0 &&
+      costumeNames.length === 0 &&
+      productNames.length === 0
+    ) {
       setReadinessExistenceMap({})
       return
     }
@@ -3748,15 +3774,19 @@ function Inspector(props: {
     setReadinessExistenceLoading(true)
     void (async () => {
       try {
+        /* `product_names` 是**新增的可选参数**（后端向后兼容：不传时行为与以前一致），
+           生成客户端里还没有这个键，所以按结构化对象发出去。 */
+        const existenceBody: Record<string, unknown> = {
+          project_id: projectId,
+          shot_id: selectedShot.id,
+          character_names: characterNames,
+          scene_names: sceneNames,
+          prop_names: propNames,
+          costume_names: costumeNames,
+        }
+        if (productNames.length > 0) existenceBody.product_names = productNames
         const res = await StudioEntitiesService.checkEntityNamesExistenceApiV1StudioEntitiesExistenceCheckPost({
-          requestBody: {
-            project_id: projectId,
-            shot_id: selectedShot.id,
-            character_names: characterNames,
-            scene_names: sceneNames,
-            prop_names: propNames,
-            costume_names: costumeNames,
-          },
+          requestBody: existenceBody as never,
         })
         if (cancelled) return
         const data = res.data
@@ -3773,6 +3803,12 @@ function Inspector(props: {
         ;(data?.costumes ?? []).forEach((item) => {
           next[`costumes:${normalizeAssetName(item.name)}`] = item
         })
+        /* 商品的返回桶同样按结构化读取（生成客户端里还没有 `products` 这个键）。 */
+        ;(((data ?? {}) as Record<string, unknown>).products as EntityNameExistenceItem[] | undefined ?? []).forEach(
+          (item) => {
+            next[`products:${normalizeAssetName(item.name)}`] = item
+          },
+        )
         setReadinessExistenceMap(next)
       } catch {
         if (!cancelled) setReadinessExistenceMap({})
@@ -3790,7 +3826,7 @@ function Inspector(props: {
     shotAssetsOverview?.items,
   ])
 
-  const getReadinessExistenceLabel = useCallback((checkKey: 'characters' | 'scene' | 'props' | 'costumes', name: string) => {
+  const getReadinessExistenceLabel = useCallback((checkKey: 'characters' | 'scene' | 'props' | 'costumes' | 'products', name: string) => {
     const item = readinessExistenceMap[`${checkKey}:${normalizeAssetName(name)}`]
     if (!item) {
       return readinessExistenceLoading ? '检测中' : null
@@ -4262,7 +4298,7 @@ function Inspector(props: {
     [loadProjectAssetOptions, loadProjectRoleOptions, selectedShot?.id],
   )
 
-  const openReadinessCreate = useCallback((kind: 'characters' | 'scene' | 'props' | 'costumes', name: string) => {
+  const openReadinessCreate = useCallback((kind: 'characters' | 'scene' | 'props' | 'costumes' | 'products', name: string) => {
     if (!projectId || !selectedShot?.id) return
     const currentShotId = selectedShot.id
     const styleQ =
@@ -4278,18 +4314,55 @@ function Inspector(props: {
       open(`/projects/${encodeURIComponent(projectId)}?tab=roles&create=1&name=${encodeURIComponent(name)}${ctxQ}`)
       return
     }
-    const tab = kind === 'scene' ? 'scene' : kind === 'props' ? 'prop' : 'costume'
+    const tab =
+      kind === 'scene' ? 'scene' : kind === 'props' ? 'prop' : kind === 'products' ? 'product' : 'costume'
     open(`/assets?tab=${tab}&create=1&name=${encodeURIComponent(name)}${ctxQ}`)
   }, [currentChapterId, projectId, projectStyle, projectVisualStyle, selectedShot?.id])
 
-  const handleReadinessMissingAction = useCallback(async (kind: 'characters' | 'scene' | 'props' | 'costumes', name: string) => {
+  const handleReadinessMissingAction = useCallback(async (
+    kind: 'characters' | 'scene' | 'props' | 'costumes' | 'products',
+    name: string,
+  ) => {
     const item = readinessExistenceMap[`${kind}:${normalizeAssetName(name)}`]
+    if (kind === 'products') {
+      /* 商品是第五类资产（契约 §六）：
+         - 资产库里还没有 → 打开商品页新建（带上名称与项目上下文，与其余几类同一口径）；
+         - 已经有了 → **一键关联到本镜**（写 project_product_links），
+           不另开一个"选商品"弹窗（商品没有出图通道，不需要挑图/挑演员那套东西）。 */
+      if (!item || !item.exists) {
+        openReadinessCreate(kind, name)
+        return
+      }
+      const productId = String(item.asset_id ?? '')
+      if (!projectId || !selectedShot?.id || !productId) return
+      try {
+        await createShotProductLink({
+          project_id: projectId,
+          chapter_id: currentChapterId ?? '',
+          shot_id: selectedShot.id,
+          asset_id: productId,
+        })
+        message.success('已把这个商品关联到本镜')
+        await loadShotAssetsOverview(selectedShot.id)
+      } catch (error) {
+        message.error(defaultTaskActionErrorMessage(error, '关联商品失败'))
+      }
+      return
+    }
     if (item && !item.exists) {
       openReadinessCreate(kind, name)
       return
     }
     await openReadinessLinker(kind)
-  }, [openReadinessCreate, openReadinessLinker, readinessExistenceMap])
+  }, [
+    currentChapterId,
+    loadShotAssetsOverview,
+    openReadinessCreate,
+    openReadinessLinker,
+    projectId,
+    readinessExistenceMap,
+    selectedShot?.id,
+  ])
 
   useEffect(() => {
     if (sceneIds.length === 0) {

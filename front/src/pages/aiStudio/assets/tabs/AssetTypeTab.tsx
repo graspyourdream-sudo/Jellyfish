@@ -40,7 +40,7 @@ export function AssetTypeTab({
   onEditAsset,
 }: {
   label: string
-  tabKey: 'scene' | 'prop' | 'costume'
+  tabKey: 'scene' | 'prop' | 'costume' | 'product'
   listAssets: (params: { q?: string; page: number; pageSize: number }) => Promise<{ items: StudioAssetLike[]; total: number }>
   createAsset: (payload: AssetCreatePayload) => Promise<StudioAssetLike>
   updateAsset: (id: string, payload: AssetMutationPayload) => Promise<StudioAssetLike>

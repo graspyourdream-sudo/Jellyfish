@@ -22,7 +22,9 @@ import {
   MAIN_SCREEN_FORBIDDEN_SOURCE_TERMS,
   MAIN_SCREEN_FORBIDDEN_TERMS,
   WORKBENCH_STATUS_LABEL,
+  WORKBENCH_OTHER_TYPE,
   WORKBENCH_TAB_LABEL,
+  WORKBENCH_TABS,
   applyWorkbenchSelection,
   countByStatus,
   countByType,
@@ -37,6 +39,9 @@ import {
   needsPromptRegeneration,
   profileFieldLabel,
   workbenchItemKey,
+  workbenchUnregisteredTypes,
+  isWorkbenchSubmittable,
+  workbenchItemType,
   workbenchStatusKey,
   workbenchStatusLabel,
   type WorkbenchItemLike,
@@ -115,9 +120,9 @@ function fixture(): WorkbenchItemLike[] {
 
 /* ------------------------------------------------------------ ① 页签过滤 */
 
-test('页签只显示本类型资产，且四个页签的并集等于全部资产（同一项只出现一次）', () => {
+test('页签只显示本类型资产，且各页签的并集等于全部资产（同一项只出现一次）', () => {
   const items = fixture()
-  const tabs = ['character', 'scene', 'prop', 'costume'] as const
+  const tabs = ['character', 'scene', 'prop', 'costume', 'product'] as const
   const seen: string[] = []
   tabs.forEach((tab) => {
     itemsForTab(items, tab).forEach((row) => seen.push(workbenchItemKey(row)))
@@ -130,8 +135,15 @@ test('页签只显示本类型资产，且四个页签的并集等于全部资�
   assert.equal(itemsForTab(items, 'costume').length, 1)
 })
 
-test('页签标题是四类资产的中文名（人物 / 场景 / 道具 / 服装）', () => {
-  assert.deepEqual(Object.values(WORKBENCH_TAB_LABEL), ['人物', '场景', '道具', '服装'])
+test('页签标题是五类资产的中文名（人物 / 场景 / 道具 / 服装 / 商品）', () => {
+  /* 新口径：商品是第五类资产（契约 §六）。`other` 是**未登记类型**的兜底桶，
+     它不是页签，所以单独断言（不许把它混进业务类型的顺序里）。 */
+  assert.deepEqual(
+    WORKBENCH_TABS.map((tab) => WORKBENCH_TAB_LABEL[tab]),
+    ['人物', '场景', '道具', '服装', '商品'],
+  )
+  assert.equal(WORKBENCH_TAB_LABEL[WORKBENCH_OTHER_TYPE], '其它资产')
+  assert.ok(!(WORKBENCH_TABS as readonly string[]).includes(WORKBENCH_OTHER_TYPE), '未登记的桶不该成为页签')
 })
 
 /* ------------------------------------------------------------ ② 勾选动作 */
@@ -320,11 +332,45 @@ test('剧本改过（content_changed / stale）时给一句提醒，并说明人
   assert.equal(deriveAnalysisAction({ generated: false, status: 'stale', content_changed: true }).staleNotice, '')
 })
 
+test('商品（第五类资产）：有自己的页签与计数，且不进"可出图"计数', () => {
+  const items = [
+    item({ asset_type: 'product', asset_id: 'prod-1', name: '紧致焕颜精华' }),
+    item({ asset_type: 'character', asset_id: 'char-1', name: '苏晚棠' }),
+  ]
+  const counts = countByType(items)
+  assert.equal(counts.product, 1)
+  assert.equal(counts.character, 1)
+  // 商品没有图片提示词槽位 → 不进"可出图"
+  assert.equal(isWorkbenchSubmittable('product'), false)
+
+  const command = deriveWorkbenchCommand({ items, selectedKeys: ['product:prod-1'] })
+  assert.match(command.title, /人工上传/)
+  assert.match(command.primaryDisabledReason, /设为定版/)
+  assert.equal(command.counts.products, 1)
+  // 只选商品时，"批量生成图" 也必须被禁用，并说清该去哪儿做
+  assert.equal(command.generateImagesDisabled, true)
+  assert.match(command.generateImagesDisabledReason, /人工上传/)
+})
+
+test('未登记的资产类型：单独成桶（不许静默当成人物），并能被点名出来', () => {
+  const items = [item({ asset_type: 'faction', asset_id: 'faction-1', name: '侯府阵营' })]
+  assert.equal(workbenchItemType(items[0]), WORKBENCH_OTHER_TYPE)
+  assert.equal(workbenchItemKey(items[0]), 'other:faction-1')
+  assert.equal(countByType(items).other, 1)
+  assert.equal(countByType(items).character, 0, '未登记类型不许被算成人物')
+  assert.deepEqual(workbenchUnregisteredTypes(items), ['faction'])
+  // 未登记的项不冒充具体类型：计数进 unsupported，主区不给假动作
+  const command = deriveWorkbenchCommand({ items, selectedKeys: ['other:faction-1'] })
+  assert.equal(command.counts.unsupported, 1)
+  assert.equal(command.counts.products, 0)
+})
+
 /* --------------------------------------------------------------- ④ 计数 */
 
-test('四类数量与七个状态计数来自同一份清单', () => {
+test('各类数量与七个状态计数来自同一份清单', () => {
   const items = fixture()
-  assert.deepEqual(countByType(items), { character: 6, scene: 1, prop: 2, costume: 1 })
+  // 五类业务资产 + 未登记兜底桶（本 fixture 里没有商品，也没有未登记类型）
+  assert.deepEqual(countByType(items), { character: 6, scene: 1, prop: 2, costume: 1, product: 0, other: 0 })
   const status = countByStatus(items)
   assert.equal(status.ready, 4)
   assert.equal(status.needs_profile, 1)

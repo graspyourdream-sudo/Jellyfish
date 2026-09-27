@@ -121,14 +121,29 @@ test('同一项资产不会出现两次（键去重）', () => {
   assert.equal(assets.length, 1)
 })
 
-test('未知资产类型：键与工作台完全一致（两边不许各兜一套）', () => {
+test('未知资产类型：键与工作台完全一致，且**不冒充任何一类资产**（如实跳过）', () => {
   const weird = [item('faction', 'faction-1', '侯府阵营')]
-  // 工作台的选择键把未知类型兜底成角色；面板必须用同一个键，否则会"过滤成空"
+  /* 新口径（本轮改动）：未登记的类型**不再静默兜底成人物** ——
+     工作台把它放进 `other` 桶，面板也用同一个键（两边不许各兜一套），
+     并且这一项不会被送进"生成图片提示词"（它连槽位都无从谈起），只进 skipped 并说明原因。 */
   const key = workbenchItemKey(weird[0])
-  assert.equal(key, 'character:faction-1')
-  const { assets } = selectPromptPanelAssets(weird, [key])
-  assert.equal(assets.length, 1)
-  assert.equal(promptPanelAssetKey(assets[0]), key)
+  assert.equal(key, 'other:faction-1')
+  assert.notEqual(key, 'character:faction-1', '未登记类型不许被当成人物')
+  const { assets, skipped } = selectPromptPanelAssets(weird, [key])
+  assert.equal(assets.length, 0)
+  assert.equal(skipped.length, 1)
+  assert.equal(skipped[0].key, key)
+  assert.match(skipped[0].reason, /不认识/)
+})
+
+test('商品：不进"生成图片提示词"面板，但如实说明为什么（数量不许对不上）', () => {
+  const rows = [item('product', 'prod-1', '紧致焕颜精华')]
+  const key = workbenchItemKey(rows[0])
+  assert.equal(key, 'product:prod-1')
+  const { assets, skipped } = selectPromptPanelAssets(rows, [key])
+  assert.equal(assets.length, 0, '商品没有图片提示词槽位')
+  assert.equal(skipped.length, 1)
+  assert.match(skipped[0].reason, /人工上传/)
 })
 
 test('跳过的项拼成一句中文说明（空 → 空串，页面不显示空提示）', () => {

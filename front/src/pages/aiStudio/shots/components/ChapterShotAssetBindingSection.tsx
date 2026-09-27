@@ -10,10 +10,16 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Empty, Progress, Space, Table, Tag, Typography, message } from 'antd'
+import { Alert, Button, Empty, Progress, Select, Space, Table, Tag, Typography, message } from 'antd'
 import type { TableColumnsType, TableProps } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { StudioShotCharacterLinksService, StudioShotLinksService } from '../../../../services/generated'
+import {
+  createShotProductLink,
+  deleteShotProductLink,
+  StudioEntitiesApi,
+  type ShotProductLink,
+} from '../../../../services/studioEntities'
 import { previewAssetBinding } from '../../../../services/llmPipelineApi'
 import type { AssetBindingPreviewResult, AssetBindingShot, BindingSuggestion } from '../../../../services/llmPipelineApi'
 import { defaultTaskActionErrorMessage } from '../../components/taskActionHelpers'
@@ -52,6 +58,8 @@ const SLOT_LABELS: Record<string, string> = {
   scene: '场景',
   props: '道具',
   costumes: '服装',
+  /* 商品是第五类资产（契约 §六）：它也能与镜头建立关联。 */
+  product: '商品',
 }
 
 const ASSET_TYPE_LABELS: Record<string, string> = {
@@ -59,6 +67,7 @@ const ASSET_TYPE_LABELS: Record<string, string> = {
   scene: '场景',
   prop: '道具',
   costume: '服装',
+  product: '商品',
 }
 
 /**
@@ -120,6 +129,189 @@ function renderAgreementTag(agreement: BindingSuggestion['agreement']) {
   if (agreement === 'conflict') return <Tag color="red">与现有绑定冲突</Tag>
   if (agreement === 'heuristic_only') return <Tag color="blue">仅规则命中</Tag>
   return <Tag color="blue">仅模型命中</Tag>
+}
+
+/**
+ * 商品的人工绑定块（第五类资产，契约 §六）。
+ *
+ * 为什么要单独一块、而且**不依赖**上面的 AI 推荐：推荐来自大模型，商品未必出现在它的建议里，
+ * 而"这一镜有没有商品"是成片能不能成立的关键；所以这里给一条确定性的手工路径：
+ * 列出这一镜已绑定的商品（读 `project_product_links`）→ 选一个项目商品 → 绑定 / 解绑。
+ * 写库走既有的 `/studio/shot-links/product`（生成客户端里还没有这条路径，见手写薄封装）。
+ */
+function ShotProductBindingBlock({
+  projectId,
+  chapterId,
+  shotId,
+  onReloadPreparationState,
+}: {
+  projectId: string
+  chapterId: string
+  shotId: string
+  onReloadPreparationState: () => Promise<unknown>
+}) {
+  const [links, setLinks] = useState<ShotProductLink[]>([])
+  const [products, setProducts] = useState<{ id: string; name: string }[]>([])
+  const [selectedId, setSelectedId] = useState<string>('')
+  const [loading, setLoading] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [failure, setFailure] = useState('')
+
+  const load = useCallback(async () => {
+    if (!shotId) return
+    setLoading(true)
+    setFailure('')
+    try {
+      const [linkRes, productRes] = await Promise.all([
+        StudioShotLinksService.listProjectEntityLinksApiV1StudioShotLinksEntityTypeGet({
+          entityType: 'product',
+          projectId,
+          chapterId: null,
+          shotId,
+          assetId: null,
+          order: null,
+          isDesc: false,
+          page: 1,
+          pageSize: 100,
+        }),
+        StudioEntitiesApi.list('product', { page: 1, pageSize: 100 }),
+      ])
+      setLinks(((linkRes.data?.items ?? []) as ShotProductLink[]).filter((row) => row.id != null))
+      setProducts(
+        ((productRes.data?.items ?? []) as { id?: string; name?: string }[]).map((row) => ({
+          id: String(row.id ?? ''),
+          name: String(row.name ?? '').trim(),
+        })),
+      )
+    } catch (error) {
+      setFailure(defaultTaskActionErrorMessage(error, '读取本镜已绑定的商品失败'))
+      setLinks([])
+    } finally {
+      setLoading(false)
+    }
+  }, [projectId, shotId])
+
+  useEffect(() => {
+    setSelectedId('')
+    void load()
+  }, [load])
+
+  const productName = useCallback(
+    (productId: string | undefined): string => {
+      const id = String(productId ?? '')
+      const found = products.find((row) => row.id === id)
+      return found?.name || '未命名商品'
+    },
+    [products],
+  )
+
+  const bind = useCallback(async () => {
+    if (!selectedId) {
+      message.warning('先选一个商品，再点「绑定到本镜」')
+      return
+    }
+    setBusy(true)
+    setFailure('')
+    try {
+      await createShotProductLink({
+        project_id: projectId,
+        chapter_id: chapterId,
+        shot_id: shotId,
+        asset_id: selectedId,
+      })
+      message.success('已把商品绑定到本镜')
+      setSelectedId('')
+      await load()
+      try {
+        await onReloadPreparationState()
+      } catch {
+        /* 回读失败不影响绑定结果，下面的清单已经是重新读过的 */
+      }
+    } catch (error) {
+      setFailure(defaultTaskActionErrorMessage(error, '绑定商品失败'))
+    } finally {
+      setBusy(false)
+    }
+  }, [chapterId, load, onReloadPreparationState, projectId, selectedId, shotId])
+
+  const unbind = useCallback(
+    async (linkId: number) => {
+      setBusy(true)
+      setFailure('')
+      try {
+        await deleteShotProductLink(linkId)
+        message.success('已解除这一镜的商品关联')
+        await load()
+        try {
+          await onReloadPreparationState()
+        } catch {
+          /* 同上 */
+        }
+      } catch (error) {
+        setFailure(defaultTaskActionErrorMessage(error, '解除商品关联失败'))
+      } finally {
+        setBusy(false)
+      }
+    },
+    [load, onReloadPreparationState],
+  )
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+      <div className="text-sm font-medium text-slate-900">商品关联（人工绑定）</div>
+      <div className="mt-1 text-[11px] text-slate-500">
+        {`这一镜已绑定 ${links.length} 个商品。商品的图由人工上传并手动设为定版，不走出图通道；` +
+          '这里只负责把商品和本镜关联起来。'}
+      </div>
+
+      {failure ? (
+        <Alert className="mt-2" type="error" showIcon message={failure} />
+      ) : null}
+
+      <div className="mt-2 space-y-1">
+        {loading ? (
+          <div className="text-[11px] text-slate-400">正在读取已绑定的商品…</div>
+        ) : links.length === 0 ? (
+          <div className="text-[11px] text-slate-400">这一镜还没有绑定商品。</div>
+        ) : (
+          links.map((link) => (
+            <div key={String(link.id)} className="flex flex-wrap items-center gap-2">
+              <Tag color="magenta" bordered={false} className="mr-0">
+                商品
+              </Tag>
+              <span className="text-xs text-slate-700">{productName(link.product_id)}</span>
+              <Button size="small" type="text" danger disabled={busy} onClick={() => void unbind(link.id)}>
+                解除关联
+              </Button>
+            </div>
+          ))
+        )}
+      </div>
+
+      <Space className="mt-2" size={6} wrap>
+        <Select
+          size="small"
+          style={{ width: 240 }}
+          placeholder="选一个商品"
+          value={selectedId || undefined}
+          disabled={busy || products.length === 0}
+          options={products.map((row) => ({ value: row.id, label: row.name || '未命名商品' }))}
+          onChange={(value) => setSelectedId(String(value))}
+        />
+        <Button size="small" type="primary" loading={busy} disabled={!selectedId} onClick={() => void bind()}>
+          绑定到本镜
+        </Button>
+        <Button size="small" onClick={() => void load()} disabled={busy}>
+          重新读取
+        </Button>
+        {products.length === 0 ? (
+          <span className="text-[11px] text-slate-400">
+            项目里还没有商品资产：先在第 2 步资产准备里确认商品，或到资产库新建商品。
+          </span>
+        ) : null}
+      </Space>
+    </div>
+  )
 }
 
 export function ChapterShotAssetBindingSection({
@@ -242,7 +434,19 @@ export function ChapterShotAssetBindingSection({
         })
         return
       }
-      throw new Error(`不支持的资产类型：${row.asset_type}`)
+      if (row.asset_type === 'product') {
+        /* 商品是第五类资产：生成客户端里还没有这条路径（OpenAPI 漂移），
+           所以走手写薄封装，请求体与上面三类**逐字段一致**。 */
+        await createShotProductLink({
+          project_id: projectId,
+          chapter_id: chapterId,
+          shot_id: shotId,
+          asset_id: row.asset_id,
+        })
+        return
+      }
+      /* 未登记的类型：不静默、不猜，给出可排查的中文原因（不再对商品触发）。 */
+      throw new Error(`这一类的资产当前还不能在这里关联（类型：${String(row.asset_type ?? '')}）`)
     },
     [chapterId, projectId, shotId],
   )
@@ -410,7 +614,7 @@ export function ChapterShotAssetBindingSection({
         <div className="min-w-0">
           <div className="text-sm font-medium text-slate-900">AI 推荐资产关联</div>
           <Typography.Text type="secondary" className="text-[11px]">
-            系统按当前项目已有资产给出「角色 / 场景 / 道具 / 服装」四类关联建议：
+            系统按当前项目已有资产给出「角色 / 场景 / 道具 / 服装 / 商品」五类关联建议：
             明确匹配的默认勾选，多候选或与现有绑定冲突的留给你逐条判断；
             点「确认全部推荐」即可一次写入，保存后本镜状态立即刷新。这个推荐只读、不写库。
           </Typography.Text>
@@ -463,7 +667,7 @@ export function ChapterShotAssetBindingSection({
             <div className="space-y-1">
               <div>{previewError}</div>
               <div className="text-[11px] text-slate-500">
-                若提示项目内没有可绑定资产，请先在资产库创建角色 / 场景 / 道具 / 服装。
+                若提示项目内没有可绑定资产，请先在资产库创建角色 / 场景 / 道具 / 服装 / 商品。
               </div>
             </div>
           }
@@ -625,6 +829,14 @@ export function ChapterShotAssetBindingSection({
           description="还没有推荐结果，点击「AI 推荐资产关联」开始"
         />
       ) : null}
+
+      {/* 商品是人工绑定的：推荐结果里有没有商品都不影响这一步（第五类资产，契约 §六） */}
+      <ShotProductBindingBlock
+        projectId={projectId}
+        chapterId={chapterId}
+        shotId={shotId}
+        onReloadPreparationState={onReloadPreparationState}
+      />
     </div>
   )
 }

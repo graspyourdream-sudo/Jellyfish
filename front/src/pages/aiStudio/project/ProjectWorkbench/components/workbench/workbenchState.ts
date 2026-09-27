@@ -22,23 +22,39 @@
 import { ASSET_PROFILE_FIELD_SPECS } from '../assetProfileFields.ts'
 import { maskInternalIds } from '../../../../components/maskInternalIds.ts'
 
-/** 工作台四类资产的顺序（与出图分页签口径一致）。 */
-export type WorkbenchAssetType = 'character' | 'scene' | 'prop' | 'costume'
+/** 工作台资产类型的顺序（出图分页签口径 + 商品）。 */
+export type WorkbenchAssetType = 'character' | 'scene' | 'prop' | 'costume' | 'product'
 
-export const WORKBENCH_TABS: WorkbenchAssetType[] = ['character', 'scene', 'prop', 'costume']
+/**
+ * **未登记** `asset_type` 的落点（不是"随便归一类"）。
+ *
+ * 改前这里把认不出来的类型**静默当成人物** —— 商品的资产会被标成「人物」、
+ * 计数并进人物里，页面上看不出任何异常（这正是本轮要修的那类"静默错"）。
+ * 现在未登记的项单独成桶：它有自己的计数、可以在技术详情里点名，
+ * 主区**不会**把它说成某一类具体资产。
+ */
+export const WORKBENCH_OTHER_TYPE = 'other'
 
-export const WORKBENCH_TAB_LABEL: Record<WorkbenchAssetType, string> = {
+/** 工作台里一项资产可能落在的桶（业务类型 + 未登记兜底桶）。 */
+export type WorkbenchBucketType = WorkbenchAssetType | typeof WORKBENCH_OTHER_TYPE
+
+/** 页签：**只有已登记的业务类型**（未登记的项不成页签，但有计数与诊断）。 */
+export const WORKBENCH_TABS: WorkbenchAssetType[] = ['character', 'scene', 'prop', 'costume', 'product']
+
+export const WORKBENCH_TAB_LABEL: Record<WorkbenchBucketType, string> = {
   character: '人物',
   scene: '场景',
   prop: '道具',
   costume: '服装',
+  product: '商品',
+  other: '其它资产',
 }
 
-/** 出图服务只接受人物 / 场景 / 道具：服装可以勾选但不进批量生成。 */
 /**
- * 可出图的资产类型：**四类平权**（服装走 Jellyfish 自己的 APIMart 通道，
- * 通道分流由后端按 `asset_type` 决定并如实回报）。
+ * 可出图的资产类型：**四类**（人物 / 场景 / 道具 / 服装；
+ * 服装走 Jellyfish 自己的 APIMart 通道，通道分流由后端按 `asset_type` 决定并如实回报）。
  *
+ * ⚠️ **商品不在其中**（契约 §六）：商品图由用户手动上传 + 手动定版，不走出图通道。
  * 与 `assetProduction.SUBMITTABLE_ASSET_TYPES` 保持一致（那个模块负责请求组装）；
  * 本文件是纯逻辑单测入口，刻意不引入跨模块 import，改一处记得同步另一处。
  */
@@ -142,14 +158,49 @@ export function isWorkbenchAssetType(value: unknown): value is WorkbenchAssetTyp
   return typeof value === 'string' && (WORKBENCH_TABS as string[]).includes(value)
 }
 
-/** 全页面唯一的资产键（同一项资产只出现一次，靠它保证）。 */
-export function workbenchItemKey(item: WorkbenchItemLike): string {
-  const type = isWorkbenchAssetType(item.asset_type) ? item.asset_type : 'character'
-  return `${type}:${String(item.asset_id ?? '')}`
+/** 这个桶是不是**真实页签**（`'other'` 不是：未登记的项只计数、不占页签）。 */
+export function isWorkbenchTabType(value: unknown): value is WorkbenchAssetType {
+  return isWorkbenchAssetType(value)
 }
 
-export function workbenchItemType(item: WorkbenchItemLike): WorkbenchAssetType {
-  return isWorkbenchAssetType(item.asset_type) ? item.asset_type : 'character'
+/**
+ * 这一项落在哪个桶。
+ *
+ * 未登记的 `asset_type` → `'other'`（**不再静默当人物**）：
+ * 页面不会把它说成某一类具体资产，计数与诊断能看出"后端给了我们不认识的类型"。
+ */
+export function workbenchItemBucket(item: WorkbenchItemLike): WorkbenchBucketType {
+  return isWorkbenchAssetType(item.asset_type) ? item.asset_type : WORKBENCH_OTHER_TYPE
+}
+
+/**
+ * 这一项的资产类型（`'other'` = 后端给了未登记的类型）。
+ *
+ * 保留旧名字（工作台各处都从它取类型）；语义已从"兜底成人物"改成"未登记单独成桶"。
+ */
+export function workbenchItemType(item: WorkbenchItemLike): WorkbenchBucketType {
+  return workbenchItemBucket(item)
+}
+
+/** 全页面唯一的资产键（同一项资产只出现一次，靠它保证）。 */
+export function workbenchItemKey(item: WorkbenchItemLike): string {
+  return `${workbenchItemBucket(item)}:${String(item.asset_id ?? '')}`
+}
+
+/**
+ * 后端给过、但前端**没有登记**的资产类型（去重，按首次出现排序）。
+ *
+ * 用途：工作台的「技术详情」把这类值点名出来（`source_type` 原文层），
+ * 否则一个新增类型只会表现为"资产凭空少了几项"。
+ */
+export function workbenchUnregisteredTypes(items: readonly WorkbenchItemLike[]): string[] {
+  const out: string[] = []
+  items.forEach((item) => {
+    const raw = String(item.asset_type ?? '').trim()
+    if (!raw || isWorkbenchAssetType(raw)) return
+    if (!out.includes(raw)) out.push(raw)
+  })
+  return out
 }
 
 export function workbenchItemName(item: WorkbenchItemLike): string {
@@ -231,22 +282,23 @@ export function itemsForTab<T extends WorkbenchItemLike>(
   items: readonly T[],
   tab: WorkbenchAssetType,
 ): T[] {
-  return items.filter((item) => workbenchItemType(item) === tab)
+  return items.filter((item) => workbenchItemBucket(item) === tab)
 }
 
 /* -------------------------------------------------------------------- 计数 */
 
-export type WorkbenchTypeCounts = Record<WorkbenchAssetType, number>
+export type WorkbenchTypeCounts = Record<WorkbenchBucketType, number>
 
+/** 各类型各多少项（含商品；未登记的类型进 `other`）。 */
 export function emptyTypeCounts(): WorkbenchTypeCounts {
-  return { character: 0, scene: 0, prop: 0, costume: 0 }
+  return { character: 0, scene: 0, prop: 0, costume: 0, product: 0, other: 0 }
 }
 
-/** 四类资产各多少项（顶部第一行数量）。 */
+/** 各类型资产各多少项（顶部第一行数量）。 */
 export function countByType(items: readonly WorkbenchItemLike[]): WorkbenchTypeCounts {
   const counts = emptyTypeCounts()
   items.forEach((item) => {
-    counts[workbenchItemType(item)] += 1
+    counts[workbenchItemBucket(item)] += 1
   })
   return counts
 }
@@ -334,8 +386,10 @@ export type WorkbenchCommandCounts = {
   needsRegeneration: number
   /** 已选中、正在生成的项 */
   generating: number
-  /** 已选中、出图服务不支持的项（当前为空：四类都支持） */
+  /** 已选中、出图服务不支持的项（服装按既有口径仍算支持；商品与未登记类型进这里） */
   unsupported: number
+  /** 已选中、类型是**商品**的项（商品图由人工上传 + 手动定版，不走出图通道） */
+  products: number
   /** 已选中、可进批量但没有提示词的项 */
   withoutPrompt: number
   /** 已选中、**还没有图片提示词**的项（主按钮这时先去做"生成提示词"） */
@@ -421,12 +475,17 @@ function countSelected(
     needsRegeneration: 0,
     generating: 0,
     unsupported: 0,
+    products: 0,
     withoutPrompt: 0,
     needsPrompt: 0,
   }
   picked.forEach((item) => {
     if (needsPromptRegeneration(item)) counts.needsRegeneration += 1
-    if (!isWorkbenchSubmittable(workbenchItemType(item))) {
+    const bucket = workbenchItemType(item)
+    if (bucket === 'product') counts.products += 1
+    /* `'other'`（后端给了未登记的类型）与商品都不进可出图计数：
+       它们要么不走出图通道，要么我们根本不知道它是什么。 */
+    if (!isWorkbenchTabType(bucket) || !isWorkbenchSubmittable(bucket)) {
       counts.unsupported += 1
       return
     }
@@ -495,6 +554,11 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
 
   const title = (() => {
     if (counts.selected === 0) return '选择本轮要生产的人物、场景或道具'
+    /* 只选了商品：商品图**不走这条出图通道**，所以这一屏的主按钮对它们没有意义 ——
+       标题与禁用原因都直说"该去哪儿做"，而不是让用户对着禁用的按钮猜。 */
+    if (counts.selected > 0 && counts.products === counts.selected) {
+      return '商品的图片由人工上传并手动「设为定版」'
+    }
     if (counts.needsPrompt > 0) return `${counts.needsPrompt} 项还没有图片提示词`
     if (counts.generatable > 0) return `本轮将处理 ${counts.generatable} 项资产`
     if (counts.generating > 0) return `${counts.generating} 项正在生成`
@@ -525,6 +589,9 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
     primaryHint = `会为 ${counts.generatable} 项生成图片（按张计费，提交前还会再确认一次）。`
   } else if (counts.selected === 0) {
     primaryDisabledReason = '先勾选要生成的资产，或点「只选未生成项」。'
+  } else if (counts.products === counts.selected) {
+    primaryDisabledReason =
+      '商品的图片由人工上传并手动「设为定版」：请在商品卡片上点「上传图片 / 设为定版」。'
   } else if (counts.generating > 0) {
     primaryLabel = `批量生成中（${counts.generating}）`
     primaryDisabledReason = '选中的资产正在生成，等这一轮跑完再点。'
@@ -546,6 +613,9 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
   const generateImagesDisabledReason = (() => {
     if (busy) return '本轮还在进行中；要中断后续请点「停止后续」。'
     if (counts.selected === 0) return '先勾选要生成图片的资产，或点「全选本页签」/「只选未生成项」。'
+    if (counts.products > 0 && counts.products === counts.selected) {
+      return '商品的图片由人工上传并手动「设为定版」：请在商品卡片上点「上传图片 / 设为定版」。'
+    }
     if (counts.needsPrompt > 0 && counts.generatable === 0) {
       return '选中的资产还没有图片提示词：先点「生成图片提示词」，或换选已经有提示词的项。'
     }
@@ -810,8 +880,12 @@ export function pendingReviewReasonMainText(kind: string): string {
  *
  * 修法按审计 §7.1-2「优先复用既有机制」：**消费**它，不再手抄第二份。
  * （`assetProfileFields.ts` 属区域 6 的可写范围，本批只 import、不编辑。）
+ *
+ * **商品（`product`）必须在这里**：`ASSET_PROFILE_FIELD_SPECS.product` 一直是存在的
+ * （外观描述 / 材质 / 颜色 / 包装 / 品牌标识 / 规格 / 关联卖点 七项），只是没被纳入，
+ * 于是商品资料表单渲染不出来。这里只加类型名，字段表仍然只有 `assetProfileFields.ts` 一份。
  */
-const WORKBENCH_PROFILE_FIELD_TYPES = ['character', 'scene', 'prop', 'costume'] as const
+const WORKBENCH_PROFILE_FIELD_TYPES = ['character', 'scene', 'prop', 'costume', 'product'] as const
 
 const PROFILE_FIELD_LABEL_FROM_SPECS: Record<string, string> = (() => {
   const out: Record<string, string> = {}

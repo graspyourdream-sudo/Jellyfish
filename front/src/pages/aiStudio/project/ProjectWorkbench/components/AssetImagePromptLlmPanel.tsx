@@ -93,6 +93,7 @@ import {
   describePromptRowSlot,
   describePromptRowState,
   mergeLoadedAssetPrompts,
+  isAssetPromptAssetType,
   resolveAssetPromptSlot,
   type AssetPromptSlotSpecLike,
 } from './assetPromptSlots.ts'
@@ -282,6 +283,12 @@ export function AssetImagePromptLlmPanel({
     const unrequestable: string[] = []
     for (const asset of assets) {
       if (!String(asset.id ?? '').trim()) {
+        unrequestable.push(asset.name || '（未命名资产）')
+        continue
+      }
+      /* 商品没有图片提示词槽位（图由人工上传 + 手动定版）：
+         不猜一个槽位、也不静默丢弃 —— 进 unrequestable 并如实列出来。 */
+      if (!isAssetPromptAssetType(asset.type)) {
         unrequestable.push(asset.name || '（未命名资产）')
         continue
       }

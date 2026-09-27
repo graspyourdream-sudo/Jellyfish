@@ -41,6 +41,7 @@ import {
   countByType,
   describePendingReview,
   isBatchEligible,
+  isWorkbenchTabType,
   itemsForTab,
   workbenchItemKey,
   workbenchItemName,
@@ -243,8 +244,9 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
       const picked = items.filter((item) => selectedKeys.includes(workbenchItemKey(item)))
       const eligible = picked.filter((item) => {
         const type = workbenchItemType(item)
-        // 服装不在出图服务契约内；提示词需要重新生成的项 batch_eligible=false，一律不提交
-        if (type === 'costume' || !isBatchEligible(item)) return false
+        // 服装不在出图服务契约内；**商品也不在**（图由人工上传 + 手动定版）；
+        // 提示词需要重新生成的项 batch_eligible=false，一律不提交。
+        if (type === 'costume' || type === 'product' || !isBatchEligible(item)) return false
         if (operation === 'generate') return item.image?.has_image !== true
         return item.image?.has_image === true
       })
@@ -288,6 +290,39 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
     productionRef.current?.openPromptEditor(workbenchItemKey(item))
   }, [])
 
+  /**
+   * 打开资产编辑页（商品卡片上的「上传图片 / 设为定版」用它）。
+   *
+   * 走的是外层注入的同一个入口（`index.tsx` 的 `openAssetEditor`），
+   * 所以商品的跳转与其余几类同口径（带项目作用域与 returnTo），不在这里另编一条路由。
+   */
+  const handleOpenAssetEditor = useCallback(
+    (item: AssetWorkbenchItem) => {
+      const key = workbenchItemKey(item)
+      const found = assets.find((row) => `${row.type}:${row.id}` === key)
+      const bucket = workbenchItemType(item)
+      if (found) {
+        onOpenAssetEditor(found)
+        return
+      }
+      /* 步骤信号里还没这一项（清单刚变过）时也**不能点了没反应**：
+         用卡片自己的字段拼一个最小形状 —— 编辑页只读 `type` 与 `id`。 */
+      if (!isWorkbenchTabType(bucket)) return
+      onOpenAssetEditor({
+        id: String(item.asset_id ?? ''),
+        name: workbenchItemName(item),
+        type: bucket,
+        hasImage: item.image?.has_image === true,
+        hasPrimary: item.image?.has_primary === true,
+        thumbnail: String(item.image?.thumbnail ?? ''),
+        hasImagePrompt: Boolean(String(item.prompt?.text ?? '').trim()),
+        imageId: typeof item.image?.image_id === 'number' ? item.image.image_id : null,
+        hasPendingCandidate: false,
+      })
+    },
+    [assets, onOpenAssetEditor],
+  )
+
   const handleOpenDetail = useCallback((item: AssetWorkbenchItem, focus?: { shotIndex?: number }) => {
     setDetailItem(item)
     setDetailShotIndex(focus?.shotIndex ?? null)
@@ -297,7 +332,9 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
     (shotIndex: number) => {
       const owner = items.find((item) => (item.script_relation?.shot_refs ?? []).some((shot) => shot.shot_index === shotIndex))
       if (!owner) return
-      setTab(workbenchItemType(owner))
+      /* 未登记的类型没有自己的页签：这时不切页签（直接开详情抽屉，别把用户丢到一个空页签）。 */
+      const ownerBucket = workbenchItemType(owner)
+      if (isWorkbenchTabType(ownerBucket)) setTab(ownerBucket)
       handleOpenDetail(owner, { shotIndex })
     },
     [handleOpenDetail, items],
@@ -464,6 +501,7 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
                 onOpenDetail={handleOpenDetail}
                 onEditPrompt={handleEditPrompt}
                 onGenerateOne={handleGenerateOne}
+                onOpenAssetEditor={handleOpenAssetEditor}
                 renderProfileEditor={renderProfileEditor}
               />
 
@@ -574,7 +612,8 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
           )
           setPendingOpen(false)
           if (matched) {
-            setTab(workbenchItemType(matched))
+            const matchedBucket = workbenchItemType(matched)
+            if (isWorkbenchTabType(matchedBucket)) setTab(matchedBucket)
             handleOpenDetail(matched)
             return
           }
@@ -613,19 +652,26 @@ function toSignalAssets(data: AssetWorkbenchResponse | null): ProjectSignalAsset
   if (!data) return []
   return data.items
     .filter((item) => item.asset_type !== 'costume')
-    .map((item) => ({
-      id: item.asset_id,
-      name: workbenchItemName(item),
-      type: (['character', 'scene', 'prop'].includes(item.asset_type)
-        ? item.asset_type
-        : 'character') as ProjectSignalAsset['type'],
-      hasImage: item.image?.has_image === true,
-      thumbnail: item.image?.thumbnail ?? '',
-      hasPrimary: item.image?.has_primary === true,
-      imageId: typeof item.image?.image_id === 'number' ? item.image.image_id : null,
-      hasImagePrompt: Boolean(String(item.prompt?.text ?? '').trim()),
-      hasPendingCandidate: false,
-    }))
+    .map((item) => {
+      /* 类型**原样保留**（不再把认不出来的类型兜底成人物）：
+         - 商品：保留 `product`，由 `toProductionAssets` 负责筛掉（它不走出图通道）；
+         - 未登记的类型：不产出这一行 —— 与其把它标成"人物"混进结果区，
+           不如不进（工作台卡片那边有 `other` 桶与诊断，用户仍看得见它）。 */
+      const bucket = workbenchItemType(item)
+      if (!isWorkbenchTabType(bucket)) return null
+      return {
+        id: item.asset_id,
+        name: workbenchItemName(item),
+        type: bucket,
+        hasImage: item.image?.has_image === true,
+        thumbnail: item.image?.thumbnail ?? '',
+        hasPrimary: item.image?.has_primary === true,
+        imageId: typeof item.image?.image_id === 'number' ? item.image.image_id : null,
+        hasImagePrompt: Boolean(String(item.prompt?.text ?? '').trim()),
+        hasPendingCandidate: false,
+      }
+    })
+    .filter((row): row is ProjectSignalAsset => row !== null)
 }
 
 export default AssetWorkbench

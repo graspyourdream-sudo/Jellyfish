@@ -32,6 +32,16 @@
 export type AssetPromptAssetType = 'character' | 'scene' | 'prop' | 'costume'
 
 /**
+ * 这个类型有没有图片提示词槽位。
+ *
+ * 商品（第五类资产）**没有**：它的图由人工上传 + 手动定版，不走出图通道，
+ * 所以调用方拿到 `false` 时应当把这一项如实排除，而不是给它编一个槽位。
+ */
+export function isAssetPromptAssetType(value: unknown): value is AssetPromptAssetType {
+  return value === 'character' || value === 'scene' || value === 'prop' || value === 'costume'
+}
+
+/**
  * 资产类型 → 生成提示词时使用的槽位（= 生图计划读取的那一列）。
  *
  * 四类是**同一张表**（照后端 `asset_strategies` 的 `prompt_slot` 口径），

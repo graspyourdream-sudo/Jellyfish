@@ -83,6 +83,7 @@ const MainLayout: React.FC = () => {
       scenes: '场景',
       props: '道具',
       costumes: '服装',
+      products: '商品',
       roles: '角色',
       images: '图片',
       videos: '视频',

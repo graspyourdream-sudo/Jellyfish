@@ -8,7 +8,6 @@ import { previewImagePlan, type ImagePlanTarget } from '../../../../../services/
 import {
   getProjectSignalAssetTypeLabel,
   type ProjectSignalAsset,
-  type ProjectSignalAssetType,
   type ProjectStepSignalDetail,
 } from '../hooks/useProjectStepSignals'
 import { AssetImagePromptLlmPanel } from './AssetImagePromptLlmPanel'
@@ -33,11 +32,15 @@ import {
   type ImageAssetType,
 } from './assetResultKind.ts'
 
-const TYPE_COLOR: Record<ProjectSignalAssetType, string> = {
+/* 类型 → 标签底色。索引放宽到 `string`：项目资产清单里多了商品这类
+   **不走出图通道**的类型，本面板（改版前的图片准备页，已无入口）只保证类型完整，
+   不改变四类资产原有的行为。 */
+const TYPE_COLOR: Record<string, string> = {
   character: 'purple',
   scene: 'blue',
   prop: 'gold',
   costume: 'cyan',
+  product: 'magenta',
 }
 
 function assetKey(asset: ProjectSignalAsset): string {
@@ -89,10 +92,12 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
         return
       }
       const segment = assetType === 'scene' ? 'scenes' : assetType === 'prop' ? 'props' : 'costumes'
-      const tabByType: Record<Exclude<ProjectSignalAssetType, 'character'>, 'scenes' | 'props' | 'costumes'> = {
+      const tabByType: Record<string, 'scenes' | 'props' | 'costumes'> = {
         scene: 'scenes',
         prop: 'props',
         costume: 'costumes',
+        /* 商品没有独立页签（它不走出图通道）；这里只保证类型完整，不编造新的跳转语义。 */
+        product: 'props',
       }
       const returnTo = encodeURIComponent(`/projects/${projectId}?step=image_prep&tab=${tabByType[assetType]}`)
       navigate(`/assets/${segment}/${asset.id}/edit?returnTo=${returnTo}${options?.generate ? '&generate=1' : ''}`)
@@ -143,7 +148,8 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
   } | null>(null)
   const [planLoading, setPlanLoading] = useState(false)
   const [planError, setPlanError] = useState('')
-  const [planType, setPlanType] = useState<ProjectSignalAssetType>('character')
+  /* 出图计划只支持人物 / 场景 / 道具 / 服装四类（商品不走出图通道，不进这里的选择器）。 */
+  const [planType, setPlanType] = useState<'character' | 'scene' | 'prop' | 'costume'>('character')
 
   const loadPlan = useCallback(async () => {
     if (!projectId) return
@@ -424,7 +430,7 @@ export function ProjectImagePrepPanel({ assets, detail, loading, onReload }: Pro
                     {`画幅口径：人物参考图固定 ${CHARACTER_REFERENCE_RATIO}（不等于项目最终视频画幅）`}
                   </Tag>
                 ) : null}
-                {(['character', 'scene', 'prop'] as ProjectSignalAssetType[]).map((type) => (
+                {(['character', 'scene', 'prop'] as const).map((type) => (
                   <Button
                     key={type}
                     size="small"

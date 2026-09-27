@@ -100,6 +100,8 @@ const REGISTERED_FILES: readonly string[] = [
   'ActorAssetEditPage.tsx',
   'AssetManager.tsx',
   'CostumeAssetEditPage.tsx',
+  /* 商品（第五类资产）：编辑页与页签是本轮为「商品图上传 + 手动定版」新增的入口 */
+  'ProductAssetEditPage.tsx',
   'PropAssetEditPage.tsx',
   'SceneAssetEditPage.tsx',
   'assetAdapters.ts',
@@ -112,6 +114,7 @@ const REGISTERED_FILES: readonly string[] = [
   'tabs/ActorsTab.tsx',
   'tabs/AssetTypeTab.tsx',
   'tabs/CostumesTab.tsx',
+  'tabs/ProductsTab.tsx',
   'tabs/PropsTab.tsx',
   'tabs/ScenesTab.tsx',
   'utils.ts',

@@ -18,6 +18,7 @@ import {
   WORKBENCH_STATUS_TONE,
   WORKBENCH_TAB_LABEL,
   isBatchEligible,
+  isWorkbenchTabType,
   isWorkbenchSubmittable,
   needsPromptRegeneration,
   workbenchItemKey,
@@ -48,12 +49,29 @@ export type AssetCardGridProps = {
   onOpenDetail: (item: AssetWorkbenchItem, focus?: { shotIndex?: number }) => void
   onEditPrompt: (item: AssetWorkbenchItem) => void
   onGenerateOne: (item: AssetWorkbenchItem, operation: 'generate' | 'regenerate') => void
+  /**
+   * 打开既有资产编辑页（工作台注入）。
+   *
+   * 商品的图**不走出图通道**：它在这一屏的主操作是「上传图片 / 设为定版」，
+   * 落到商品资产编辑页（复用实体 CRUD 的上传与 `is_primary`），所以卡片上给的是这个入口。
+   */
+  onOpenAssetEditor?: (item: AssetWorkbenchItem) => void
   /** 资料编辑入口（由工作台注入既有「补充/修改资产资料」组件） */
   renderProfileEditor: (item: AssetWorkbenchItem) => ReactNode
 }
 
 export function AssetCardGrid(props: AssetCardGridProps) {
-  const { items, selectedKeys, busy, onToggleSelect, onOpenDetail, onEditPrompt, onGenerateOne, renderProfileEditor } = props
+  const {
+    items,
+    selectedKeys,
+    busy,
+    onToggleSelect,
+    onOpenDetail,
+    onEditPrompt,
+    onGenerateOne,
+    onOpenAssetEditor,
+    renderProfileEditor,
+  } = props
   const selected = new Set(selectedKeys)
 
   if (items.length === 0) {
@@ -73,15 +91,21 @@ export function AssetCardGrid(props: AssetCardGridProps) {
     >
       {items.map((item) => {
         const key = workbenchItemKey(item)
-        const type = workbenchItemType(item)
+        const bucket = workbenchItemType(item)
+        /* 未登记的类型（`other`）不冒充某一类资产：卡片照旧显示，但类型名与出图动作都按"不认识"处理。 */
+        const type = isWorkbenchTabType(bucket) ? bucket : null
         const statusKey = workbenchStatusKey(item)
         const label = workbenchStatusLabel(item)
         const requiresNewPrompt = needsPromptRegeneration(item)
         const eligible = isBatchEligible(item)
-        const submittable = isWorkbenchSubmittable(type)
+        const submittable = type !== null && isWorkbenchSubmittable(type)
         /** 单项生成按钮的禁用原因（不撒谎：能点就点，不能点就说清楚为什么） */
         const generateBlockedReason = !submittable
-          ? '服装暂不支持批量出图，可以先保存资料与提示词'
+          ? type === 'product'
+            ? '商品图不走出图通道：请在商品资产页上传图片并「设为定版」'
+            : type === null
+              ? '这一项的类型当前版本还不认识，先不要在这里出图'
+              : '服装暂不支持批量出图，可以先保存资料与提示词'
           : requiresNewPrompt
             ? '这条提示词需要先重新生成提示词，再生成图片'
             : !eligible
@@ -119,7 +143,7 @@ export function AssetCardGrid(props: AssetCardGridProps) {
                   >
                     {workbenchItemName(item)}
                   </button>
-                  <div className="text-[11px] text-gray-400">{WORKBENCH_TAB_LABEL[type]}</div>
+                  <div className="text-[11px] text-gray-400">{WORKBENCH_TAB_LABEL[bucket]}</div>
                 </div>
               </div>
               <Tag bordered={false} color={TONE_COLOR[WORKBENCH_STATUS_TONE[statusKey]]}>
@@ -177,9 +201,16 @@ export function AssetCardGrid(props: AssetCardGridProps) {
                 详情
               </Button>
               {renderProfileEditor(item)}
-              <Button size="small" type="text" onClick={() => onEditPrompt(item)}>
-                {requiresNewPrompt ? '重新生成提示词' : '修改提示词'}
-              </Button>
+              {/* 商品：没有提示词可写（它不在出图链路上），主操作换成去资产页上传图片并定版 */}
+              {type === 'product' && onOpenAssetEditor ? (
+                <Button size="small" type="primary" ghost onClick={() => onOpenAssetEditor(item)}>
+                  上传图片 / 设为定版
+                </Button>
+              ) : (
+                <Button size="small" type="text" onClick={() => onEditPrompt(item)}>
+                  {requiresNewPrompt ? '重新生成提示词' : '修改提示词'}
+                </Button>
+              )}
               {hasImg ? (
                 <Tooltip title={generateBlockedReason}>
                   <Button

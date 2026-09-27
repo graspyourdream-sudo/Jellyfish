@@ -195,12 +195,14 @@ export type ProjectStepInput = {
   chaptersWithTextCount?: number | null
   /** 镜头总数（默认按当前集口径传入） */
   shotCount?: number | null
-  /** 项目资产数量：角色 / 场景 / 道具（+ 服装，可选） */
+  /** 项目资产数量：角色 / 场景 / 道具（+ 服装、商品，可选） */
   assetCounts?: {
     characters?: number | null
     scenes?: number | null
     props?: number | null
     costumes?: number | null
+    /** 商品（第五类资产）：计入「资产准备」的完成度，口径与后端 `project_asset_readiness` 一致 */
+    products?: number | null
   } | null
   /** 已有参考图片的资产数量（后端 thumbnail 非空即视为已有图） */
   assetImageCount?: number | null
@@ -283,8 +285,11 @@ export function resolveProjectStep(input?: ProjectStepInput | null): ProjectStep
   const characters = toCount(source.assetCounts?.characters)
   const scenes = toCount(source.assetCounts?.scenes)
   const props = toCount(source.assetCounts?.props)
-  // 第 3 步的完成判定只看角色/场景/道具三类（服装是可选补充，不阻塞流程）。
-  const totalAssets = characters + scenes + props
+  const products = toCount(source.assetCounts?.products)
+  /* 资产准备的完成度按**角色 / 场景 / 道具 / 商品**算：
+     服装仍然是可选补充（不阻塞流程），而商品是剧情广告这条链的必需资产
+     （它没有图就没法在成片里出现），所以必须计入 —— 口径与后端 `project_asset_readiness` 的五类一致。 */
+  const totalAssets = characters + scenes + props + products
   const assetImageCount = toCount(source.assetImageCount)
   const assetsWithImagePromptCount = toOptionalCount(source.assetsWithImagePromptCount)
   const assetsWithPrimaryCount = toOptionalCount(source.assetsWithPrimaryCount)
@@ -303,8 +308,8 @@ export function resolveProjectStep(input?: ProjectStepInput | null): ProjectStep
       ])
     }
     if (totalAssets <= 0) {
-      return buildResolution('extract_assets', '已有视频提示词，但项目还没有角色/场景/道具资产', [
-        '还没有项目资产（角色 / 场景 / 道具）',
+      return buildResolution('extract_assets', '已有视频提示词，但项目还没有角色/场景/道具/商品资产', [
+        '还没有项目资产（角色 / 场景 / 道具 / 商品）',
       ])
     }
     const hasAssetImagesPrompts = assetsWithImagePromptCount === null ? assetImageCount > 0 : assetsWithImagePromptCount > 0
@@ -341,8 +346,8 @@ export function resolveProjectStep(input?: ProjectStepInput | null): ProjectStep
 
   // 3. 有分镜但没有项目资产 → 提取资产
   if (totalAssets <= 0) {
-    return buildResolution('extract_assets', '已有分镜，但项目还没有角色/场景/道具资产', [
-      '还没有项目资产（角色 / 场景 / 道具）',
+    return buildResolution('extract_assets', '已有分镜，但项目还没有角色/场景/道具/商品资产', [
+      '还没有项目资产（角色 / 场景 / 道具 / 商品）',
     ])
   }
 
@@ -376,7 +381,7 @@ export function resolveProjectStep(input?: ProjectStepInput | null): ProjectStep
 
   // 6. 有提示词但镜头没有关联资产 → 关联绑定
   if (shotsWithAssetLinkCount <= 0) {
-    return buildResolution('binding', '已有视频提示词，但镜头还没有绑定角色/场景/道具', [
+    return buildResolution('binding', '已有视频提示词，但镜头还没有绑定角色/场景/道具/商品', [
       '镜头还没有关联任何资产',
     ])
   }
