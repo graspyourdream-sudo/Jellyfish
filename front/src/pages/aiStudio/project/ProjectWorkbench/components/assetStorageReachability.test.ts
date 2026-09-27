@@ -182,3 +182,42 @@ test('没有图 / 演练占位 / 已是定版 → 不给设成定版入口', () 
   assert.equal(canSetPrimaryResult({ status: 'done', outcome: 'ok', imageUrl: 'https://dry-run.invalid/a.png', isPrimary: false, adoptedUrl: '' }), false)
   assert.equal(canSetPrimaryResult({ status: 'done', outcome: 'ok', imageUrl: 'https://cdn.example.com/a.png', isPrimary: true, adoptedUrl: '' }), false)
 })
+
+// —— 第 35 轮：正常成功的结果地址在 ossUrl，判定必须认它 ——
+
+test('正常成功（地址在 oss_url）也必须能采纳（改前只看 imageUrl → 成功卡没有采纳）', () => {
+  assert.equal(
+    canAdoptResult({
+      status: 'done',
+      outcome: 'ok',
+      imageUrl: '',
+      ossUrl: 'https://cdn.example.com/scene.png',
+      adoptedImageId: null,
+    }),
+    true,
+  )
+})
+
+test('正常成功（地址在 oss_url）也必须能设为定版', () => {
+  assert.equal(
+    canSetPrimaryResult({
+      status: 'done',
+      outcome: 'ok',
+      imageUrl: '',
+      ossUrl: 'https://cdn.example.com/scene.png',
+      isPrimary: false,
+      adoptedUrl: '',
+    }),
+    true,
+  )
+})
+
+test('三个地址字段都没有（或都是演练占位）→ 两个入口都不给', () => {
+  for (const t of [
+    { imageUrl: '', ossUrl: '', adoptedUrl: '' },
+    { imageUrl: 'https://dry-run.invalid/a.png', ossUrl: '', adoptedUrl: '' },
+  ]) {
+    assert.equal(canAdoptResult({ status: 'done', outcome: 'ok', adoptedImageId: null, ...t }), false)
+    assert.equal(canSetPrimaryResult({ status: 'done', outcome: 'ok', isPrimary: false, ...t }), false)
+  }
+})

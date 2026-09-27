@@ -1191,12 +1191,16 @@ export function describeFailureReason(result: Pick<SubmitResultLike, 'error_mess
  *
  * 口径：已定版的不再给；其余凡是有可用图片地址（含**部分成功**）就给，让用户能把救回来的图定下来。
  */
-export function canSetPrimaryResult(
-  task: Pick<ProductionTask, 'status' | 'outcome' | 'imageUrl' | 'isPrimary' | 'adoptedUrl'>,
-): boolean {
+export function canSetPrimaryResult(task: {
+  status: ProductionTask['status']
+  outcome?: string
+  imageUrl?: string
+  ossUrl?: string
+  adoptedUrl?: string
+  isPrimary?: boolean
+}): boolean {
   if (task.isPrimary === true) return false
-  const imageUrl = String(task.imageUrl || '').trim() || String(task.adoptedUrl || '').trim()
-  if (!imageUrl || isPlaceholderUrl(imageUrl)) return false
+  if (!hasUsableResultAddress(task)) return false
   if (task.status === 'done') return true
   return String(task.outcome || '') === 'partial_failed'
 }
@@ -1214,14 +1218,39 @@ export function canSetPrimaryResult(
  * - 有**可用**图片地址（非空、且不是演练占位）→ 可以采纳（含部分成功）；
  * - 其它（纯失败、没有图）→ 不给。
  */
-export function canAdoptResult(
-  task: Pick<ProductionTask, 'status' | 'outcome' | 'imageUrl' | 'adoptedImageId'>,
-): boolean {
+export function canAdoptResult(task: {
+  status: ProductionTask['status']
+  outcome?: string
+  imageUrl?: string
+  ossUrl?: string
+  adoptedUrl?: string
+  adoptedImageId?: number | null
+}): boolean {
   if (task.adoptedImageId !== null && task.adoptedImageId !== undefined) return false
-  const imageUrl = String(task.imageUrl || '').trim()
-  if (!imageUrl || isPlaceholderUrl(imageUrl)) return false
+  if (!hasUsableResultAddress(task)) return false
   if (task.status === 'done') return true
   return String(task.outcome || '') === 'partial_failed'
+}
+
+/**
+ * 这条结果有没有**可用**的图片地址。
+ *
+ * 第 35 轮实测踩到的坑：改前两个判定只看 `imageUrl`，可是**正常成功**的结果地址在 `ossUrl`
+ * （公网长期地址），`imageUrl` 是空的 —— 于是"出图成功"的卡片**既没有「采纳」也没有「设为定版」**，
+ * 页面只剩「查看详情」，等于把一张真出好的图锁死在结果区里。
+ * 三个阶段各有一个字段：临时（image_url）/ 长期（oss_url）/ 已采纳（adoptedUrl），
+ * 判定必须都认。
+ */
+function hasUsableResultAddress(task: {
+  imageUrl?: string
+  ossUrl?: string
+  adoptedUrl?: string
+}): boolean {
+  for (const raw of [task.ossUrl, task.imageUrl, task.adoptedUrl]) {
+    const value = String(raw || '').trim()
+    if (value && !isPlaceholderUrl(value)) return true
+  }
+  return false
 }
 
 /**
