@@ -363,11 +363,17 @@ async def _load_asset_rows(
 
     if asset_type == "character":
         stmt = select(Character).where(Character.project_id == project_id).order_by(Character.id)
+    # 注意：这三条都 join 了「项目关联表」，而关联表里**允许出现重复行**
+    # （实测：本项目的场景有 1 条重复、道具 3 条重复）。没有 distinct 时，一个资产会被装成
+    # **两个一模一样的 target** → 两次 create → 结果区两条相同项。
+    # 真实上游会按幂等键去重、所以不会重复计费，但**换一个不去重的上游就是双倍计费**，
+    # 而且结果区一定会出现重复项。所以这里必须去重（按主键 distinct，语义就是"一个资产一次"）。
     elif asset_type == "scene":
         stmt = (
             select(Scene)
             .join(ProjectSceneLink, ProjectSceneLink.scene_id == Scene.id)
             .where(ProjectSceneLink.project_id == project_id)
+            .distinct()
             .order_by(Scene.id)
         )
     elif asset_type == "prop":
@@ -375,6 +381,7 @@ async def _load_asset_rows(
             select(Prop)
             .join(ProjectPropLink, ProjectPropLink.prop_id == Prop.id)
             .where(ProjectPropLink.project_id == project_id)
+            .distinct()
             .order_by(Prop.id)
         )
     elif asset_type == "costume":
@@ -382,6 +389,7 @@ async def _load_asset_rows(
             select(Costume)
             .join(ProjectCostumeLink, ProjectCostumeLink.costume_id == Costume.id)
             .where(ProjectCostumeLink.project_id == project_id)
+            .distinct()
             .order_by(Costume.id)
         )
     else:
