@@ -388,6 +388,14 @@ export type WorkbenchCommandCounts = {
   generating: number
   /** 已选中、出图服务不支持的项（服装按既有口径仍算支持；商品与未登记类型进这里） */
   unsupported: number
+  /**
+   * 已选中、类型是**未登记**的项（``'other'``：后端给了我们不认识的 `asset_type`）。
+   *
+   * 为什么要从 `unsupported` 里单独分出来：主区要如实说清"哪几项没参与、为什么"，
+   * 而"商品（图由人工上传并手动定版）"与"这一项的类型当前版本还不认识"是**两种不同的原因**，
+   * 合成一句话必然把其中一类说错。
+   */
+  unregistered: number
   /** 已选中、类型是**商品**的项（商品图由人工上传 + 手动定版，不走出图通道） */
   products: number
   /** 已选中、可进批量但没有提示词的项 */
@@ -412,6 +420,15 @@ export type WorkbenchCommand = {
   primaryAction: WorkbenchPrimaryAction
   /** 明细行：已选 / 待生成 / 需重新生成 / 生成中 */
   detail: string
+  /**
+   * 主区的一句「**哪几项没参与本轮、为什么**」（空串 = 选中的项全都参与）。
+   *
+   * 为什么必须有：`counts.unsupported` 以前算了但**没有任何渲染点**，
+   * 于是"人物 + 商品混选"时商品被**静默排除** —— 主按钮说的是
+   * 「本轮将处理 1 项资产」，用户完全看不出另一项为什么没算进去、
+   * 也不知道该去哪儿把那个商品做完。这里把原因逐类写清（商品 / 未登记类型两种）。
+   */
+  unsupportedNotice: string
   /** 主按钮文案 */
   primaryLabel: string
   primaryDisabled: boolean
@@ -475,6 +492,7 @@ function countSelected(
     needsRegeneration: 0,
     generating: 0,
     unsupported: 0,
+    unregistered: 0,
     products: 0,
     withoutPrompt: 0,
     needsPrompt: 0,
@@ -487,6 +505,9 @@ function countSelected(
        它们要么不走出图通道，要么我们根本不知道它是什么。 */
     if (!isWorkbenchTabType(bucket) || !isWorkbenchSubmittable(bucket)) {
       counts.unsupported += 1
+      /* 两种原因分开记（商品已在上面单独计过，这里只补"未登记类型"）：
+         主区要把"哪几项没参与、为什么"逐类说清，见 `unsupportedNotice`。 */
+      if (!isWorkbenchTabType(bucket)) counts.unregistered += 1
       return
     }
     if (workbenchStatusKey(item) === 'generating') {
@@ -524,7 +545,31 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
     `可生成图片 ${counts.generatable}`,
     `提示词需重写 ${counts.needsRegeneration}`,
     `生成中 ${counts.generating}`,
+    // 有项没参与时把它也放进明细：主区任何一处看得见的地方都不许"少算却不说"
+    ...(counts.unsupported > 0 ? [`不参与出图 ${counts.unsupported}`] : []),
   ].join(' · ')
+
+  /**
+   * 「没参与本轮的项」逐类说明 —— 两种原因不能合成一句话说：
+   * - 商品：**不是失败**，它的图由人工上传并手动「设为定版」，本来就不走这条出图通道；
+   * - 未登记类型：后端给了当前版本不认识的 `asset_type`，我们**不知道**该怎么出图。
+   *
+   * 文案里刻意不出现接口名、字段名与原始状态值（主区口径）。
+   */
+  const unsupportedNotice = (() => {
+    if (counts.unsupported === 0) return ''
+    const reasons: string[] = []
+    if (counts.products > 0) {
+      reasons.push(
+        `${counts.products} 项商品：商品的图片由人工上传并手动「设为定版」，不走出图通道 —— 请在商品卡片上点「上传图片 / 设为定版」`,
+      )
+    }
+    if (counts.unregistered > 0) {
+      reasons.push(`${counts.unregistered} 项类型当前版本还不认识：先不要在这里出图，可在「技术详情」里看它的原始类型`)
+    }
+    const head = `本轮有 ${counts.unsupported} 项选中资产不参与出图`
+    return reasons.length > 0 ? `${head}：${reasons.join('；')}。` : `${head}。`
+  })()
 
   if (!analyzed) {
     const hint = String(analysis?.hint ?? '').trim()
@@ -541,6 +586,7 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
       primaryDisabledReason: '还没有分析过本章资产：先点「分析本章资产」。',
       primaryDisabledDetail: hint ? maskInternalIds(hint) : '',
       primaryHint: '',
+      unsupportedNotice,
       regenerateLabel: '批量重新生成已选项',
       regenerateDisabled: true,
       generateImagesLabel: '批量生成图',
@@ -637,6 +683,8 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
     primaryDisabledDetail: '',
     // 可用时也给一句"点了会发生什么/花几次钱"（用户明确要求按钮旁就能看到）
     primaryHint: primaryDisabled ? '' : primaryHint,
+    // 有项没参与就一定要在主区说清原因（人物 + 商品混选时商品不能被静默排除）
+    unsupportedNotice,
     regenerateLabel:
       counts.regeneratable > 0 ? `批量重新生成已选项（${counts.regeneratable}）` : '批量重新生成已选项',
     regenerateDisabled,

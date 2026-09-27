@@ -170,11 +170,11 @@ export function WorkbenchCommandBar(props: WorkbenchCommandBarProps) {
         </Space>
       </div>
 
-      {/* 四类数量 + 七个业务状态计数 */}
+      {/* 五类资产数量 + 七个业务状态计数（商品是第五类资产，与其余四类同一排） */}
       <div className="mt-1 flex flex-wrap items-center gap-1">
         {WORKBENCH_TABS.map((tab) => (
           /*
-            这四个标签以前是**纯展示**的（`Tag` 没有 onClick，`onSelectTab` 收到了却从没被调用），
+            这些标签以前是**纯展示**的（`Tag` 没有 onClick，`onSelectTab` 收到了却从没被调用），
             于是第 2 步的资产网格永远只显示「人物」：场景/道具/服装只有计数、点不动，
             用户没法给它们生成图片或设成定版 —— 而这一步自己的说明写的是
             「整理人物、场景、道具、服装 → … → 生成或上传图片 → 设为定版」。
@@ -210,6 +210,21 @@ export function WorkbenchCommandBar(props: WorkbenchCommandBarProps) {
           <div className="text-[11px] text-gray-500" data-testid="command-detail">
             {command.detail}
           </div>
+          {/*
+            有选中项不参与本轮时必须**在主区说清哪几项、为什么**：
+            「人物 + 商品」混选时商品不在出图通道上，以前它被静默排除
+            （`counts.unsupported` 算了但没有任何渲染点），主按钮只说
+            「本轮将处理 N 项资产」，用户看不出另一项为什么没算、该去哪儿把这一项做完。
+            这一句是本页自己写死的中文原因，不含后端字段名与原始状态值。
+          */}
+          {command.unsupportedNotice ? (
+            <Typography.Text
+              className="mt-0.5 block text-[11px] text-amber-700"
+              data-testid="command-unsupported-notice"
+            >
+              {command.unsupportedNotice}
+            </Typography.Text>
+          ) : null}
           {/* 主区：本页自己写的下一步说明（后端 hint 不在这里） */}
           {analysisHintMain ? (
             <Typography.Text type="secondary" className="text-[11px]" data-testid="analysis-hint">

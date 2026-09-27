@@ -49,6 +49,9 @@ import {
 
 import { buildDegradedWorkbench } from './assetWorkbenchContract.ts'
 
+/* 本目录（源码扫描用；与 `userFacingCopy.test.ts` 同一套做法）。 */
+const here = dirname(fileURLToPath(import.meta.url))
+
 /* ------------------------------------------------------------------ 测试夹具 */
 
 function item(overrides: Partial<WorkbenchItemLike> & { asset_type: string; asset_id: string }): WorkbenchItemLike {
@@ -695,4 +698,105 @@ test('「全选本页签」选中的项与「批量生成图」口径一致（�
   // 全选只收可批量项；其中"还没有图片"的项数就是批量生成图按钮上的数字
   assert.deepEqual(allKeys.sort(), ['character:char-1', 'character:char-3', 'character:char-5', 'character:char-6'])
   assert.equal(command.generateImagesCount, 1) // 只有 char-1 还没有图片
+})
+
+/* ------------------------------------------- ⑧ 「哪几项没参与本轮、为什么」必须在主区说清 */
+
+test('人物 + 商品混选：商品不被静默排除，主区必须给出原因与去处', () => {
+  const items = [
+    item({ asset_type: 'character', asset_id: 'char-1', name: '苏晚棠' }),
+    item({
+      asset_type: 'product',
+      asset_id: 'prod-1',
+      name: '焕颜精华',
+      batch_eligible: false,
+      prompt: { text: '', saved: false, quality: null },
+      status: { key: 'ready', label: '可以生成' },
+    }),
+  ]
+  const command = deriveWorkbenchCommand({
+    items,
+    selectedKeys: ['character:char-1', 'product:prod-1'],
+    analysis: { generated: true },
+  })
+
+  // 计数如实分开
+  assert.equal(command.counts.selected, 2)
+  assert.equal(command.counts.products, 1)
+  assert.equal(command.counts.unsupported, 1)
+  assert.equal(command.counts.unregistered, 0)
+  // 明细行不许"少算却不说"
+  assert.match(command.detail, /不参与出图 1/)
+  // 主区必须说清：多少项、为什么、该去哪儿做
+  assert.match(command.unsupportedNotice, /本轮有 1 项选中资产不参与出图/)
+  assert.match(command.unsupportedNotice, /1 项商品/)
+  assert.match(command.unsupportedNotice, /人工上传/)
+  assert.match(command.unsupportedNotice, /设为定版/)
+})
+
+test('没有不参与的项时，主区不出现这一句（不制造噪音、也不假报）', () => {
+  const command = deriveWorkbenchCommand({
+    items: fixture(),
+    selectedKeys: ['character:char-1'],
+    analysis: { generated: true },
+  })
+  assert.equal(command.counts.unsupported, 0)
+  assert.equal(command.unsupportedNotice, '')
+  assert.doesNotMatch(command.detail, /不参与出图/)
+})
+
+test('只选商品：原因仍然在主区（与"混选"同一套说法，不是另一套）', () => {
+  const items = [
+    item({ asset_type: 'product', asset_id: 'prod-1', name: '焕颜精华', batch_eligible: false }),
+  ]
+  const command = deriveWorkbenchCommand({
+    items,
+    selectedKeys: ['product:prod-1'],
+    analysis: { generated: true },
+  })
+  assert.equal(command.counts.unsupported, 1)
+  assert.match(command.unsupportedNotice, /1 项商品/)
+  // 除主按钮禁用原因之外，还额外给出"没参与本轮"的整句说明
+  assert.match(command.primaryDisabledReason, /人工上传/)
+})
+
+test('未登记类型：原因**区别于**商品（两种原因不许合成一句话说错）', () => {
+  const items = [
+    item({ asset_type: 'faction', asset_id: 'faction-1', name: '侯府阵营' }),
+    item({ asset_type: 'product', asset_id: 'prod-1', name: '焕颜精华', batch_eligible: false }),
+  ]
+  const command = deriveWorkbenchCommand({
+    items,
+    selectedKeys: ['other:faction-1', 'product:prod-1'],
+    analysis: { generated: true },
+  })
+  assert.equal(command.counts.unsupported, 2)
+  assert.equal(command.counts.products, 1)
+  assert.equal(command.counts.unregistered, 1)
+  assert.match(command.unsupportedNotice, /1 项商品/)
+  assert.match(command.unsupportedNotice, /1 项类型当前版本还不认识/)
+  assert.match(command.unsupportedNotice, /本轮有 2 项选中资产不参与出图/)
+})
+
+test('护栏：主区这句不含接口名 / 字段名 / 原始状态值（含未登记类型时也一样）', () => {
+  const items = [
+    item({ asset_type: 'faction', asset_id: 'faction-1', name: '侯府阵营' }),
+    item({ asset_type: 'product', asset_id: 'prod-1', name: '焕颜精华', batch_eligible: false }),
+  ]
+  const command = deriveWorkbenchCommand({
+    items,
+    selectedKeys: ['other:faction-1', 'product:prod-1'],
+    analysis: { generated: true },
+  })
+  const text = `${command.unsupportedNotice} ${command.detail}`
+  assert.deepEqual(findMainScreenForbiddenTerms(text), [])
+  assert.doesNotMatch(text, /asset_type|file_id|task_id|provider|DRY_RUN|\/api\//)
+})
+
+test('护栏：这句原因在**主界面组件里真的有渲染点**（防"算了但没人渲染"的原缺陷重演）', () => {
+  /* 原缺陷的形态正是"`counts.unsupported` 算了、却没有任何渲染点"，
+     所以只测派生函数是不够的：必须钉住主界面组件确实把这句话渲染出来。 */
+  const source = readFileSync(join(here, 'WorkbenchCommandBar.tsx'), 'utf-8')
+  assert.match(source, /command\.unsupportedNotice/, '主界面必须渲染 unsupportedNotice')
+  assert.match(source, /command-unsupported-notice/, '渲染点要带稳定的 testid，浏览器验收与回归都靠它定位')
 })
