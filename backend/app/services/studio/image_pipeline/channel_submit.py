@@ -40,6 +40,7 @@ from app.services import paid_outlet_guard
 from app.services.studio.image_pipeline import asset_strategies as strategies
 from app.services.studio.image_pipeline import costume_channel
 from app.services.studio.image_pipeline import image_pipeline as pipeline
+from app.services.studio.image_pipeline import storage_precheck
 from app.services.studio.llm_orchestration import dry_run
 
 #: 混合批量的汇总口径：一次请求用到两条通道时 ``asset_type`` 的展示值
@@ -317,6 +318,22 @@ async def submit_channel_groups(
     （与 ``vendor_builder`` 同理，保留路由层既有的单测接缝）。
     """
     submitter = vendor_submitter or pipeline.submit_targets
+    # **免费存储预检**（一次请求只探一次；只读、不花钱）：确认长期存储接得住这次出图。
+    #
+    # 为什么放在**建任务之前**、且只在上游通道有目标时做：没有目标就没有花费，不必探；
+    # 真实演练里正是这里放过去了一次"图出来了、OSS 403 取不回来"的付费调用。
+    # 注意"拦下"只用在**上游给出明确否定证据**（没配置 / 明确不可写）时；探不动属于不确定，
+    # 只写进 warnings 降级放行 —— 细节与理由见 `storage_precheck` 的模块文档。
+    vendor_groups = [
+        g for g in groups if g.channel == strategies.CHANNEL_VENDOR_SERVICE and g.targets
+    ]
+    if vendor_groups:
+        readiness = await storage_precheck.ensure_vendor_storage_ready_or_raise(transport=transport)
+        if readiness.state != storage_precheck.STATE_WRITABLE and readiness.message:
+            note = readiness.message + (" " + readiness.fix_hint if readiness.fix_hint else "")
+            for group in vendor_groups:
+                group.warnings.append(note)
+
     results: list[ImageTaskResultRead] = []
     for group in groups:
         if not group.targets:
@@ -381,7 +398,11 @@ async def _submit_group(
     preflight: Any,
     vendor_submitter: Any = None,
 ) -> list[ImageTaskResultRead]:
-    """把一个组交给它自己那条通道（逐项分流唯一落地处）。"""
+    """把一个组交给它自己那条通道（逐项分流唯一落地处）。
+
+    上游通道的**存储预检**由调用方 :func:`submit_channel_groups` 在进入本函数之前统一做过
+    （一次请求只探一次上游健康状态），因此这里不再重复探测。
+    """
     if group.channel == strategies.CHANNEL_VENDOR_SERVICE:
         submitter = vendor_submitter or pipeline.submit_targets
         return await submitter(

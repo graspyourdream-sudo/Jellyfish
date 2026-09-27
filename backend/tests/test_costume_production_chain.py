@@ -792,7 +792,10 @@ async def test_mixed_batch_real_mode_uses_both_channels_per_item(
         assert by_type[asset_type].channel == EXPECTED_CHANNELS[asset_type]
         assert by_type[asset_type].outcome == "ok"
     assert channel_submit.channel_counts(results) == {"vendor_service": 3, "apimart": 1}
-    assert _forbid_any_outbound == []
+    # 上游通道在**建任务之前**会先做一次「免费存储预检」：只读上游健康状态（不花钱）。
+    # 本文件的"零出站"是为了防真实付费调用，因此把这唯一一次只读探测如实登记出来，
+    # 其余任何出站仍然必须为空。
+    assert [hit for hit in _forbid_any_outbound if not hit.endswith(image_client.HEALTH_PATH)] == []
 
 
 @pytest.mark.asyncio
@@ -842,7 +845,8 @@ async def test_mixed_batch_one_item_failure_does_not_poison_others(
     assert summary["failed_count"] == 1
     assert summary["by_channel"] == {"vendor_service": 3, "apimart": 1}
     assert summary["outcome"] == "partial_failed"
-    assert _forbid_any_outbound == []
+    # 同上：只放行"免费存储预检"那一次只读探测（上游健康状态），别的出站一律不许。
+    assert [hit for hit in _forbid_any_outbound if not hit.endswith(image_client.HEALTH_PATH)] == []
 
 
 def test_duplicate_asset_type_items_are_rejected(route_client: TestClient) -> None:
