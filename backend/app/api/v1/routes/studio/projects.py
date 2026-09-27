@@ -183,6 +183,11 @@ async def _setup_ad_project(
                     },
                 )
             card_fields["name"] = product.name
+            # 已有商品的自由文本描述落到 `notes`：**与 `product_extraction` 的
+            # `source_type=existing` 分支同一口径**（那边也是 description → notes）。
+            # 两处不一致的话，"创建时选已有商品"与"到策划页再点一次提取"会得到两张
+            # 内容不同的卡，用户会以为资料丢了。
+            card_fields["notes"] = product.description or ""
             source_summary = {
                 "origin": "project_create",
                 "source_type": "existing",
