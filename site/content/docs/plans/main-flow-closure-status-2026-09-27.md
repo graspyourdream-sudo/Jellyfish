@@ -1090,6 +1090,39 @@ id=227  scene_id=asset_1790138604722_scene  chapter_id=33696d3f-…  shot_id=e76
    `GET /api/service/asset-image-tasks/{id}` 里，客户端必须再查一次才能拿到；
    若 create 直接回 `images[].oss_url` / `local_path`，可以少一次查询（我们这边已经做了兜底补查）。
 
+**建议实现片段（补丁级，供上游直接照抄）**
+
+```js
+// src/ossUploader.js
+let _writeProbeCache = { at: 0, result: null }
+export async function probeOssWritable(env = process.env, { ttlMs = 60000 } = {}) {
+  const cfg = ossConfig(env)
+  if (!cfg.configured) return { writable: false, blocked_reason: `OSS 配置不完整，缺少：${cfg.missing.join('、')}` }
+  if (_writeProbeCache.result && Date.now() - _writeProbeCache.at < ttlMs) return _writeProbeCache.result
+  const key = `jellyfish/health/write-probe-${Date.now()}.txt`
+  let result
+  try {
+    await uploadBufferToOss({ key, body: Buffer.from('ok'), contentType: 'text/plain', env }) // PUT
+    await deleteObjectFromOss({ key, env })                                                  // 写完立刻删
+    result = { writable: true, blocked_reason: '' }
+  } catch (err) {
+    // 只带 OSS 返回的 <Code>/<Message> 摘要；**绝不放 AccessKey / 签名**
+    result = { writable: false, blocked_reason: String((err && err.message) || err).slice(0, 200) }
+  }
+  _writeProbeCache = { at: Date.now(), result }
+  return result
+}
+
+// src/server.js · handleServiceHealth（既有字段不动，只加三个；该处理函数需改成 async）
+const probe = await probeOssWritable(process.env)
+json(res, { ok: true, service: 'ai-image-tool', version: 'v0', queue: queueSummary(),
+  oss: { configured: oss.configured, missing: oss.missing, public_base_url: oss.publicBaseUrl || '',
+         writable: probe.writable, blocked_reason: probe.blocked_reason, probe_at: new Date().toISOString() } })
+```
+
+需要补两个最小原语：`uploadBufferToOss`（`uploadImageToOss` 现在只收本地文件路径）与
+`deleteObjectFromOss`。**探针必须"写完立刻删"**，别在桶里留垃圾；TTL 缓存避免健康检查把桶写穿。
+
 **验收口径**：把出图服务的账号改成只读（或指向不可写的桶）后，`GET /api/service/health` 必须
 返回 `oss.writable=false` 且给出可读原因；此时 Jellyfish 侧的免费存储预检会**在提交前拦下**
 （`storage_not_ready` + 中文修法），**不会产生任何费用**。
