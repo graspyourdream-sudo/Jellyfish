@@ -42,7 +42,6 @@ from app.models.studio import Chapter, Project, Shot
 from app.schemas.studio.drama_plan import (
     DEFAULT_STAGE,
     STAGE_ALL,
-    STAGE_ONE_LINER,
     STAGE_STORY,
     STAGE_STORYBOARD,
     DramaBrief,

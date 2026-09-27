@@ -1253,7 +1253,7 @@ const ProjectLobby: React.FC = () => {
           <Form.Item name="description" label="项目简介（选填）">
             <Input.TextArea rows={4} placeholder="项目简介与风格说明，建议 80–120 字" />
           </Form.Item>
-          {/* 第一步：先选生产方式（两种起点最后汇入同一条生产流程） */}
+          {/* 第一步：先选生产方式（三种起点：从剧本开始 / 从视频提示词开始 / 剧情广告；最后汇入同一条生产流程） */}
           <Form.Item name="startMode" label="生产方式" rules={[{ required: true }]}>
             <Radio.Group className="w-full">
               <Space direction="vertical" size={4} className="w-full">

@@ -25,6 +25,10 @@ def _override_db(db: _FakeDB):
 
 def test_entity_existence_check_returns_success_envelope(client: TestClient, monkeypatch) -> None:
     async def _fake_check(self, **_kwargs):  # noqa: ANN001
+        # 五个桶都要给：真实服务（`entity_existence.check_names_existence`）**恒返回五个**，
+        # 商品是第五类资产。这里少一个不会被判为非法（响应模型有默认空列表），
+        # 而是会被**悄悄补成空列表** —— 于是期望值必须同样写全，
+        # 否则将来把 `ApiResponse.meta` 的全局口径修好之后，这条会立刻暴露出第二个失败原因。
         return {
             "characters": [
                 {
@@ -39,6 +43,7 @@ def test_entity_existence_check_returns_success_envelope(client: TestClient, mon
             "props": [],
             "scenes": [],
             "costumes": [],
+            "products": [],
         }
 
     monkeypatch.setattr(StudioEntitiesService, "check_names_existence", _fake_check)
@@ -76,6 +81,8 @@ def test_entity_existence_check_returns_success_envelope(client: TestClient, mon
             "props": [],
             "scenes": [],
             "costumes": [],
+            # 五类资产：商品（第五类）也必须在这一份期望里
+            "products": [],
         },
     }
 

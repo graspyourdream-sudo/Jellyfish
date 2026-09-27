@@ -38,7 +38,6 @@ from app.models.studio import (
     PropImage,
     Scene,
     SceneImage,
-    Shot,
 )
 from app.models.studio_ad_flow import ProductCard
 from app.models.studio_drama_plan import DramaPlanDraft
