@@ -805,6 +805,8 @@ def _result_from_submission(
         oss_url=oss_url,
         dry_run=False,
         error_message=upstream_error or str(task.message or ""),
+        # 本机上还留着图 → 即使上游报 failed，也属于"部分成功、图可以救"
+        recoverable_artifact=bool(local_path),
     )
     # 失败时优先说真话：上游的 error_message 排在笼统的创建响应 message 之前
     message = upstream_error or (
@@ -837,6 +839,13 @@ def _result_from_submission(
             "http_status": _http_status_from_text(upstream_error) if upstream_error else None,
             "oss_url": oss_url,
             "local_path": local_path,
+            "recoverable": bool(local_path) and outcome == OUTCOME_PARTIAL_FAILED,
+            "recoverable_hint": (
+                "图已经生成出来了（还在出图服务本机），只是长期存储没成功："
+                "可以直接采纳它，或修好存储后回填。"
+                if local_path and outcome == OUTCOME_PARTIAL_FAILED
+                else ""
+            ),
             "images": images,
             "status": status,
             "source_message": str(task.message or ""),
@@ -1065,8 +1074,17 @@ def normalize_outcome(
     oss_url: str = "",
     dry_run: bool = False,
     error_message: str = "",
+    recoverable_artifact: bool = False,
 ) -> str:
-    """把「上游状态 + ok 布尔 + 是否拿到长期地址」归一成一个明确的 outcome。"""
+    """把「上游状态 + ok 布尔 + 是否拿到长期地址」归一成一个明确的 outcome。
+
+    ``recoverable_artifact``（新）：本次是否**还留着能用的产物**（例如出图服务本机上那张图）。
+    为什么需要它：真实演练里出图服务把「图已经出来了、但它自己 OSS 上传 403」这件事报成
+    ``status=failed``，只从状态看就是"全失败"——可图明明在、而且**已经计费**了。
+    把它降级成 ``failed`` 会让页面只剩一句失败、用户以为白花了钱、也就不会去"采纳"那张图。
+    因此：状态是失败、但错误文本是存储相关、且**确实有可恢复产物**时，结论必须是
+    ``partial_failed``（部分成功）——既如实说明存储没成，又明确告诉用户图还在、可以救。
+    """
     if dry_run:
         outcome = OUTCOME_DRY_RUN
     else:
@@ -1079,6 +1097,13 @@ def normalize_outcome(
             outcome = OUTCOME_FAILED
         if outcome == OUTCOME_OK and not str(oss_url or "").strip() and _looks_like_oss_failure(error_message):
             # 状态说成功、却没有任何长期地址，而且错误文本是 OSS 相关 → 属于部分失败
+            outcome = OUTCOME_PARTIAL_FAILED
+        if (
+            outcome == OUTCOME_FAILED
+            and recoverable_artifact
+            and _looks_like_oss_failure(error_message)
+        ):
+            # 状态说失败，但产物还在且失败原因是存储 → 部分成功（别把已经花了钱的图报成全灭）
             outcome = OUTCOME_PARTIAL_FAILED
     return outcome
 
