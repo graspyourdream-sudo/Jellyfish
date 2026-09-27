@@ -135,3 +135,21 @@ test('正常成功且有图 → 可以采纳', () => {
     true,
   )
 })
+
+test('存储失败但**有**可取回地址 → 不能再说"没有拿到地址"（第23轮桩上游复现到的误报）', () => {
+  const text = describeFailureReasonWithStorageNote({
+    error_message: '出图成功但 OSS 上传失败：OSS 上传返回 HTTP 403 AccessDenied',
+    outcome: 'partial_failed',
+    image_url: 'http://127.0.0.1:4317/images/stub-artifact.png',
+  })
+  assert.doesNotMatch(text, /没有拿到可用的图地址/)
+})
+
+test('存储失败且确实没有地址 → 才加那句"可能已计费"的提醒', () => {
+  const text = describeFailureReasonWithStorageNote({
+    error_message: '出图成功但 OSS 上传失败：OSS 上传返回 HTTP 403 AccessDenied',
+    outcome: 'failed',
+    image_url: '',
+  })
+  assert.match(text, /没有拿到可用的图地址/)
+})

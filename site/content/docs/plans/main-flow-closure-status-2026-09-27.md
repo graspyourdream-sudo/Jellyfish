@@ -680,3 +680,31 @@ detail.recoverable = True ｜ detail.artifact_state = recoverable ｜ detail.loc
 **收尾（本轮已完成）**：桩已停；后端恢复 `dry_run`（四出口全 blocked）；隔离库完好
 （`files=140`、`projects=19`）。本轮**没有真实出图、没有任何真实计费**。
 另：第 22 轮那处 `health.queue.total` 696→697 的计数差异仍未解释，以任务记录为准。
+
+### 第 24 轮：桩上游复现暴露的一处**误报**已修；③ 缺口再缩小一层
+
+用第 23 轮那套受控桩上游（零成本）复现后，读到结果卡片的原文，发现两件事：
+
+**（1）已修：我的"没拿到地址"提醒是**无条件**追加的 → 误报**
+
+改前 `describeFailureReasonWithStorageNote` 只要失败原因像存储问题，就追一句
+「…但没有拿到可用的图地址，无法确认还能不能取回」。可是这一单**后端明明回了可取回的地址**
+（桩上游返回 `image_url=http://127.0.0.1:4317/images/stub-artifact.png`）。
+把"能救"说成"没拿到地址"，和把"没花钱"说成"花了钱"是同一类错误——**都是不老实**。
+
+现在按结果里到底有没有**可用地址**（非空、非演练占位）分支：有 → 只报失败原因；
+确实没有 → 才加那句提醒。新增 2 项反向控制测试（该文件 16 项通过），
+**并修掉了我在第 23 轮报告里对这条文案的描述**。
+
+**（2）③ 的缺口再缩小一层：卡片拿到的 `imageUrl` 是空的**
+
+同一份复现里，卡片**没有**出现「仅本机 · 不能用于后续生成」（那条标签要求 `imageUrl` 非空），
+也就解释了为什么 `canAdoptResult` 不给「采纳」——**`task.imageUrl` 在卡片里是空的**。
+而结果卡片显示的是**存储失败原文 + 我的提醒**，说明它拿到了正确的 `error_message`。
+
+据此下一轮的目标已经具体：**轮询/查询那条映射**（`assetProduction.ts` 里
+`errorMessage: describeFailureReasonWithStorageNote({ error_message: query.error_message, outcome: rawStatus })`
+那一带）把结果里的可取回地址（`image_url` / `local_path`）丢了 ——
+它只搬了 `error_message` 与 `outcome`，`imageUrl` 另取自 `query.local_path`；
+需要核对该查询回包是否真的带 `local_path`（若不带，则要在后端那条查询路由上补），
+补上之后页面才会既显示「部分成功 + 可恢复」，又给出「采纳」入口。

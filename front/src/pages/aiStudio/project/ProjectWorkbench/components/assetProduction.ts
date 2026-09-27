@@ -1205,12 +1205,24 @@ export function canAdoptResult(
   return String(task.outcome || '') === 'partial_failed'
 }
 
-/** 失败原因 + （存储失败时的）"可能已计费"提醒；卡片用这个，别只写一句失败。 */
+/**
+ * 失败原因 + （存储失败时的）"可能已计费"提醒；卡片用这个，别只写一句失败。
+ *
+ * **必须看结果里到底有没有可取回的地址**：第 23 轮用受控桩上游复现时发现，
+ * 改前这条提醒是**无条件**追加的——于是即使后端明明回了一个可取回的本机图地址，
+ * 卡片也会写"没有拿到可用的图地址"，把"能救"说成"没拿到地址"，同样误导。
+ * 口径：有可用地址（非空、非演练占位）→ 只报失败原因；确实没有 → 才加那句提醒。
+ */
 export function describeFailureReasonWithStorageNote(
-  result: Pick<SubmitResultLike, 'error_message' | 'message' | 'outcome'>,
+  result: Pick<SubmitResultLike, 'error_message' | 'message' | 'outcome'> & {
+    image_url?: string
+    oss_url?: string
+  },
 ): string {
   const base = describeFailureReason(result)
   if (!looksLikeStorageFailure(base)) return base
+  const usable = String(result.oss_url || '').trim() || String(result.image_url || '').trim()
+  if (usable && !isPlaceholderUrl(usable)) return base
   return `${base} ${STORAGE_FAILURE_UNKNOWN_NOTE}`
 }
 
