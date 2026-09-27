@@ -1,8 +1,8 @@
 """项目资产准备清单（`asset-readiness`）聚合数据测试。
 
 守的是本轮的核心回归：**场景/道具/服装不再因为「关联行读模型没有 image_prompts」
-而无法判定状态**。四类资产必须由同一份清单给出同一组标志，且这些标志与
-「实体列 + 图片表 + 提取候选」的现状一致。
+而无法判定状态**。各类资产（现为角色/场景/道具/服装/商品，见 §六 第 3 条）必须由同一份
+清单给出同一组标志，且这些标志与「实体列 + 图片表 + 提取候选」的现状一致。
 """
 
 from __future__ import annotations
@@ -259,8 +259,14 @@ def test_empty_slot_rows_are_not_images_nor_primary() -> None:
         asyncio.run(engine.dispose())
 
 
-def test_four_asset_types_share_one_caliber() -> None:
-    """角色（自带 project_id）/ 场景 / 道具 / 服装都返回同一组字段与同一套判定。"""
+def test_five_asset_types_share_one_caliber() -> None:
+    """角色（自带 project_id）/ 场景 / 道具 / 服装 / 商品都返回同一组字段与同一套判定。
+
+    为什么是**五**类：实施契约《剧情广告完整闭环》§六 第 3 条要求商品成为第五类资产，
+    而 ``schemas/studio/assets.py`` 的 ``asset_type`` Literal 早已放宽到五类；
+    本断言此前钉在"四类与四桶"上，是契约落地前的事实描述，故随契约一起改成五类
+    （不是为了让实现通过而放宽：清单里商品这一行的字段与其余四行**逐字段相同**）。
+    """
     factory, engine = _build()
     app.dependency_overrides[get_db] = _override(factory)
     try:
@@ -270,7 +276,15 @@ def test_four_asset_types_share_one_caliber() -> None:
             _create_entity(client, "scene", "scene-1", "咖啡店")
             _create_entity(client, "prop", "prop-1", "热咖啡")
             _create_entity(client, "costume", "costume-1", "米色风衣")
-            for entity_type, asset_id in (("scene", "scene-1"), ("prop", "prop-1"), ("costume", "costume-1")):
+            _create_entity(client, "product", "product-1", "焕颜精华")
+            for entity_type, asset_id in (
+                ("scene", "scene-1"),
+                ("prop", "prop-1"),
+                ("costume", "costume-1"),
+                # 商品是全局资产（products 没有 project_id）：只能靠 shot-links 关联行
+                # 挂到项目上，走的正是页面「选用已有资产」那条路。
+                ("product", "product-1"),
+            ):
                 res = client.post(
                     f"/api/v1/studio/shot-links/{entity_type}",
                     json={"project_id": PROJECT_ID, "chapter_id": None, "shot_id": None, "asset_id": asset_id},
@@ -283,15 +297,17 @@ def test_four_asset_types_share_one_caliber() -> None:
                 "scene",
                 "prop",
                 "costume",
+                "product",
             }
             assert payload["summary"]["asset_counts"] == {
                 "character": 1,
                 "scene": 1,
                 "prop": 1,
                 "costume": 1,
+                "product": 1,
             }
             for item in payload["items"]:
-                # 四类资产字段完全一致（没有「角色多一个 image_prompts、场景没有」的分裂）
+                # 各类型资产字段完全一致（没有「角色多一个 image_prompts、场景没有」的分裂）
                 assert set(item) == {
                     "asset_type",
                     "asset_id",
@@ -306,7 +322,7 @@ def test_four_asset_types_share_one_caliber() -> None:
                 assert item["has_image_prompt"] is False
                 assert item["has_image"] is False
                 assert item["has_primary"] is False
-            assert payload["summary"]["total"] == 4
+            assert payload["summary"]["total"] == 5
             assert payload["summary"]["done"] == 0
             assert payload["summary"]["all_done"] is False
     finally:

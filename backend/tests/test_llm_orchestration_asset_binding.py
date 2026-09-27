@@ -377,8 +377,8 @@ def test_reconcile_confirm_endpoint_points_at_existing_routes() -> None:
 
 async def _seed_binding_project(db) -> None:  # type: ignore[no-untyped-def]
     """种一个与 _db_payload 严格对齐的项目：镜头 ID 与资产 ID 都必须是真实存在的。"""
-    from app.models.studio import Chapter, Character, Costume, ProjectCostumeLink, ProjectPropLink
-    from app.models.studio import ProjectSceneLink, Prop, Scene, Shot
+    from app.models.studio import Chapter, Character, Costume, Product, ProjectCostumeLink, ProjectProductLink
+    from app.models.studio import ProjectPropLink, ProjectSceneLink, Prop, Scene, Shot
 
     await seed_project_chapter_shot(
         db,
@@ -400,10 +400,14 @@ async def _seed_binding_project(db) -> None:  # type: ignore[no-untyped-def]
     db.add(Scene(id="SCENE_003", name="A公司会议室", description="现代办公会议室", style="真人都市", tags=["会议室"]))
     db.add(Prop(id="PROP_002", name="合作合同", description="蓝色封面", style="真人都市", tags=["合同"]))
     db.add(Costume(id="COST_001", name="黑色西装", description="张总的西装", style="真人都市", tags=["西装"]))
+    # 商品是**全局资产**（products 表没有 project_id），只能经关联表进项目候选清单。
+    # 这里用项目档关联（shot_id 为空），与"策划确认后落 project_product_links"的真实形态一致。
+    db.add(Product(id="PROD_001", name="焕颜精华", description="女主随身带着的精华液", style="真人都市", tags=["精华"]))
     await db.flush()
     db.add(ProjectSceneLink(id=1, project_id="proj-1", shot_id="shot-1", scene_id="SCENE_003"))
     db.add(ProjectPropLink(id=1, project_id="proj-1", prop_id="PROP_002"))
     db.add(ProjectCostumeLink(id=1, project_id="proj-1", costume_id="COST_001"))
+    db.add(ProjectProductLink(id=1, project_id="proj-1", product_id="PROD_001"))
     await db.flush()
 
 
@@ -417,6 +421,9 @@ def _db_payload() -> dict[str, object]:
                 "scene": _slot("SCENE_003", 0.9),
                 "props": [_slot("PROP_002", 0.85)],
                 "costumes": [],
+                # 商品槽：模型必须把商品回在 products 里，而不是塞进 props
+                # （塞进 props 会被"槽位类型一致"规则整条丢掉，用户看到的是"模型没建议商品"）。
+                "products": [_slot("PROD_001", 0.92)],
                 "unmatched_names": [{"name": "黑袍人", "guessed_type": "character", "evidence": "剧情提到"}],
             },
             {
@@ -445,12 +452,16 @@ async def test_preview_asset_binding_success_with_stub() -> None:
     assert result.meta.llm_called is True
     assert result.batch_count == 1
     assert result.batch_size == 8
+    # 契约 §六.6：商品是**第五类资产**，候选清单必须含它
+    # （此前四槽范式让 LLM 自动绑定永远看不到商品）。
+    # 期望值随契约从 5 个 ID 变为 6 个 ID —— 这是契约要求的行为变更，不是放宽断言。
     assert {item.asset_id for item in result.catalog} == {
         "CHAR_001",
         "CHAR_002",
         "SCENE_003",
         "PROP_002",
         "COST_001",
+        "PROD_001",
     }
     assert result.dropped == []
     assert [item.name for item in result.unmatched_names] == ["黑袍人"]
@@ -463,16 +474,26 @@ async def test_preview_asset_binding_success_with_stub() -> None:
     assert suggestions["CHAR_001"].tier == "auto"
     assert suggestions["SCENE_003"].already_bound is True
     assert suggestions["PROP_002"].slot == "props"
+    # 商品走自己的槽位与自己的确认端点（进人工确认页后必须真的点得下去）
+    assert suggestions["PROD_001"].slot == "products"
+    assert suggestions["PROD_001"].asset_type == "product"
+    assert suggestions["PROD_001"].tier == "auto"
+    assert suggestions["PROD_001"].confirm_endpoint == "POST /api/v1/studio/shot-links/product"
     assert all(item.confirm_endpoint for item in shot1.suggestions)
 
     shot2 = next(shot for shot in result.shots if shot.shot_id == "shot-2")
     assert {item.asset_id for item in shot2.suggestions} == {"CHAR_002", "COST_001"}
-    assert result.tier_summary["auto"] == 5
+    # 改前 5：shot-1 三条（角色/场景/道具）+ shot-2 两条。
+    # 现在 6：商品进候选清单后 shot-1 多一条商品建议（llm_only，0.92 仍落 auto）。
+    # 契约 §六.6 要的就是"商品能被自动绑定"，这条期望值随契约一起变。
+    assert result.tier_summary["auto"] == 6
     assert result.tier_summary["discard"] == 0
 
     assert "asset_id 只能从这里选" in prompts[0]
     assert "服装" in prompts[0]  # Jellyfish 追加的服装槽位
     assert "costumes" in prompts[0]
+    assert "商品" in prompts[0]  # 剧情广告 MVP 追加的商品槽位
+    assert "products" in prompts[0]
     assert "shot-1" in prompts[0]
     await engine.dispose()
 
