@@ -13,7 +13,7 @@ export type ShotFramePromptMappingRead = {
     /**
      * 实体类型：character/prop/scene/costume
      */
-    type: 'character' | 'prop' | 'scene' | 'costume';
+    type: 'character' | 'prop' | 'scene' | 'costume' | 'product';
     /**
      * 实体 ID（如 character_id/prop_id/scene_id/costume_id）
      */

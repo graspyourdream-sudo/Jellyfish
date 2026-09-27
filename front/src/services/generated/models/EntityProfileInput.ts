@@ -26,5 +26,9 @@ export type EntityProfileInput = {
      * 已有资产图片提示词（可空）
      */
     image_prompt?: string;
+    /**
+     * 画像资料的来源（由装载方如实填写，供前端说明「这段描述是从哪来的」）：asset_description=资产描述；candidate_profile=候选结构化资料；request=调用方直接传入；none=没有任何资料
+     */
+    profile_source?: string;
 };
 

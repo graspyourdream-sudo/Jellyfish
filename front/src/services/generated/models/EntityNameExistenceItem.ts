@@ -23,7 +23,7 @@ export type EntityNameExistenceItem = {
      */
     linked_to_shot?: boolean;
     /**
-     * 命中的资产 ID（如 prop_id/scene_id/costume_id/character_id）
+     * 命中的资产 ID（如 prop_id/scene_id/costume_id/product_id/character_id）
      */
     asset_id?: (string | null);
     /**

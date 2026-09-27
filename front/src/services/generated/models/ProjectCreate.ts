@@ -2,6 +2,8 @@
 /* istanbul ignore file */
 /* tslint:disable */
 /* eslint-disable */
+import type { AdProductSource } from './AdProductSource';
+import type { AdRequirements } from './AdRequirements';
 import type { ProjectStartMode } from './ProjectStartMode';
 import type { ProjectVisualStyle } from './ProjectVisualStyle';
 export type ProjectCreate = {
@@ -42,6 +44,10 @@ export type ProjectCreate = {
      */
     start_mode?: ProjectStartMode;
     /**
+     * 项目类型：drama=普通短剧；ad=剧情广告（先做商品卡与剧情策划）
+     */
+    kind?: 'drama' | 'ad';
+    /**
      * 聚合统计（JSON）
      */
     stats?: Record<string, any>;
@@ -49,5 +55,13 @@ export type ProjectCreate = {
      * 项目 ID
      */
     id: string;
+    /**
+     * 商品资料来源（仅 kind=ad）
+     */
+    ad_product_source?: (AdProductSource | null);
+    /**
+     * 基本制作要求（仅 kind=ad）
+     */
+    ad_requirements?: (AdRequirements | null);
 };
 

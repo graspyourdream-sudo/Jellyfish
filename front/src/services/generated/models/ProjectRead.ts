@@ -42,6 +42,10 @@ export type ProjectRead = {
      */
     start_mode?: ProjectStartMode;
     /**
+     * 项目类型：drama=普通短剧；ad=剧情广告（先做商品卡与剧情策划）
+     */
+    kind?: 'drama' | 'ad';
+    /**
      * 聚合统计（JSON）
      */
     stats?: Record<string, any>;
@@ -54,5 +58,13 @@ export type ProjectRead = {
      * 最后更新时间
      */
     updated_at?: (string | null);
+    /**
+     * 剧情广告阶段（仅 kind=ad）：product/story/storyboard/ready/confirmed
+     */
+    ad_phase?: string;
+    /**
+     * 剧情广告阶段的中文说明（页面直接用）
+     */
+    ad_phase_label?: string;
 };
 

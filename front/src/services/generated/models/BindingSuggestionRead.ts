@@ -6,7 +6,7 @@
  * 单条绑定建议（**仅供人工确认，本接口不写库**）。
  */
 export type BindingSuggestionRead = {
-    slot: 'characters' | 'scene' | 'props' | 'costumes';
+    slot: 'characters' | 'scene' | 'props' | 'costumes' | 'products';
     asset_id: string;
     asset_type: string;
     asset_name?: string;

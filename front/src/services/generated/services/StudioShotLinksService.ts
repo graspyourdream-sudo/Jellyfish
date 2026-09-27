@@ -6,6 +6,7 @@ import type { ApiResponse_NoneType_ } from '../models/ApiResponse_NoneType_';
 import type { ApiResponse_PaginatedData_Any__ } from '../models/ApiResponse_PaginatedData_Any__';
 import type { ApiResponse_ProjectActorLinkRead_ } from '../models/ApiResponse_ProjectActorLinkRead_';
 import type { ApiResponse_ProjectCostumeLinkRead_ } from '../models/ApiResponse_ProjectCostumeLinkRead_';
+import type { ApiResponse_ProjectProductLinkRead_ } from '../models/ApiResponse_ProjectProductLinkRead_';
 import type { ApiResponse_ProjectPropLinkRead_ } from '../models/ApiResponse_ProjectPropLinkRead_';
 import type { ApiResponse_ProjectSceneLinkRead_ } from '../models/ApiResponse_ProjectSceneLinkRead_';
 import type { ProjectAssetLinkCreate } from '../models/ProjectAssetLinkCreate';
@@ -216,6 +217,47 @@ export class StudioShotLinksService {
         return __request(OpenAPI, {
             method: 'DELETE',
             url: '/api/v1/studio/shot-links/costume/{link_id}',
+            path: {
+                'link_id': linkId,
+            },
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * 创建项目-章节-镜头-商品关联
+     * @returns ApiResponse_ProjectProductLinkRead_ Successful Response
+     * @throws ApiError
+     */
+    public static createProjectProductLinkApiV1StudioShotLinksProductPost({
+        requestBody,
+    }: {
+        requestBody: ProjectAssetLinkCreate,
+    }): CancelablePromise<ApiResponse_ProjectProductLinkRead_> {
+        return __request(OpenAPI, {
+            method: 'POST',
+            url: '/api/v1/studio/shot-links/product',
+            body: requestBody,
+            mediaType: 'application/json',
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * 删除项目-章节-镜头-商品关联
+     * @returns ApiResponse_NoneType_ Successful Response
+     * @throws ApiError
+     */
+    public static deleteProjectProductLinkApiV1StudioShotLinksProductLinkIdDelete({
+        linkId,
+    }: {
+        linkId: number,
+    }): CancelablePromise<ApiResponse_NoneType_> {
+        return __request(OpenAPI, {
+            method: 'DELETE',
+            url: '/api/v1/studio/shot-links/product/{link_id}',
             path: {
                 'link_id': linkId,
             },

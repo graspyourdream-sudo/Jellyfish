@@ -45,6 +45,30 @@ export type ImageTaskResultRead = {
      */
     oss_ready?: boolean;
     /**
+     * 结果类型标签（新，机器可读，由 asset_type 分流决定）：characterReference（**仅人物**）/ sceneAssetImage / propAssetImage / costumeDesignImage
+     */
+    result_kind?: string;
+    /**
+     * 结果类型的中文标签（新）：人物参考图 / 场景资产图 / 道具资产图 / 服装设定图
+     */
+    result_label?: string;
+    /**
+     * 本次结果使用的画幅（新）：人物 / 场景 16:9、道具 1:1（人物参考图固定 16:9，不是项目最终视频画幅）
+     */
+    aspect_ratio?: string;
+    /**
+     * 画幅来源（新）：character_reference_fixed / request / asset_type_default / default
+     */
+    aspect_ratio_source?: string;
+    /**
+     * 本项实际使用的出图通道（新，如实回报，不静默）：vendor_service（上游出图服务）/ apimart（Jellyfish APIMart 图片通道）
+     */
+    channel?: string;
+    /**
+     * 本项出图通道的中文名（新）
+     */
+    channel_label?: string;
+    /**
      * 可展示的一句话说明（失败时优先装真实原因）
      */
     message?: string;

@@ -6,8 +6,13 @@ import type { ApiResponse_ChapterRead_ } from '../models/ApiResponse_ChapterRead
 import type { ApiResponse_dict_str__Any__ } from '../models/ApiResponse_dict_str__Any__';
 import type { ApiResponse_NoneType_ } from '../models/ApiResponse_NoneType_';
 import type { ApiResponse_PaginatedData_ChapterRead__ } from '../models/ApiResponse_PaginatedData_ChapterRead__';
+import type { ChapterAssetProfileBuildRequest } from '../models/ChapterAssetProfileBuildRequest';
+import type { ChapterAssetProfileConfirmRequest } from '../models/ChapterAssetProfileConfirmRequest';
+import type { ChapterAssetProfileDecisionsRequest } from '../models/ChapterAssetProfileDecisionsRequest';
+import type { ChapterAssetProfileEditRequest } from '../models/ChapterAssetProfileEditRequest';
 import type { ChapterCreate } from '../models/ChapterCreate';
 import type { ChapterUpdate } from '../models/ChapterUpdate';
+import type { GlobalAssetUpdatePreviewRequest } from '../models/GlobalAssetUpdatePreviewRequest';
 import type { CancelablePromise } from '../core/CancelablePromise';
 import { OpenAPI } from '../core/OpenAPI';
 import { request as __request } from '../core/request';
@@ -175,6 +180,347 @@ export class StudioChaptersService {
             query: {
                 'include_ignored': includeIgnored,
             },
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * 结构化资产清单（六步流程·步骤2：基于本章完整剧本 + 分镜，复用上游整集分析能力）
+     * 基于**本章完整剧本 + 本章分镜**生成规范化的角色/场景/道具/服装清单。
+     *
+     * 与 ``/asset-candidates`` 的区别（也是本次修通数据链路的关键）：
+     *
+     * - ``/asset-candidates`` 只把**已经落库的镜头候选**按名称聚合一下，不读剧本、
+     * 不产出资料；确认后资产描述仍是空的；
+     * - 本接口读**本章完整剧本**与分镜，调用既有 LLM 编排层（同一套 Provider / 守卫）
+     * 产出每项资产的**结构化资料**（角色：外貌/发型/服装配饰/性格气质…
+     * 场景：空间结构/陈设/光线色调… 道具：材质/颜色/形状/尺寸… 服装：款式/颜色/材质/配饰…），
+     * 并保留"哪一段原文、哪个镜头"的依据。
+     *
+     * **数据库是事实来源**（2026-09 持久化改造）：
+     *
+     * - ``refresh=false``（默认）且库里已有这份清单 → **直接读库返回**，不调用任何模型
+     * （后端重启后同样如此），返回值与"刚生成时"逐字段同形；剧本/分镜变了会带
+     * ``persistence.content_changed=true`` 与中文提示「内容已变化，建议重新分析」，
+     * **不覆盖任何资料**；
+     * - ``refresh=true`` → 重新分析，并把结果逐条对账入库：未确认且未人工改过的行更新；
+     * 已确认 / 人工改过的行只在 ``pending_*`` 记录新结果并标 ``pending_change``，
+     * 等用户决定覆盖 / 合并 / 保留；本次没再提到的行**不删除**；
+     * - ``user_flow`` 是用户主流程要看的（一项资产一行，含资料、缺什么、出场镜头、
+     * 建议动作、要不要人工处理）；``technical_detail`` 是默认收起的。
+     *
+     * **本接口不建资产、不出图**；确认请调用同章的
+     * ``POST /{chapter_id}/asset-profiles/confirm``。
+     * @returns ApiResponse_dict_str__Any__ Successful Response
+     * @throws ApiError
+     */
+    public static postChapterAssetProfilesApiV1StudioChaptersChapterIdAssetProfilesPost({
+        chapterId,
+        requestBody,
+    }: {
+        chapterId: string,
+        requestBody?: (ChapterAssetProfileBuildRequest | null),
+    }): CancelablePromise<ApiResponse_dict_str__Any__> {
+        return __request(OpenAPI, {
+            method: 'POST',
+            url: '/api/v1/studio/chapters/{chapter_id}/asset-profiles',
+            path: {
+                'chapter_id': chapterId,
+            },
+            body: requestBody,
+            mediaType: 'application/json',
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * 结构化资产清单（GET 只读入口：只读库，绝不调用模型）
+     * **只读**入口：把库里保存的清单读出来，一次模型调用都不发。
+     *
+     * 与 POST 的区别（这是刻意的不对称）：
+     *
+     * - GET 永远不花钱：库里没有这份清单时返回空清单 +
+     * ``persistence.status="not_generated"`` 的中文引导，而不是偷偷生成；
+     * - 要生成（或强制重新分析）请用 ``POST`` 且带 ``refresh=true``。
+     * @returns ApiResponse_dict_str__Any__ Successful Response
+     * @throws ApiError
+     */
+    public static getChapterAssetProfilesApiV1StudioChaptersChapterIdAssetProfilesGet({
+        chapterId,
+    }: {
+        chapterId: string,
+    }): CancelablePromise<ApiResponse_dict_str__Any__> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/v1/studio/chapters/{chapter_id}/asset-profiles',
+            path: {
+                'chapter_id': chapterId,
+            },
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * 资产生产工作台（第2步的单一数据源：一项资产只出现一次，四个页签共用）
+     * **只读**入口：这一页要看的资产都在这份响应里，页面不再各拉一张表。
+     *
+     * - ``analysis``：本章资产资料的状态（尚未生成 / 已生成 / 内容已变化 / 只有资料行），
+     * 以及"下一步该点哪个按钮"的中文提示（``hint``）；
+     * - ``summary``：由 ``items`` **现算**的计数（顶部统计与列表同源，不允许两套算法）；
+     * - ``items``：一项资产一行 —— 资料、剧本依据、提示词与质量、图片状态、下一步状态；
+     * 四个页签（人物 / 场景 / 道具 / 服装）按 ``asset_type`` 分流，同一资产只出现一次；
+     * - ``pending_review``：**只收真正需要人工**的（别名指向两个不同资产、同名异类、
+     * 同一名称的候选关联了不同资产、候选里有服装但还没有服装资产）；
+     * 无冲突的候选按既有 ``auto_confirm_unconflicted`` 口径自动合并 / 自动匹配；
+     * - ``technical``：候选条数、聚合组、匹配诊断等后台维度（前端默认收起）。
+     *
+     * **本接口不调用任何模型、不出图、不写库**：内容变化时只如实回报
+     * ``analysis.status="stale"``，不改写任何行（标记 stale 仍走既有读路径）。
+     * @returns ApiResponse_dict_str__Any__ Successful Response
+     * @throws ApiError
+     */
+    public static getChapterAssetWorkbenchApiV1StudioChaptersChapterIdAssetWorkbenchGet({
+        chapterId,
+    }: {
+        chapterId: string,
+    }): CancelablePromise<ApiResponse_dict_str__Any__> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/v1/studio/chapters/{chapter_id}/asset-workbench',
+            path: {
+                'chapter_id': chapterId,
+            },
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * 确认结构化资产清单：无冲突项直接建/绑，冲突项需人工决定
+     * 把最新一份结构化清单确认落库（一次请求一个事务，全有或全无）。
+     *
+     * 规则：
+     *
+     * - **无冲突项**（``auto_confirmable``）默认动作直接执行：库里有同名同类型且描述不矛盾
+     * → 选用已有（不新建重复资产）；没有 → 新建；
+     * - **冲突项**（``needs_review``）**不会**被自动写入：必须在 ``selections`` 里给出
+     * ``group_key`` + ``action``，并且带 ``confirm_conflict=true``；否则原样跳过，
+     * ``results`` 里如实给出冲突原因；
+     * - 结构化资料写进资产 ``description`` 与候选 ``payload``（既有列，未加列）；
+     * - **已有内容一律不覆盖**：已有描述、``image_prompts``、图片行（含定版）全部原样保留，
+     * 本接口连图片表都不碰。
+     *
+     * 返回里直接带 ``asset_readiness``（与 ``GET /studio/projects/{id}/asset-readiness``
+     * 同一份口径），确认后生产区立即能读到。
+     * @returns ApiResponse_dict_str__Any__ Successful Response
+     * @throws ApiError
+     */
+    public static postChapterAssetProfilesConfirmApiV1StudioChaptersChapterIdAssetProfilesConfirmPost({
+        chapterId,
+        requestBody,
+    }: {
+        chapterId: string,
+        requestBody?: (ChapterAssetProfileConfirmRequest | null),
+    }): CancelablePromise<ApiResponse_dict_str__Any__> {
+        return __request(OpenAPI, {
+            method: 'POST',
+            url: '/api/v1/studio/chapters/{chapter_id}/asset-profiles/confirm',
+            path: {
+                'chapter_id': chapterId,
+            },
+            body: requestBody,
+            mediaType: 'application/json',
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * 本章持久化资产资料（数据库是事实来源的读入口：重启不丢、重新提取不丢）
+     * 直接读**专用表**里本章的资产资料（`chapter_asset_profiles`）。
+     *
+     * 每条记录都带：资产类型 / 规范名称 / 别名 / 结构化资料（**已合并人工修改**）/
+     * 人工修改与用户补充（分开存） / 剧本片段与分镜依据 / 已关联的真实资产 ID /
+     * 剧本来源签名（``source_hash``）与来源摘要 / 状态与时间。
+     *
+     * ``summary.pending_change`` 不为 0 时，说明有行的资料"内容已变化"，
+     * 请用 ``POST .../asset-profiles/decisions`` 决定覆盖 / 合并 / 保留。
+     * @returns ApiResponse_dict_str__Any__ Successful Response
+     * @throws ApiError
+     */
+    public static getChapterAssetProfileRecordsApiV1StudioChaptersChapterIdAssetProfilesRecordsGet({
+        chapterId,
+    }: {
+        chapterId: string,
+    }): CancelablePromise<ApiResponse_dict_str__Any__> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/v1/studio/chapters/{chapter_id}/asset-profiles/records',
+            path: {
+                'chapter_id': chapterId,
+            },
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * 人工修改本章资产资料（写进 manual_overrides / user_notes，模型结果永不覆盖）
+     * 人工修改 / 用户补充（这是"重新提取不丢人工修改"的写入端）。
+     *
+     * - 给出的字段写进 ``manual_overrides``（字段级覆盖），**不动**模型侧的 ``profile``；
+     * - ``notes`` 追加进 ``user_notes``；``aliases`` 并入别名集合；
+     * - 写入后这一行即视为**受保护**：后续任何一次重新分析都不会覆盖它，
+     * 只会把新结果记到 ``pending_*`` 等用户决定。
+     * @returns ApiResponse_dict_str__Any__ Successful Response
+     * @throws ApiError
+     */
+    public static patchChapterAssetProfileRecordApiV1StudioChaptersChapterIdAssetProfilesRecordsRecordIdPatch({
+        chapterId,
+        recordId,
+        requestBody,
+    }: {
+        chapterId: string,
+        recordId: number,
+        requestBody: ChapterAssetProfileEditRequest,
+    }): CancelablePromise<ApiResponse_dict_str__Any__> {
+        return __request(OpenAPI, {
+            method: 'PATCH',
+            url: '/api/v1/studio/chapters/{chapter_id}/asset-profiles/records/{record_id}',
+            path: {
+                'chapter_id': chapterId,
+                'record_id': recordId,
+            },
+            body: requestBody,
+            mediaType: 'application/json',
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * 处置「内容已变化」的资产资料：覆盖 / 合并 / 保留（用户显式决定）
+     * 剧本/分镜变化后重新分析，**受保护行**（已确认或人工改过）不自动覆盖；
+     * 用户在这里显式决定怎么处置：
+     *
+     * - ``overwrite``（覆盖）：用新分析结果替换模型侧资料；**人工修改与用户补充保留**；
+     * - ``merge``（合并）：以现有资料为准，只补上还没有的字段，依据取并集；
+     * - ``keep``（保留）：丢弃本次新结果，现有资料一个字都不动。
+     * @returns ApiResponse_dict_str__Any__ Successful Response
+     * @throws ApiError
+     */
+    public static postChapterAssetProfileDecisionsApiV1StudioChaptersChapterIdAssetProfilesDecisionsPost({
+        chapterId,
+        requestBody,
+    }: {
+        chapterId: string,
+        requestBody: ChapterAssetProfileDecisionsRequest,
+    }): CancelablePromise<ApiResponse_dict_str__Any__> {
+        return __request(OpenAPI, {
+            method: 'POST',
+            url: '/api/v1/studio/chapters/{chapter_id}/asset-profiles/decisions',
+            path: {
+                'chapter_id': chapterId,
+            },
+            body: requestBody,
+            mediaType: 'application/json',
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * 本章资产资料（章节隔离层）：全局资产的剧情身份 / 出场依据 / 临时补充
+     * 读回**本章**保存的资产资料（overlay）。
+     *
+     * 为什么要单独一个读接口：场景 / 道具 / 服装是**全局资产**，本章提取出的
+     * 剧情身份、出场依据、临时补充**不能**写进它们的通用资料，只能按项目/章节隔离保存。
+     * 这个接口就是"我这一章的资料存在哪、存了什么"的唯一读入口（默认收起在技术详情里）。
+     *
+     * 返回每项都带 ``scope: "chapter"`` 与 ``global_asset``：
+     * 全局资产额外说明"不会写回全局资产的通用资料或图片提示词"。
+     * @returns ApiResponse_dict_str__Any__ Successful Response
+     * @throws ApiError
+     */
+    public static getChapterAssetOverlaysApiV1StudioChaptersChapterIdAssetOverlaysGet({
+        chapterId,
+    }: {
+        chapterId: string,
+    }): CancelablePromise<ApiResponse_dict_str__Any__> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/v1/studio/chapters/{chapter_id}/asset-overlays',
+            path: {
+                'chapter_id': chapterId,
+            },
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * 全局资产更新差异预览（只读：不写库、不改图片提示词）
+     * 算出"要不要把本章**通用资料**合并进全局资产"，并按「；」分段给出新增/删除/未变。
+     *
+     * 刻意排除本章特有字段（场景的时间天气/光线色调/相关事件、道具的状态/剧情作用、
+     * 服装的使用场合、角色的相关剧情）—— 它们永远只留在章节 overlay 里。
+     *
+     * **本接口不写库**：``requires_confirmation`` 恒为 ``true``。
+     * @returns ApiResponse_dict_str__Any__ Successful Response
+     * @throws ApiError
+     */
+    public static postGlobalUpdatesPreviewApiV1StudioChaptersChapterIdAssetProfilesGlobalUpdatesPreviewPost({
+        chapterId,
+        requestBody,
+    }: {
+        chapterId: string,
+        requestBody?: (GlobalAssetUpdatePreviewRequest | null),
+    }): CancelablePromise<ApiResponse_dict_str__Any__> {
+        return __request(OpenAPI, {
+            method: 'POST',
+            url: '/api/v1/studio/chapters/{chapter_id}/asset-profiles/global-updates/preview',
+            path: {
+                'chapter_id': chapterId,
+            },
+            body: requestBody,
+            mediaType: 'application/json',
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * 把本章通用资料写回全局资产（必须显式确认；图片提示词默认不动）
+     * 全局资产更新（**白名单 + 显式确认**）。
+     *
+     * 硬约束：
+     *
+     * - 请求体必须带 ``"confirm": true``，否则结构化 **409**（并把差异摘要一起返回）；
+     * - 必须逐项列出 ``asset_type`` / ``asset_id`` / ``apply[]``，``apply`` 只能含
+     * ``description`` / ``image_prompts`` 白名单字段；
+     * - ``image_prompts`` 还要额外带 ``confirm_replace_image_prompt: true``（沿用既有覆盖保护）；
+     * - 本章特有字段（时间天气/光线色调/状态/场合/相关剧情）**永远不写全局**。
+     * @returns ApiResponse_dict_str__Any__ Successful Response
+     * @throws ApiError
+     */
+    public static postGlobalUpdatesApplyApiV1StudioChaptersChapterIdAssetProfilesGlobalUpdatesApplyPost({
+        chapterId,
+        requestBody,
+    }: {
+        chapterId: string,
+        requestBody: Record<string, any>,
+    }): CancelablePromise<ApiResponse_dict_str__Any__> {
+        return __request(OpenAPI, {
+            method: 'POST',
+            url: '/api/v1/studio/chapters/{chapter_id}/asset-profiles/global-updates/apply',
+            path: {
+                'chapter_id': chapterId,
+            },
+            body: requestBody,
+            mediaType: 'application/json',
             errors: {
                 422: `Validation Error`,
             },

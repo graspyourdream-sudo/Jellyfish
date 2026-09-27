@@ -30,5 +30,9 @@ export type EntityNameExistenceCheckRequest = {
      * 服装名称列表
      */
     costume_names?: Array<string>;
+    /**
+     * 商品名称列表（可省略）
+     */
+    product_names?: Array<string>;
 };
 

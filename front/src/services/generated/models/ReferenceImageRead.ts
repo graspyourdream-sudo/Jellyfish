@@ -3,7 +3,7 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
- * 定版参考图（垫图）解析结果。
+ * 定版参考图解析结果（默认主流程按提示词直接生成，不需要它）。
  */
 export type ReferenceImageRead = {
     asset_id: string;

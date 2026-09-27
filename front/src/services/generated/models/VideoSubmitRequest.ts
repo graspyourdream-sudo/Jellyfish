@@ -32,5 +32,9 @@ export type VideoSubmitRequest = {
      * 同步等待的墙钟上限
      */
     timeout_seconds?: number;
+    /**
+     * 尝试序号（语义与 POST /submit 的 attempt **一致**）：同一序号＋同一参数＝同一轮，重复提交不会重复付费（直接返回上一轮已建的任务，`deduplicated=true`）；要真的再生成一次请把 attempt +1（页面上就是「重新生成」）
+     */
+    attempt?: number;
 };
 

@@ -9,7 +9,7 @@ export type ShotPromptAssetRef = {
     /**
      * 资产类型
      */
-    type: 'character' | 'prop' | 'scene' | 'costume';
+    type: 'character' | 'prop' | 'scene' | 'costume' | 'product';
     /**
      * 资产名称
      */

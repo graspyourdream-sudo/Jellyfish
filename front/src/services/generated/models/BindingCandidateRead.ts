@@ -8,7 +8,7 @@
 export type BindingCandidateRead = {
     asset_id: string;
     /**
-     * character / scene / prop / costume
+     * character / scene / prop / costume / product
      */
     asset_type: string;
     name: string;

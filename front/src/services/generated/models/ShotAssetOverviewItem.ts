@@ -14,7 +14,7 @@ export type ShotAssetOverviewItem = {
     /**
      * 实体类型：character/prop/scene/costume
      */
-    type: 'character' | 'prop' | 'scene' | 'costume';
+    type: 'character' | 'prop' | 'scene' | 'costume' | 'product';
     /**
      * 资产名称
      */
