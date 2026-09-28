@@ -1,8 +1,13 @@
-"""「本镜无需声音」的显式标记（用户授权新增的可空列 `shot_details.audio_opt_out`）。
+"""「本镜无需声音」的显式标记（可空列 ``shot_details.audio_opt_out``）。
 
 为什么需要它：只靠 `audio_file_id IS NULL` 无法区分
 （a）还没绑声音 和（b）这一镜明确不需要声音 —— 后者会被就绪判定与交付导出当成"漏绑"。
-本测试锁三件事：两个字段互斥、无需声音会进交付文本、未表态时行为不变（不产生噪音）。
+本测试锁三件事：``audio_opt_out`` 是镜头级**唯一**的合法声音声明、无需声音会进交付文本、
+未表态时行为不变（不产生噪音）。
+
+为什么不再有"绑定音频 → 清掉无需声音"这条反向用例：``audio_file_id`` 已经从更新契约
+（``ShotDetailUpdate``）里拿掉了 —— 角色声音的唯一事实来源是人物资产，
+镜头级不能再建立 / 改写一条声音绑定，那个反向联动也随之不存在。
 """
 
 from __future__ import annotations
@@ -61,7 +66,11 @@ async def test_no_audio_and_no_flag_keeps_old_behaviour():
 
 
 @pytest.mark.asyncio
-async def test_patch_opt_out_clears_audio_file_id():
+async def test_patch_opt_out_clears_legacy_snapshot():
+    """标记「无需声音」时，服务端同时清掉迁移前留下的逐镜声音快照。
+
+    （快照只是兼容数据；留着它会让交付文本与生成口径互相矛盾 —— 生成本镜已经不带声音了。）
+    """
     db, engine = await build_session()
     try:
         db.add(FileItem(id="f-audio", name="配音.mp3", storage_key="audio/a.mp3", type=FileType.audio))
@@ -81,21 +90,28 @@ async def test_patch_opt_out_clears_audio_file_id():
 
 
 @pytest.mark.asyncio
-async def test_patch_audio_file_id_clears_opt_out():
+async def test_patch_contract_has_no_shot_level_voice_binding():
+    """更新契约里**没有** ``audio_file_id``：普通调用方无法再建立 / 改写逐镜角色声音。
+
+    口径：角色声音只绑在**人物资产**上（第 2 步「人物资产详情」是全站唯一入口）。
+    这里同时证明"传了也没用"：pydantic 会忽略这个未声明字段，库里不会被改写。
+    """
+    assert "audio_file_id" not in ShotDetailUpdate.model_fields
+    assert "audio_opt_out" in ShotDetailUpdate.model_fields, "镜头级唯一的合法声明必须保留"
+
     db, engine = await build_session()
     try:
         db.add(FileItem(id="f-audio", name="配音.mp3", storage_key="audio/a.mp3", type=FileType.audio))
         await db.flush()
         await _seed_shot(db, opt_out=True)
 
-        updated = await shot_details_service.update(
-            db,
-            shot_id="shot-1",
-            body=ShotDetailUpdate(audio_file_id="f-audio"),
-        )
+        # 即便调用方硬塞 audio_file_id（例如旧版客户端），也不会被写进库
+        body = ShotDetailUpdate.model_validate({"audio_file_id": "f-audio"})
+        assert "audio_file_id" not in body.model_dump(exclude_unset=True)
 
-        assert updated.audio_file_id == "f-audio"
-        assert updated.audio_opt_out is False
+        updated = await shot_details_service.update(db, shot_id="shot-1", body=body)
+        assert updated.audio_file_id is None
+        assert updated.audio_opt_out is True, "旧客户端的杂散字段不许把无需声音翻成 false"
     finally:
         await engine.dispose()
 

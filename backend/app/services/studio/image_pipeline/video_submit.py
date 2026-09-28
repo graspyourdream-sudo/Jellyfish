@@ -209,8 +209,10 @@ async def describe_plan_audio(
     ``video_audio_input.resolve_audio_admission`` → ``classify_audio_input``。
 
     返回的 ``audio`` 是给计划/预览用的**审计结构**（``included`` / ``file_id`` / ``url`` /
-    ``excluded_reason``），``audio_state`` 保留既有四个取值（bound / bound_not_public /
-    missing / opt_out）以兼容页面既有显示。
+    ``excluded_reason`` / ``voice_source``），``audio_state`` 保留既有四个取值
+    （bound / bound_not_public / missing / opt_out）以兼容页面既有显示。
+    ``voice_source`` 如实报出这条声音的来源：人物资产（唯一事实来源）/ 兼容快照（迁移前遗留）/
+    无 —— 让"人物资产的音色到底有没有生效"在请求计划层就能对账。
     """
     from app.services.studio.video_audio_input import (
         plan_audio_state,
@@ -354,7 +356,10 @@ async def build_video_submit_plan(
 
     audio = await describe_plan_audio(db, shot_id=body.shot_id, provider=provider_key, model=model_name)
     if audio["audio_state"] == "missing" and not audio["audio_opt_out"]:
-        warnings.append("本镜还没有声音：需要配音请在绑定步骤挂上音频；不需要就明确标记「本镜无需声音」。")
+        warnings.append(
+            "本镜还没有声音：角色声音绑在**人物资产**上，请到第 2 步「人物资产详情」给这一镜关联的"
+            "人物绑定音色（本镜没有单独配声音的入口）；这一镜确实不需要声音就明确标记「本镜无需声音」。"
+        )
 
     seconds = resolve_plan_seconds(body.duration_seconds, warnings)
 

@@ -170,14 +170,22 @@ class ShotDetail(Base,TimestampMixin):
         ForeignKey("files.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
-        comment="该镜头使用的音频文件 ID（files.type=audio）；声音绑定落在这一列",
+        comment=(
+            "**迁移前的逐镜声音（只读兼容快照）**：角色声音的唯一事实来源是人物资产"
+            "（file_usages 上 usage_kind=asset_voice，第 2 步「人物资产详情」是全站唯一绑定入口）；"
+            "这一列只为历史数据与迁移对账保留，接口层没有写入口（ShotDetailUpdate 里没有它），"
+            "生成侧只在人物资产没有音色时用它兜底，永不覆盖人物资产的音色"
+        ),
     )
     audio_opt_out: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         default=False,
         server_default=text("0"),
-        comment="本镜**明确标记**无需声音（用户授权新增）：与 audio_file_id 互斥，默认 false=未表态",
+        comment=(
+            "本镜**明确标记**无需声音（镜头级唯一的合法声明）：默认 false=未表态；"
+            "true 时覆盖角色声音继承，本次生成不携带参考音频"
+        ),
     )
     voice_inherited_from: Mapped[str | None] = mapped_column(
         String(96),

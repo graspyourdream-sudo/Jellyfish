@@ -153,11 +153,18 @@ class ShotDetailBase(BaseModel):
         description="镜头分镜关键帧提示词",
     )
     audio_file_id: str | None = Field(
-        None, description="该镜头使用的音频文件 ID（files.type=audio）；声音绑定落在这里"
+        None,
+        description=(
+            "**只读兼容快照**（迁移 009 之前的逐镜声音）：仅出现在读取契约里，"
+            "供历史数据展示与迁移对账。角色声音的唯一事实来源是人物资产"
+            "（PUT /studio/asset-voices/character/{id}，第 2 步人物资产详情）；"
+            "生成侧只在人物资产没有音色时用它兜底，**永不覆盖**人物资产的音色。"
+            "写入契约（ShotDetailCreate / ShotDetailUpdate）里没有这个字段。"
+        ),
     )
     audio_opt_out: bool = Field(
         False,
-        description="本镜明确标记无需声音（与 audio_file_id 互斥，默认 false=未表态）",
+        description="本镜明确标记无需声音（镜头级唯一的合法声明；默认 false=未表态，覆盖角色声音继承）",
     )
     video_prompt: str = Field(
         "",
@@ -169,11 +176,58 @@ class ShotDetailBase(BaseModel):
     )
 
 
-class ShotDetailCreate(ShotDetailBase):
-    pass
+class ShotDetailCreate(BaseModel):
+    """创建镜头细节的**写入**契约。
+
+    刻意**不**从 ``ShotDetailBase`` 继承：那会连带把只读兼容快照
+    ``audio_file_id`` 变成创建时的可写字段 —— 那等于留下第二套"逐镜声音绑定"入口
+    （口径：角色声音只绑在**人物资产**上，第 2 步「人物资产详情」是全站唯一入口）。
+    这里逐字段列出可写字段，行为与 ``ShotDetailUpdate`` 的可写集合保持一致。
+    """
+
+    id: str = Field(..., description="镜头细节 ID（与镜头 1:1 共享主键）")
+    camera_shot: CameraShotType = Field(..., description="景别")
+    angle: CameraAngle = Field(..., description="机位角度")
+    movement: CameraMovement = Field(..., description="运镜方式")
+    scene_id: str | None = Field(None, description="关联场景 ID（可空）")
+    duration: int = Field(0, description="时长（秒）")
+    override_video_ratio: str | None = Field(None, description="分镜级视频比例覆盖；为空表示继承项目默认")
+    mood_tags: list[str] = Field(default_factory=list, description="情绪标签")
+    atmosphere: str = Field("", description="氛围描述")
+    follow_atmosphere: bool = Field(True, description="是否沿用氛围")
+    has_bgm: bool = Field(False, description="是否包含 BGM")
+    vfx_type: VFXType = Field(VFXType.none, description="视效类型")
+    vfx_note: str = Field("", description="视效说明")
+    action_beats: list[str] = Field(default_factory=list, description="动作拍点（按时间顺序排列）")
+    first_frame_prompt: str = Field("", description="镜头分镜首帧提示词")
+    last_frame_prompt: str = Field("", description="镜头分镜尾帧提示词")
+    key_frame_prompt: str = Field("", description="镜头分镜关键帧提示词")
+    audio_opt_out: bool = Field(
+        False,
+        description="本镜明确标记无需声音（镜头级唯一的合法声明；默认 false=未表态，覆盖角色声音继承）",
+    )
+    video_prompt: str = Field(
+        "",
+        description="镜头视频提示词（文生视频用；与帧图片提示词分离，可由外部平台导入）",
+    )
+    video_prompt_source: str = Field(
+        "",
+        description="视频提示词来源标记（jurilu / external / manual / internal；空表示未知）",
+    )
 
 
 class ShotDetailUpdate(BaseModel):
+    """更新镜头细节的**写入**契约。
+
+    这里**没有** ``audio_file_id``（迁移 009 之前的逐镜声音）。理由：角色声音的唯一事实
+    来源是人物资产，第 2 步「人物资产详情」是全站唯一绑定入口；只要这个字段还在更新契约里，
+    普通调用方就还能新建 / 改掉一条"逐镜角色声音"，与"改人物资产的音色要让所有关联镜头
+    自动生效"的口径直接冲突（历史快照还会把新音色顶回去）。因此：
+
+    - 读：``ShotDetailRead`` 仍带该字段（历史数据只读展示 / 迁移对账）；
+    - 写：只剩 ``audio_opt_out`` —— 它是镜头级唯一的合法声明（本镜明确无需声音）。
+    """
+
     camera_shot: CameraShotType | None = None
     angle: CameraAngle | None = None
     movement: CameraMovement | None = None
@@ -192,12 +246,11 @@ class ShotDetailUpdate(BaseModel):
     key_frame_prompt: str | None = None
     video_prompt: str | None = None
     video_prompt_source: str | None = None
-    audio_file_id: str | None = Field(None, description="该镜头使用的音频文件 ID（files.type=audio）")
     audio_opt_out: bool | None = Field(
         None,
         description=(
-            "本镜**明确标记**无需声音。与 audio_file_id 互斥："
-            "置 true 时服务端会清空 audio_file_id；绑定音频时服务端会把本字段置 false。"
+            "本镜**明确标记**无需声音（镜头级唯一的合法声明）。置 true 时服务端同时清掉"
+            "迁移前留下的逐镜声音快照：本镜的生效结论就是没有声音，覆盖角色声音继承。"
         ),
     )
 

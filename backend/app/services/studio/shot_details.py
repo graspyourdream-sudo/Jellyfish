@@ -65,9 +65,11 @@ def build_default_detail(shot_id: str) -> ShotDetail:
 
     为什么必须有这一步：`ShotDetail` 与 `Shot` 是 1:1 共享主键，但
     `POST /studio/shots`（页面「创建分镜」）此前**只写 Shot**，于是手工建的镜头
-    永远没有细节行 —— 后续整条链路（PATCH 提示词、音频绑定、参考帧创建、
+    永远没有细节行 —— 后续整条链路（PATCH 提示词、参考帧创建、
     就绪判定）全部 404 / 400，而页面上看不出原因。默认值与
     `script_division` 里拆分镜时的取值相同，保证两条入口产物一致。
+    这里**不写** ``audio_file_id``：角色声音绑在人物资产上（第 2 步），
+    本行只保留镜头级唯一的合法声明 ``audio_opt_out``。
     """
     return ShotDetail(
         id=shot_id,
@@ -107,7 +109,12 @@ async def update(
     shot_id: str,
     body: ShotDetailUpdate,
 ) -> ShotDetail:
-    """更新镜头细节。"""
+    """更新镜头细节。
+
+    声音侧只接受 ``audio_opt_out``（本镜明确无需声音）。``audio_file_id`` 不在更新契约里，
+    因此**本函数没有任何路径**能新建 / 改写一条逐镜角色声音：角色声音的唯一事实来源是
+    人物资产，选择 / 更换只在第 2 步「人物资产详情」发生。
+    """
     obj = await get_or_404(db, ShotDetail, shot_id, detail=entity_not_found("ShotDetail"))
     update_data = body.model_dump(exclude_unset=True)
 
@@ -118,14 +125,14 @@ async def update(
         update_data["video_prompt_source"] = validate_video_prompt_source(update_data.get("video_prompt_source"))
     validate_product_text_fields(update_data)
 
-    # 声音两个字段互斥（用户要求"无需声音的镜头允许明确选择"）：
-    # - 绑定/更换音频 → 自动把"无需声音"标记清掉；
-    # - 明确标记"无需声音" → 自动解绑音频。
-    # 只在一侧被显式修改时动手，避免 PATCH 其它字段时误改声音状态。
+    # 声音只有一个写入口：本镜的「无需声音」声明（镜头级唯一的合法字段）。
+    # 角色声音属于**人物资产**（第 2 步「人物资产详情」是全站唯一绑定入口），
+    # 所以这里不再有"绑定音频 → 清掉无需声音"的反向联动：更新契约里
+    # 已经没有 audio_file_id，普通调用方无法再建立 / 改写一条逐镜角色声音。
+    # 置 true 时连迁移前留下的兼容快照也一并清掉：本镜的生效结论就是没有声音
+    # （快照只是兼容数据，留着只会让交付文本与生成口径互相矛盾）。
     if "audio_opt_out" in update_data and update_data.get("audio_opt_out"):
         update_data["audio_file_id"] = None
-    elif "audio_file_id" in update_data and update_data.get("audio_file_id"):
-        update_data["audio_opt_out"] = False
 
     old_scene_id = obj.scene_id
     scene_obj = None

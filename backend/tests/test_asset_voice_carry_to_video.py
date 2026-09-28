@@ -1,20 +1,32 @@
-"""B2b：镜头**没自己表态**时，从绑定的资产自动带出声音（需求清单第 6 条）。
+"""角色声音进视频生成：**唯一事实来源是人物资产**（需求清单第 6 条）。
 
 用户口径
 ========
 
-声音改为**直接绑在资产上**；镜头只要绑定了带声音的资产，视频生成就自动带出它的声音。
-优先级：**镜头绑定 → 资产声音**（镜头自己的选择永远优先，不会被资产覆盖）。
+声音属于**人物资产**，不属于单个镜头；第 2 步「人物资产详情」是全站唯一的绑定入口。
+所以生成侧解析「这一镜该用哪条声音」的顺序是：
 
-评审附带条件②：**兜底规则不许猜**。所以这里刻意有三态：
+1. ``shot_details.audio_opt_out`` = true → 本镜明确无需声音（覆盖一切继承）；
+2. **人物资产当前绑定的角色声音** → 只要人物资产有音色就**必须**用它；
+3. ``shot_details.audio_file_id`` → 迁移 009 之前的逐镜声音，**只作兼容快照兜底**，
+   **永不覆盖**人物资产的音色；
+4. 都没有 → 未绑定。
 
-============  ==============================================  ==================
-状态           条件                                            行为
-============  ==============================================  ==================
-``none``      绑定的资产里没有一个带声音                       不带、不产生噪音
-``single``    **恰好一个**带声音的资产                         带出它的声音，并说明来源
-``ambiguous`` **多个**带声音的资产                              **不替用户选**，留空 + 明示候选
-============  ==============================================  ==================
+「镜头自己的选择优先」是**已被推翻的旧口径**：改成资产级之后，镜头级不再是表达声音的地方，
+旧结论（镜头绑定压住人物资产音色）会让用户在第 2 步换完音色却仍然听到旧声音。
+
+角色声音**只认人物资产**：场景 / 道具 / 服装上的历史 ``asset_voice`` 行不参与，
+也不会制造"多个候选"的歧义。
+
+评审附带条件②：**兜底规则不许猜**。所以这里的多候选结论刻意有三态：
+
+============  =======================================  ==================
+状态          条件                                     行为
+============  =======================================  ==================
+``none``      绑定的**人物资产**里没有一个带声音        不带、不产生噪音
+``single``    **恰好一个**人物资产带声音                带出它的声音，并说明来源
+``ambiguous`` **多个**人物资产各自带声音                **不替用户选**，留空 + 明示候选
+============  =======================================  ==================
 
 「多人物镜头随便挑一个声音，比没有声音更糟糕」—— 这是这条规则的由来。
 
@@ -124,9 +136,36 @@ async def _carry(db: Any) -> Any:
     return await resolve_asset_voice_for_shot(db, shot_id=SHOT_ID)
 
 
+async def _bind_scene_voice(db: Any) -> None:
+    """给**本镜绑定的场景**绑一条历史资产声音（配乐/环境音那类数据的化身）。
+
+    这类行是兼容数据：接口仍可读写（不删数据），但角色声音的解析路径必须完全无视它。
+    """
+    from app.models.studio import FileItem, ProjectSceneLink, Scene
+    from app.models.types import FileType
+    from app.services.studio.asset_voices import bind_asset_voice
+
+    db.add(Scene(id="scene-x", name="侯府大堂", description="", style="真人古装", view_count=1, tags=[]))
+    db.add(
+        ProjectSceneLink(
+            project_id=PROJECT_ID, chapter_id=CHAPTER_ID, shot_id=SHOT_ID, scene_id="scene-x"
+        )
+    )
+    db.add(
+        FileItem(
+            id="file-scene-voice",
+            type=FileType.audio,
+            name="大堂环境音.mp3",
+            storage_key="https://cdn.example.test/scene-ambience.mp3",
+        )
+    )
+    await db.flush()
+    await bind_asset_voice(db, asset_type="scene", asset_id="scene-x", file_id="file-scene-voice")
+
+
 @pytest.mark.asyncio
 async def test_single_voiced_asset_is_carried() -> None:
-    """恰好一个带声音的资产 → 带出它的声音，并说明"这是从资产带出来的"。"""
+    """恰好一个人物资产有音色 → 带出它的声音，并说明"这是从人物资产继承的"。"""
     db, engine = await build_session()
     try:
         await _seed(db, characters=[("char-a", "丫鬟甲", PUBLIC_AUDIO)])
@@ -138,13 +177,13 @@ async def test_single_voiced_asset_is_carried() -> None:
     assert carry.file_id == AUDIO_A
     assert carry.url == PUBLIC_AUDIO
     assert "丫鬟甲" in carry.asset_label
-    assert "自动带出" in carry.note
+    assert "人物资产" in carry.note
     assert carry.candidates == ()
 
 
 @pytest.mark.asyncio
 async def test_two_voiced_assets_are_not_guessed() -> None:
-    """**附带条件②**：两个带声音的资产 → 一个都不选，留空并把候选说清。"""
+    """**附带条件②**：两个人物资产各有音色 → 一个都不选，留空并把候选说清。"""
     db, engine = await build_session()
     try:
         await _seed(db, characters=[("char-a", "丫鬟甲", PUBLIC_AUDIO), ("char-b", "丫鬟乙", PUBLIC_AUDIO_2)])
@@ -159,6 +198,24 @@ async def test_two_voiced_assets_are_not_guessed() -> None:
     assert "丫鬟甲" in carry.note and "丫鬟乙" in carry.note
     assert "不替你" in carry.note
     assert carry.note, "多个候选时必须明示，否则用户不知道声音为什么没带"
+    # 文案不许把用户指回"逐镜绑定声音"那个已经删掉的入口
+    assert "本镜单独" not in carry.note and "声音绑定" not in carry.note
+
+
+@pytest.mark.asyncio
+async def test_non_character_asset_voice_never_participates() -> None:
+    """场景上的历史 ``asset_voice`` 行**不参与**角色声音，也不制造"多个候选"。"""
+    db, engine = await build_session()
+    try:
+        await _seed(db, characters=[("char-a", "丫鬟甲", PUBLIC_AUDIO)])
+        await _bind_scene_voice(db)
+        carry = await _carry(db)
+    finally:
+        await engine.dispose()
+
+    assert carry.state == "single", "场景环境音不许把人物音色挤成'多个候选'"
+    assert carry.file_id == AUDIO_A
+    assert carry.candidates == ()
 
 
 @pytest.mark.asyncio
@@ -195,7 +252,9 @@ async def test_no_bound_assets_at_all() -> None:
 
 @pytest.mark.asyncio
 async def test_admission_carries_the_single_asset_voice_into_the_request() -> None:
-    """唯一候选时，声音真的进了准入结论（可携带），并带上来源说明。"""
+    """唯一候选时，人物资产的音色真的进了准入结论（可携带），来源标注为人物资产。"""
+    from app.services.studio.video_audio_input import VOICE_SOURCE_CHARACTER_ASSET
+
     db, engine = await build_session()
     try:
         await _seed(db, characters=[("char-a", "丫鬟甲", PUBLIC_AUDIO)])
@@ -206,7 +265,8 @@ async def test_admission_carries_the_single_asset_voice_into_the_request() -> No
     assert admission.file_id == AUDIO_A
     assert admission.included is True, "公网地址必须可携带"
     assert admission.url == PUBLIC_AUDIO
-    assert any("自动带出" in item for item in admission.extra_warnings)
+    assert admission.source == VOICE_SOURCE_CHARACTER_ASSET
+    assert any("人物资产" in item for item in admission.extra_warnings)
 
 
 @pytest.mark.asyncio
@@ -227,8 +287,11 @@ async def test_admission_leaves_audio_empty_and_explains_when_ambiguous() -> Non
 
 
 @pytest.mark.asyncio
-async def test_shot_own_binding_wins_over_asset_voice() -> None:
-    """**优先级**：镜头自己绑了声音 → 用它，资产声音一律不参与。"""
+async def test_character_asset_voice_wins_over_legacy_shot_snapshot() -> None:
+    """**优先级**：人物资产有音色 → 人物资产赢，历史逐镜快照一律不参与。
+
+    （旧口径"镜头自己的选择永远优先"已被推翻：镜头级不再是表达声音的地方。）
+    """
     from app.models.studio import ShotDetail
 
     db, engine = await build_session()
@@ -244,16 +307,82 @@ async def test_shot_own_binding_wins_over_asset_voice() -> None:
         await db.flush()
 
         admission = await resolve_audio_admission(db, shot_id=SHOT_ID, provider=PROVIDER, model=None)
-        # 镜头自己的绑定生效；资产那条"自动带出"的说明不应出现
-        assert admission.file_id == AUDIO_SHOT
-        assert not any("自动带出" in item for item in admission.extra_warnings)
+        # 人物资产的音色生效；快照那条路径的"兼容快照"标注**不应出现**
+        assert admission.file_id == AUDIO_A
+        assert admission.url == PUBLIC_AUDIO
+        assert not any("兼容口" in item for item in admission.extra_warnings)
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio
+async def test_legacy_snapshot_is_used_only_as_labelled_compatibility_fallback() -> None:
+    """人物资产没有音色时，才退回历史快照，并且**明确标注**它只是兼容快照。"""
+    from app.models.studio import FileItem, ShotDetail
+    from app.models.types import FileType
+    from app.services.studio.video_audio_input import VOICE_SOURCE_LEGACY_SNAPSHOT
+
+    db, engine = await build_session()
+    try:
+        await _seed(db, characters=[("char-a", "丫鬟甲", None)])
+        db.add(
+            FileItem(
+                id=AUDIO_SHOT,
+                type=FileType.audio,
+                name="迁移前逐镜配音.mp3",
+                storage_key="https://cdn.example.test/shot.mp3",
+            )
+        )
+        detail = await db.get(ShotDetail, SHOT_ID)
+        detail.audio_file_id = AUDIO_SHOT
+        await db.flush()
+
+        admission = await resolve_audio_admission(db, shot_id=SHOT_ID, provider=PROVIDER, model=None)
+    finally:
+        await engine.dispose()
+
+    assert admission.file_id == AUDIO_SHOT
+    assert admission.source == VOICE_SOURCE_LEGACY_SNAPSHOT
+    assert any("兼容口" in item for item in admission.extra_warnings), "快照必须被显式标注，不许静默使用"
+    assert any("第 2 步" in item for item in admission.extra_warnings), "要告诉用户以后到哪儿绑音色"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_character_voices_do_not_fall_back_to_the_snapshot() -> None:
+    """多个人物各有音色 + 本镜还留着旧快照：既**不挑**，也**不退回快照**。"""
+    from app.models.studio import FileItem, ShotDetail
+    from app.models.types import FileType
+
+    db, engine = await build_session()
+    try:
+        await _seed(
+            db,
+            characters=[("char-a", "丫鬟甲", PUBLIC_AUDIO), ("char-b", "丫鬟乙", PUBLIC_AUDIO_2)],
+        )
+        db.add(
+            FileItem(
+                id=AUDIO_SHOT,
+                type=FileType.audio,
+                name="迁移前逐镜配音.mp3",
+                storage_key="https://cdn.example.test/shot.mp3",
+            )
+        )
+        detail = await db.get(ShotDetail, SHOT_ID)
+        detail.audio_file_id = AUDIO_SHOT
+        await db.flush()
+
+        admission = await resolve_audio_admission(db, shot_id=SHOT_ID, provider=PROVIDER, model=None)
+    finally:
+        await engine.dispose()
+
+    assert admission.file_id == "", "不许用一条历史逐镜声音冒充多人物镜头的角色声音"
+    assert admission.included is False
+    assert "不替你" in " ".join(admission.extra_warnings)
+
+
+@pytest.mark.asyncio
 async def test_shot_opt_out_beats_asset_voice() -> None:
-    """镜头明确标记「无需声音」→ 资产声音**不许**把它顶回来（用户显式选择优先）。"""
+    """``audio_opt_out=true`` → 人物资产的音色**不许**被继承（本镜明确无需声音）。"""
     from app.models.studio import ShotDetail
 
     db, engine = await build_session()
@@ -266,9 +395,10 @@ async def test_shot_opt_out_beats_asset_voice() -> None:
     finally:
         await engine.dispose()
 
-    assert admission.file_id == "", "明确无需声音时不能被资产声音顶回来"
+    assert admission.file_id == "", "明确无需声音时不能被人物资产的音色顶回来"
     assert admission.included is False
-    assert not any("自动带出" in item for item in admission.extra_warnings)
+    assert admission.state == "opt_out"
+    assert not any("人物资产" in item for item in admission.extra_warnings)
 
 
 @pytest.mark.asyncio

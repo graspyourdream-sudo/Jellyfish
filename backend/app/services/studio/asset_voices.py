@@ -59,12 +59,21 @@ from app.services.studio.file_usages import (
     upsert_file_usage,
 )
 
-#: 允许绑定声音的资产类型。
+#: 允许绑定声音的资产类型（**接口层可写集合**）。
 #:
 #: 刻意**只写四类**、不用 ``asset_profiles.ASSET_TYPES``：那张表里还有 ``product``（商品，
 #: 供剧情策划用），而"商品的声音"不是本需求要的东西 —— 名单写在这里，避免上游扩表时
 #: 这个接口静默地跟着变宽。
+#:
+#: ⚠️ 但**角色声音只认 ``character``**：场景 / 道具 / 服装的行是历史兼容数据
+#: （接口仍可读写，不删用户数据），它们**不参与角色声音继承**，也不制造
+#: "多个候选"的歧义 —— 参与继承的解析路径见
+#: ``video_audio_input.resolve_asset_voice_for_shot``（只查 ``characters`` 槽位）
+#: 与 :func:`read_shot_voice_inheritance`（只读人物资产）。
 ASSET_VOICE_TYPES: tuple[str, ...] = ("character", "scene", "prop", "costume")
+
+#: 角色声音只来自这一类资产（人物资产）。继承 / 生成侧解析只看它。
+CHARACTER_VOICE_ASSET_TYPE = "character"
 
 #: 资产引用在 ``source_ref`` 里的前缀分隔符（``character:char-1``）。
 _SOURCE_REF_SEP = ":"
@@ -404,7 +413,8 @@ async def resolve_voices_for_assets(
 SHOT_VOICE_STATE_INHERITED = "inherited"
 #: 结论之一：多个角色绑了声音 → **不替用户挑**，只列候选。
 SHOT_VOICE_STATE_AMBIGUOUS = "ambiguous"
-#: 结论之一：角色一个都没绑，但这一镜自己还有迁移前留下的逐镜声音（只读快照）。
+#: 结论之一：角色一个都没绑，但这一镜自己还有迁移前留下的逐镜声音（只读快照；
+#: 生成侧只在人物资产没有音色时用它兜底，**永不覆盖**人物资产的音色）。
 SHOT_VOICE_STATE_LEGACY_SNAPSHOT = "legacy_snapshot"
 #: 结论之一：本镜已明确标记「无需声音」——生效结论就是没有声音。
 SHOT_VOICE_STATE_OPT_OUT = "opt_out"
@@ -456,11 +466,14 @@ async def read_shot_voice_inheritance(db: AsyncSession, *, shot_id: str) -> Shot
     - 本镜已明确标记「无需声音」→ ``opt_out``（生效结论就是没有声音；角色侧已绑的声音仍如实带回来，
       便于页面说明"这个角色有声音，只是本镜标记无需声音"）。
 
-    只认**人物资产**：本区块只管角色声音（人物配音）。场景 / 道具 / 服装上的声音由视频生成侧的
-    ``video_audio_input.resolve_asset_voice_for_shot`` 统一带出，不在第 4 步的角色声音检查里出现。
+    只认**人物资产**：本区块只管角色声音（人物配音），且只读 ``character`` 槽位 —— 场景 /
+    道具 / 服装上的历史 ``asset_voice`` 行不参与，也不会制造"多个候选"的歧义。
 
-    与 ``resolve_asset_voice_for_shot`` 的分工：那个函数面向**生成**（镜头自己没表态时才兜底带出，
-    且四类资产都算），本函数面向**检查**（只看人物资产、只读、不改任何生成行为）。
+    与 ``video_audio_input.resolve_asset_voice_for_shot`` 的分工：那个函数面向**生成**
+    （同样只认人物资产，结论是"这一镜该用哪条角色声音"），本函数面向**检查**
+    （只读结论 + 来源 + 缺项原因，不改任何生成行为）。两处读的是同一份事实来源
+    （``file_usages`` 上 ``usage_kind='asset_voice'`` 的 ``character:<ID>`` 行），
+    所以第 4 步看到的与实际生成用的**不会分叉**。
     """
     from app.services.studio.bound_asset_files import bound_asset_ids_for_shot
 
@@ -483,7 +496,9 @@ async def read_shot_voice_inheritance(db: AsyncSession, *, shot_id: str) -> Shot
         str(asset_id): str(asset_name or "")
         for asset_id, asset_name in (bound.get("characters") or {}).items()
     }
-    voices = await read_asset_voices(db, asset_ids_by_type={"character": sorted(characters)})
+    voices = await read_asset_voices(
+        db, asset_ids_by_type={CHARACTER_VOICE_ASSET_TYPE: sorted(characters)}
+    )
     # 顺序稳定：先按角色名、再按资产 ID（同一份数据每次结论一致）
     ordered = sorted(
         voices.values(),
@@ -535,6 +550,7 @@ async def read_shot_voice_inheritance(db: AsyncSession, *, shot_id: str) -> Shot
 
 __all__ = [
     "ASSET_VOICE_TYPES",
+    "CHARACTER_VOICE_ASSET_TYPE",
     "SHOT_VOICE_STATE_AMBIGUOUS",
     "SHOT_VOICE_STATE_INHERITED",
     "SHOT_VOICE_STATE_LEGACY_SNAPSHOT",

@@ -27,6 +27,18 @@
 "参考音频会进入供应商请求（本轮仅在请求计划层验证）"。
 完整说明（含计划响应字段、准入口径表、未验证部分）见 ``docs/reference-audio-scope.md``。
 
+**"这一镜该用哪条声音"的唯一口径**（顺序即优先级，只有
+:func:`resolve_audio_admission` 一处实现）：
+
+1. ``shot_details.audio_opt_out`` = true → 本镜明确无需声音（覆盖一切继承）；
+2. **人物资产当前绑定的角色声音**（第 2 步「人物资产详情」是全站唯一绑定入口）；
+3. ``shot_details.audio_file_id`` → 迁移 009 之前的逐镜声音，**只作兼容快照兜底**，
+   永不覆盖第 2 步的人物资产音色；
+4. 都没有 → 未绑定。
+
+角色声音**只认人物资产**：场景 / 道具 / 服装上的历史 ``asset_voice`` 行、
+配乐 / 环境音 / 音效 / 最终成片音轨都不参与，也不会制造"多个候选"的歧义。
+
 准入口径只有一处（:func:`classify_audio_input`，本模块）：
 
 1. 只有**公网 http(s)** 或 **``asset://``** 的音频才允许进入请求；
@@ -85,6 +97,14 @@ INCLUDED_STATES: frozenset[str] = frozenset(
     {STATE_INCLUDED_PUBLIC, STATE_INCLUDED_ASSET, STATE_INCLUDED_DATA_URL_INLINE}
 )
 
+# 这条声音是从哪来的（审计用；顺序即 ``resolve_audio_admission`` 的优先级）。
+#: 来自**人物资产**当前绑定的角色声音（唯一事实来源）
+VOICE_SOURCE_CHARACTER_ASSET = "character_asset"
+#: 来自迁移 009 之前的逐镜声音快照（**兼容口**，只在人物资产没有音色时兜底）
+VOICE_SOURCE_LEGACY_SNAPSHOT = "legacy_shot_snapshot"
+#: 本镜不携带任何声音（未绑定 / 明确无需声音 / 多个人物音色无法判定）
+VOICE_SOURCE_NONE = "none"
+
 _HTTP_PREFIXES = ("http://", "https://")
 
 
@@ -109,6 +129,8 @@ class AudioAdmission:
     note: str = ""
     vendor_supports_reference_audio: bool = False
     opt_out: bool = False
+    #: 这条声音的来源（``VOICE_SOURCE_*``）：人物资产 / 兼容快照 / 无
+    source: str = VOICE_SOURCE_NONE
     #: 绑定解析带出来的其它告警（例如 files 表里查不到该 file_id）
     extra_warnings: tuple[str, ...] = ()
 
@@ -124,6 +146,7 @@ class AudioAdmission:
             "how_to_fix": self.how_to_fix,
             "state": self.state,
             "vendor_supports_reference_audio": self.vendor_supports_reference_audio,
+            "voice_source": self.source,
             "note": REFERENCE_AUDIO_TERMS_NOTE,
         }
 
@@ -154,8 +177,14 @@ def classify_audio_input(  # pylint: disable=too-many-return-statements
     opt_out: bool = False,
     file_found: bool = True,
     extra_warnings: tuple[str, ...] = (),
+    source: str = VOICE_SOURCE_NONE,
 ) -> AudioAdmission:
     """**唯一**的参考音频准入口径（纯函数，不碰 DB、不发请求）。
+
+    注意职责边界：本函数只判"**给定的这条**声音能不能进请求"，
+    "该用哪条声音"（opt_out → 人物资产音色 → 兼容快照 → 无）由
+    :func:`resolve_audio_admission` 决定，且**只有那一处**。``source`` 只是把
+    那条结论的来源如实带回审计结构（人物资产 / 兼容快照 / 无），不参与判定。
 
     判定顺序（先"有没有绑定/有没有文件"，再"供应商吃不吃"，最后"地址形态对不对"）：
 
@@ -216,6 +245,7 @@ def classify_audio_input(  # pylint: disable=too-many-return-statements
             note=text,
             vendor_supports_reference_audio=vendor_supports,
             opt_out=opt_out,
+            source=source,
             extra_warnings=extra_warnings,
         )
 
@@ -233,7 +263,11 @@ def classify_audio_input(  # pylint: disable=too-many-return-statements
             STATE_NOT_BOUND,
             "not_bound",
             excluded_reason="未绑定：这条镜头没有绑定任何声音文件，本次生成请求不携带参考音频。",
-            how_to_fix="要带参考音频请在「声音绑定」里上传/选择一条音频；不需要就明确标记「本镜无需声音」。",
+            how_to_fix=(
+                "要带参考音频请到第 2 步「人物资产详情」给这一镜关联的人物绑定音色"
+                "（角色声音绑在**人物资产**上，本镜没有单独配声音的入口）；"
+                "这一镜确实不需要声音就明确标记「本镜无需声音」。"
+            ),
         )
 
     if not file_found:
@@ -245,7 +279,10 @@ def classify_audio_input(  # pylint: disable=too-many-return-statements
                 f"已绑定声音「{label_text}」（file_id={clean_id}），但素材库里查不到这个文件记录："
                 "供应商无法访问，本次生成请求不携带它。"
             ),
-            how_to_fix="请在「声音绑定」里重新上传或重新选择一条音频素材（旧记录可能已被删除）。",
+            how_to_fix=(
+                "请到第 2 步「人物资产详情」重新上传或重新选择这一镜人物资产的音色"
+                "（旧素材记录可能已被删除）；本镜没有单独配声音的入口。"
+            ),
         )
 
     if not vendor_supports:
@@ -353,27 +390,26 @@ def classify_audio_input(  # pylint: disable=too-many-return-statements
     )
 
 
-#: 镜头绑定的资产槽位 → 资产类型（``bound_asset_ids_for_shot`` 的键）。
-#: 刻意**不含** ``products``：资产声音支持的是角色/场景/道具/服装四类，
-#: 商品（剧情策划用）不在其中（与 ``asset_voices.ASSET_VOICE_TYPES`` 同口径）。
-_SLOT_TO_ASSET_TYPE: dict[str, str] = {
-    "characters": "character",
-    "scene": "scene",
-    "props": "prop",
-    "costumes": "costume",
-}
+#: 角色声音只认**人物资产**：镜头绑定的人物槽位 → 资产类型。
+#:
+#: 刻意**只有这一项**。场景 / 道具 / 服装上的 ``asset_voice`` 行是历史兼容数据，
+#: **不参与角色声音**（配乐 / 环境音 / 音效 / 最终成片音轨更不在其中，它们连
+#: ``asset_voice`` 都不是）。把它们也算进来的代价不只是"多带一条声音"：
+#: 一个镜头只要绑了带声音的场景，结论就变成"多个候选"→ 角色声音被挤掉不生效 ——
+#: 这正是本次要修的缺陷。
+_CHARACTER_VOICE_SLOT: dict[str, str] = {"characters": "character"}
 
 
 @dataclass(frozen=True, slots=True)
 class AssetVoiceCarry:
-    """镜头没自己表态时，从**该镜绑定的资产**带出声音的结论。
+    """这一镜**该用的角色声音**（从人物资产继承）的结论。
 
     三种状态，**第三种是刻意留出来的**（评审附带条件②：不许猜）：
 
-    - ``none``：这一镜绑定的资产里没有一个带声音 → 什么都不带，也不产生噪音
-      （与"没绑声音"的既有行为一致）；
-    - ``single``：**恰好一个**带声音的资产 → 带出它的声音；
-    - ``ambiguous``：**多个**带声音的资产 → **不替用户选**，留空并说清是哪几个。
+    - ``none``：这一镜绑定的人物资产里没有一个带声音 → 本函数不提供声音
+      （调用方是否退回"兼容快照"由 ``resolve_audio_admission`` 决定）；
+    - ``single``：**恰好一个**人物资产绑了声音 → 就是它，视频生成必须用它；
+    - ``ambiguous``：**多个**人物资产各自绑了声音 → **不替用户选**，留空并说清是哪几个。
       多人物镜头随便挑一个声音，比没有声音更糟糕。
     """
 
@@ -389,10 +425,17 @@ class AssetVoiceCarry:
 
 
 async def resolve_asset_voice_for_shot(db: AsyncSession, *, shot_id: str) -> AssetVoiceCarry:
-    """镜头**自己没表态**时（既没绑声音、也没标记无需声音），从绑定资产带出声音。
+    """读出这一镜**该用的角色声音**：**只认人物资产**（第 2 步是全站唯一的绑定入口）。
 
-    优先级（用户口径）：**镜头绑定 → 资产声音**。本函数只负责第二步，
-    调用方必须先确认镜头自己没有表态，否则会覆盖用户在本镜上的显式选择。
+    口径（与 ``asset_voices.read_shot_voice_inheritance`` 读的是同一份事实来源）：
+
+    - ``single``：恰好一个**人物资产**绑了声音 → 就是它，调用方必须用它；
+    - ``ambiguous``：多个**人物资产**各自绑了声音 → **不替用户挑**，留空 + 列出候选；
+    - ``none``：这一镜的人物资产没有一个带声音 → 本函数不提供声音。
+
+    为什么只查``characters`` 槽位：角色声音属于**人物资产**。场景 / 道具 / 服装上的
+    ``asset_voice`` 行是历史兼容数据，既不当候选、也不制造"多个候选"的歧义
+    （否则一条场景环境音就能把人物音色挤掉）。
     """
     from app.services.studio.asset_voices import read_asset_voices
     from app.services.studio.bound_asset_files import bound_asset_ids_for_shot
@@ -400,7 +443,7 @@ async def resolve_asset_voice_for_shot(db: AsyncSession, *, shot_id: str) -> Ass
     bound = await bound_asset_ids_for_shot(db, shot_id=shot_id)
     by_type: dict[str, list[str]] = {}
     names: dict[tuple[str, str], str] = {}
-    for slot, asset_type in _SLOT_TO_ASSET_TYPE.items():
+    for slot, asset_type in _CHARACTER_VOICE_SLOT.items():
         for asset_id, asset_name in (bound.get(slot) or {}).items():
             by_type.setdefault(asset_type, []).append(str(asset_id))
             names[(asset_type, str(asset_id))] = str(asset_name or "")
@@ -409,11 +452,10 @@ async def resolve_asset_voice_for_shot(db: AsyncSession, *, shot_id: str) -> Ass
     if not voices:
         return AssetVoiceCarry(state="none")
 
-    # 顺序稳定：按资产类型固定顺序 + 资产名，保证同一份数据每次结论一致
-    type_order = list(_SLOT_TO_ASSET_TYPE.values())
+    # 顺序稳定：按资产名 + 资产 ID，保证同一份数据每次结论一致
     ordered = sorted(
         voices.values(),
-        key=lambda item: (type_order.index(item.asset_type), names.get((item.asset_type, item.asset_id), "")),
+        key=lambda item: (names.get((item.asset_type, item.asset_id), ""), item.asset_id),
     )
 
     if len(ordered) > 1:
@@ -425,8 +467,10 @@ async def resolve_asset_voice_for_shot(db: AsyncSession, *, shot_id: str) -> Ass
             state="ambiguous",
             candidates=labels,
             note=(
-                f"本镜绑定了 {len(ordered)} 个带声音的资产（{'、'.join(labels)}），"
-                "系统不替你挑：请在本镜单独指定要用的声音，或只保留一个带声音的资产。"
+                f"本镜关联了 {len(ordered)} 个人物资产、它们各自绑了音色（{'、'.join(labels)}）："
+                "系统不替你挑其中一个 —— 挑错会把这一镜的声音配错人。"
+                "请确认这一镜是否真的需要多个人物音色同时参与（当前一条参考音频只承载一位人物的音色），"
+                "必要时把这一镜拆开，或先在剧本/分镜层确认这几位人物在本镜各自说了什么。"
             ),
         )
 
@@ -437,7 +481,7 @@ async def resolve_asset_voice_for_shot(db: AsyncSession, *, shot_id: str) -> Ass
         file_id=only.file_id,
         url=only.url,
         asset_label=label,
-        note=f"本镜没有单独绑定声音，已自动带出这一镜绑定的{label}所绑定的声音。",
+        note=f"本镜没有单独声明声音，已按人物资产继承{label}当前绑定的音色。",
     )
 
 
@@ -448,44 +492,55 @@ async def resolve_audio_admission(
     provider: str,
     model: str | None,
 ) -> AudioAdmission:
-    """从库里解析本镜绑定声音 → 走 :func:`classify_audio_input` 得到准入结论。
+    """从库里解析本镜**该用哪条声音** → 走 :func:`classify_audio_input` 得到准入结论。
 
     **计划与提交都必须经这个入口**：以前两边各写一份"公网地址才带"的判断，
     结果 ``asset://`` 与内网地址在两处的结论不一致（页面说能带、提交却剔除）。
 
-    地址取自**两个来源**（顺序即优先级）：
+    「用哪条声音」的**唯一口径**（顺序即优先级，**不得再改回按镜头优先**）：
+
+    1. ``shot_details.audio_opt_out`` = true → **本镜明确无需声音**，覆盖一切继承
+       （这是镜头级唯一的合法声明）；
+    2. **人物资产当前绑定的角色声音**（第 2 步「人物资产详情」是全站唯一的绑定入口）。
+       只要人物资产有音色，生成就必须读它 —— 用户在第 2 步换音色，
+       所有关联镜头下次生成自动用新音色，不需要逐镜改；
+    3. ``shot_details.audio_file_id`` —— 迁移 009 之前留下的**兼容快照**，
+       **只在人物资产没有音色时兜底**，并且**永远不覆盖**人物资产的声音；
+    4. 都没有 → 未绑定（不制造噪音）。
+
+    第 2 步的 ``ambiguous``（多个**人物资产**各自有音色）**不挑一个**，也**不退回快照**：
+    退回快照等于用一条历史逐镜声音冒充角色声音，会与用户刚在第 2 步改过的音色互相矛盾。
+
+    地址取自**两个来源**：
 
     1. ``files.storage_key`` 本身就是供应商接受的绝对引用（``http(s)://`` / ``asset://``）
        → **直通**。与帧参考图那条路同源（``resolve_vendor_image_ref`` 用
        ``is_public_storage_key`` 直通），否则 ``asset://`` 素材会被当成相对 key 去
        对象存储里找 → 解析失败 → 明明是合法地址却被判"不可携带"；
-    2. 否则用绑定解析出来的地址（``resolve_shot_audio_file``：公网基址 / 本机回放地址），
-       是"本机回放地址"时由 :func:`classify_audio_input` 判为 ``local_path`` 并说明原因。
+    2. 否则用解析出来的地址（公网基址 / 本机回放地址），是"本机回放地址"时由
+       :func:`classify_audio_input` 判为 ``local_path`` 并说明原因。
     """
     from app.models.studio import FileItem, ShotDetail
     from app.utils.files import is_public_storage_key
 
     detail = await db.get(ShotDetail, shot_id)
     opt_out = bool(getattr(detail, "audio_opt_out", False)) if detail is not None else False
-    detail_file_id = str(getattr(detail, "audio_file_id", "") or "") if detail is not None else ""
+    legacy_file_id = str(getattr(detail, "audio_file_id", "") or "").strip() if detail is not None else ""
 
-    bound = await resolve_shot_audio_file(db, shot_id=shot_id)
-    if bound is None:
-        # 走到这里 = 镜头**自己没有表态**（既没绑 audio_file_id，也没标记无需声音）。
-        # 需求清单第 6 条：这时从**这一镜绑定的资产**带出声音（资产级声音在第 2 步绑好，
-        # 工作室不再逐镜配）。镜头自己的选择永远优先 —— 它一旦有值就在上面的分支里处理完了。
-        carry = await resolve_asset_voice_for_shot(db, shot_id=shot_id)
-        if not carry.file_id:
-            # `none`（没有带声音的资产）不制造噪音；`ambiguous`（多个候选）必须明示，
-            # 因为那是"我们刻意没带"、用户需要知道为什么。
-            return classify_audio_input(
-                file_id="",
-                url="",
-                provider=provider,
-                model=model,
-                opt_out=opt_out,
-                extra_warnings=(carry.note,) if carry.note else (),
-            )
+    # ① opt_out：镜头级唯一的合法声明，一票否决（连兼容快照也不用）
+    if opt_out:
+        return classify_audio_input(
+            file_id="",
+            url="",
+            provider=provider,
+            model=model,
+            opt_out=True,
+            source=VOICE_SOURCE_NONE,
+        )
+
+    # ② 人物资产当前绑定的角色声音（唯一事实来源）
+    carry = await resolve_asset_voice_for_shot(db, shot_id=shot_id)
+    if carry.file_id:
         carry_obj = await db.get(FileItem, carry.file_id)
         carry_key = str(getattr(carry_obj, "storage_key", "") or "").strip()
         carry_url = carry_key if is_public_storage_key(carry_key) else str(carry.url or "")
@@ -494,27 +549,89 @@ async def resolve_audio_admission(
             url=carry_url,
             provider=provider,
             model=model,
-            label=carry.asset_label or carry.file_id,
-            opt_out=opt_out,
+            # 标签用音频文件名（用户认得的那一个）；来源（哪个人物资产）在 carry.note 里说清
+            label=str(getattr(carry_obj, "name", "") or "") or carry.asset_label or carry.file_id,
+            opt_out=False,
             file_found=carry_obj is not None,
             extra_warnings=(carry.note,) if carry.note else (),
+            source=VOICE_SOURCE_CHARACTER_ASSET,
         )
 
-    file_id = str(bound.file_id or "") or detail_file_id
+    if carry.state == "ambiguous":
+        # 多个人物资产各有音色：不挑、也不退回历史快照（说明在 carry.note 里）。
+        return classify_audio_input(
+            file_id="",
+            url="",
+            provider=provider,
+            model=model,
+            opt_out=False,
+            extra_warnings=(carry.note,) if carry.note else (),
+            source=VOICE_SOURCE_NONE,
+        )
+
+    # ③ 兼容快照：迁移 009 之前的逐镜声音，只在人物资产没有音色时兜底
+    if legacy_file_id:
+        return await _legacy_snapshot_admission(
+            db,
+            shot_id=shot_id,
+            legacy_file_id=legacy_file_id,
+            provider=provider,
+            model=model,
+        )
+
+    # ④ 都没有：如实说"未绑定"，不制造噪音
+    return classify_audio_input(
+        file_id="",
+        url="",
+        provider=provider,
+        model=model,
+        opt_out=False,
+        source=VOICE_SOURCE_NONE,
+    )
+
+
+async def _legacy_snapshot_admission(
+    db: AsyncSession,
+    *,
+    shot_id: str,
+    legacy_file_id: str,
+    provider: str,
+    model: str | None,
+) -> AudioAdmission:
+    """兼容回退路径：用迁移前的逐镜声音快照，并**显式标注**它只是兼容快照。
+
+    这条路径只在"这一镜的人物资产还没有绑音色"时才会走到。标注必须带上，
+    否则用户会以为人物资产的音色没生效、又去找逐镜绑定的入口（那个入口已经不存在）。
+    """
+    from app.models.studio import FileItem
+    from app.services.studio.bound_asset_files import resolve_shot_audio_file
+    from app.utils.files import is_public_storage_key
+
+    bound = await resolve_shot_audio_file(db, shot_id=shot_id)
+    file_id = (str(getattr(bound, "file_id", "") or "") or legacy_file_id).strip()
     file_obj = await db.get(FileItem, file_id) if file_id else None
     storage_key = str(getattr(file_obj, "storage_key", "") or "").strip()
-    url = storage_key if is_public_storage_key(storage_key) else str(bound.url or "")
+    url = storage_key if is_public_storage_key(storage_key) else str(getattr(bound, "url", "") or "")
+    label = str(getattr(bound, "asset_name", "") or "") or file_id or "（未命名音频）"
 
+    warnings = list(getattr(bound, "warnings", ()) or ()) if bound is not None else []
+    warnings.append(
+        "本镜当前用的是**迁移前留下的逐镜声音快照**（兼容口，只读）："
+        "这一镜关联的人物资产还没有绑定音色。"
+        "到第 2 步「人物资产详情」给人物绑定音色后，本镜下次生成会自动改用人物资产的音色，"
+        "不需要逐镜修改。"
+    )
     return classify_audio_input(
         file_id=file_id,
         url=url,
         provider=provider,
         model=model,
-        label=str(bound.asset_name or file_id or "（未命名音频）"),
-        opt_out=opt_out,
+        label=label,
+        opt_out=False,
         # ``files`` 表里查不到该 file_id 时，绑定解析会给出警示且不带 file_id
         file_found=file_obj is not None,
-        extra_warnings=tuple(bound.warnings),
+        extra_warnings=tuple(warnings),
+        source=VOICE_SOURCE_LEGACY_SNAPSHOT,
     )
 
 
@@ -597,9 +714,9 @@ async def describe_shot_audio_for_video(
     provider: str,
     model: str | None,
 ) -> str:
-    """只读描述：这个镜头绑定的声音会不会进入本次视频生成请求。
+    """只读描述：这一镜**该用的角色声音**会不会进入本次视频生成请求。
 
-    给计划预览用的**不花钱**说明；没有绑定声音（或明确无需声音）时返回空串（不制造噪音）。
+    给计划预览用的**不花钱**说明；没有可用声音（或明确无需声音）时返回空串（不制造噪音）。
     """
     admission = await resolve_audio_admission(
         db, shot_id=shot_id, provider=provider, model=model
@@ -616,10 +733,15 @@ __all__ = [
     "REFERENCE_AUDIO_TERMS_NOTE",
     "STATE_NOT_BOUND",
     "STATE_OPT_OUT",
+    "VOICE_SOURCE_CHARACTER_ASSET",
+    "VOICE_SOURCE_LEGACY_SNAPSHOT",
+    "VOICE_SOURCE_NONE",
     "AudioAdmission",
+    "AssetVoiceCarry",
     "attach_shot_audio_to_video_input",
     "classify_audio_input",
     "describe_shot_audio_for_video",
     "plan_audio_state",
+    "resolve_asset_voice_for_shot",
     "resolve_audio_admission",
 ]
