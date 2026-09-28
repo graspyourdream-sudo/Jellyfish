@@ -55,7 +55,10 @@ FORBIDDEN_IN_MAIN = [
 ]
 
 #: 主区禁词扫描时**豁免**的区域（默认收起的技术详情层允许出现内部标识）
-WAIVED_SELECTORS = [".ant-collapse-content", ".studio-rail", ".ant-table"]
+#: 主区禁词扫描时豁免的区域：**默认收起的技术详情层**（内部标识只允许出现在那里）
+#: `details` = 全仓唯一的「技术详情」折叠壳（原生 `<details>`，收起时 innerText 不含内容），
+#: `.ant-collapse-content` = antd 折叠内容。两者都是"默认收起、展开才可见"的合规落点。
+WAIVED_SELECTORS = ["details", ".ant-collapse-content", ".studio-rail", ".ant-table"]
 
 
 @dataclass
@@ -280,10 +283,21 @@ def main() -> int:
         )
 
         # ---- 6. 刷新恢复阶段 + 当前镜头 ----
-        # 先切回阶段 3 并记录 URL（含 ?shot=）
+        # 先切回阶段 3，然后**在刷新前一刻**记录"阶段 / 镜头 / URL 里的 shot 参数"。
+        # 为什么不复用更早捕获的标签：阶段切换会触发既有的"自动定位到该阶段第一个未完成镜头"
+        # （`onAutoLocateShot`），所以跨阶段之后的当前镜头本来就可能变过 ——
+        # 要验的是"刷新恢复到**刷新前**的状态"，就必须拿刷新前那一刻的值比。
         browser.click('[data-studio-phase="video_prompt"]')
-        browser.wait_for_ready(settle=1.2)
+        browser.wait_for_ready(settle=1.5)
         deep_url = str(browser.evaluate("location.href"))
+        shot_at_reload = str(
+            browser.evaluate("document.querySelector('[data-testid=\"studio-current-shot\"]')?.textContent || ''")
+        )
+        phase_at_reload = browser.evaluate(
+            "document.querySelector('[data-studio-phase].is-active')?.getAttribute('data-studio-phase')"
+        )
+        url_shot_param = str(browser.evaluate("new URLSearchParams(location.search).get('shot') || ''"))
+
         browser.goto(deep_url, settle=2.5)
         browser.wait_for_selector('[data-testid="studio-shell"]', timeout=25)
         restored_phase = browser.evaluate(
@@ -294,8 +308,11 @@ def main() -> int:
         rec.add(
             6,
             "刷新恢复：阶段与当前镜头都从 URL 恢复",
-            restored_phase == "video_prompt" and restored_shot == shot_before,
-            f"阶段={restored_phase}；镜头=「{restored_shot}」（刷新前「{shot_before}」）",
+            restored_phase == phase_at_reload
+            and restored_shot == shot_at_reload
+            and bool(url_shot_param),
+            f"刷新前：阶段={phase_at_reload} 镜头=「{shot_at_reload}」URL 里 shot={url_shot_param or '（缺失）'}；"
+            f"刷新后：阶段={restored_phase} 镜头=「{restored_shot}」",
             s6,
         )
 

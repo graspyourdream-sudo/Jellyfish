@@ -897,6 +897,21 @@ const ChapterStudio: React.FC = () => {
         return
       }
 
+      /*
+       * **深链优先**：URL 里的 `?shot=` 必须压过"第一个未完成镜头"的启发式。
+       *
+       * 为什么必须在这里（而不是只靠后面的同步 effect）：下面那条
+       * 「当前镜头不存在就选第一个未完成镜头」会在**同一个批次**里先把当前镜头设成 S001，
+       * 于是"把状态写回 URL"的 effect 立刻用 S001 覆盖掉深链里的 S002 ——
+       * 表现就是"复制带 shot 的链接打开 / 刷新后掉回第 1 镜"（浏览器实测复现）。
+       * 在初始选择这一处判定，`selectedShotId` 从第一次渲染起就是 URL 指定的那一镜。
+       */
+      const urlShotId = readStudioUrlState(location.search).shotId
+      if (urlShotId && enriched.some((shot) => shot.id === urlShotId)) {
+        setSelectedShotId(urlShotId)
+        return
+      }
+
       const selectedExists = selectedShotId ? enriched.some((s) => s.id === selectedShotId) : false
       if (!selectedShotId || !selectedExists) {
         const firstUnfinished = enriched.find((s) => !s.hidden && s.status !== 'ready')
