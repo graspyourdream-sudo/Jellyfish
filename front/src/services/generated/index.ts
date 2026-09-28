@@ -106,6 +106,7 @@ export type { ApiResponse_ShotPreparationStateRead_ } from './models/ApiResponse
 export type { ApiResponse_ShotRead_ } from './models/ApiResponse_ShotRead_';
 export type { ApiResponse_ShotVideoPromptPreviewRead_ } from './models/ApiResponse_ShotVideoPromptPreviewRead_';
 export type { ApiResponse_ShotVideoReadinessRead_ } from './models/ApiResponse_ShotVideoReadinessRead_';
+export type { ApiResponse_ShotVoiceInheritanceRead_ } from './models/ApiResponse_ShotVoiceInheritanceRead_';
 export type { ApiResponse_StudioScriptExtractionDraft_ } from './models/ApiResponse_StudioScriptExtractionDraft_';
 export type { ApiResponse_TaskCancelRead_ } from './models/ApiResponse_TaskCancelRead_';
 export type { ApiResponse_TaskCreated_ } from './models/ApiResponse_TaskCreated_';
@@ -364,6 +365,7 @@ export type { ShotVideoPromptPackRead } from './models/ShotVideoPromptPackRead';
 export type { ShotVideoPromptPreviewRead } from './models/ShotVideoPromptPreviewRead';
 export type { ShotVideoReadinessCheck } from './models/ShotVideoReadinessCheck';
 export type { ShotVideoReadinessRead } from './models/ShotVideoReadinessRead';
+export type { ShotVoiceInheritanceRead } from './models/ShotVoiceInheritanceRead';
 export type { StudioAssetDraft } from './models/StudioAssetDraft';
 export type { StudioCharacterDraft } from './models/StudioCharacterDraft';
 export type { StudioImageTaskRequest } from './models/StudioImageTaskRequest';

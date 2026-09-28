@@ -5,6 +5,7 @@
 import type { ApiResponse_AssetVoiceClearRead_ } from '../models/ApiResponse_AssetVoiceClearRead_';
 import type { ApiResponse_AssetVoiceRead_ } from '../models/ApiResponse_AssetVoiceRead_';
 import type { ApiResponse_list_AssetVoiceRead__ } from '../models/ApiResponse_list_AssetVoiceRead__';
+import type { ApiResponse_ShotVoiceInheritanceRead_ } from '../models/ApiResponse_ShotVoiceInheritanceRead_';
 import type { AssetVoiceBindRequest } from '../models/AssetVoiceBindRequest';
 import type { CancelablePromise } from '../core/CancelablePromise';
 import { OpenAPI } from '../core/OpenAPI';
@@ -109,6 +110,31 @@ export class StudioAssetVoicesService {
             path: {
                 'asset_type': assetType,
                 'asset_id': assetId,
+            },
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * 读取某镜角色声音的继承结果与来源（只读、免费；第 4 步唯一读路径）
+     * 第 4 步「资产与声音检查」的**只读**读口：这一镜的角色声音继承结果、来源、缺项原因。
+     *
+     * 刻意**只有 GET**：第 4 步不提供第二套选择 / 更换入口，也不回写。
+     * 要改声音请回第 2 步「人物资产详情」（``PUT /asset-voices/character/{id}``）。
+     * @returns ApiResponse_ShotVoiceInheritanceRead_ Successful Response
+     * @throws ApiError
+     */
+    public static getShotVoiceInheritanceApiV1StudioAssetVoicesShotsShotIdInheritanceGet({
+        shotId,
+    }: {
+        shotId: string,
+    }): CancelablePromise<ApiResponse_ShotVoiceInheritanceRead_> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/v1/studio/asset-voices/shots/{shot_id}/inheritance',
+            path: {
+                'shot_id': shotId,
             },
             errors: {
                 422: `Validation Error`,
