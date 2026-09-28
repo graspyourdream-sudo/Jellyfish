@@ -10,7 +10,8 @@
  * | `pages/aiStudio/shots/**` | 本目录全部非测试源码：`ChapterShotEditPage.tsx`、`ChapterShotsPage.tsx`、
  * `shotStudioCopy.ts`、`components/{ChapterShotAssetBindingSection,ChapterShotAssetConfirmation,`
  * `ChapterShotBasicInfoSection,ChapterShotDialogueConfirmation,ChapterShotPreparationGuide,`
- * `ShotAudioBindingSection}.tsx`、`components/{audioAdmissionCore,bindingRecommendationRules}.ts` |
+ * `ShotAudioBindingSection,ShotAudioOptOutSwitch}.tsx`、`components/{audioAdmissionCore,`
+ * `bindingRecommendationRules,shotAudioOptOut}.ts` |
  *
  * ⚠️ **本区域没有任何行级豁免**：`shots/**` 里出现基准禁词表里的任何一个词就是失败。
  * 之所以能这样，是因为第三层内容全部落在**共享折叠壳** `TechnicalDetailSection` 里
@@ -77,8 +78,10 @@ const REGISTERED_FILES: readonly string[] = [
   'components/ChapterShotDialogueConfirmation.tsx',
   'components/ChapterShotPreparationGuide.tsx',
   'components/ShotAudioBindingSection.tsx',
+  'components/ShotAudioOptOutSwitch.tsx',
   'components/audioAdmissionCore.ts',
   'components/bindingRecommendationRules.ts',
+  'components/shotAudioOptOut.ts',
 ]
 
 /** `shots/**` 的目录结构 —— 每个目录都必须有文件，否则说明遍历被缩窄了。 */

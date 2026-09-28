@@ -31,6 +31,8 @@ import { ChapterShotAssetConfirmation } from './components/ChapterShotAssetConfi
 import { ChapterShotBasicInfoSection } from './components/ChapterShotBasicInfoSection'
 import { ChapterShotDialogueConfirmation } from './components/ChapterShotDialogueConfirmation'
 import { ChapterShotPreparationGuide } from './components/ChapterShotPreparationGuide'
+import { ShotAudioOptOutSwitch } from './components/ShotAudioOptOutSwitch'
+import { shotAudioOptOutPatch } from './components/shotAudioOptOut.ts'
 import { useRelationTaskNotification } from '../components/taskNotificationHelpers'
 import { useTaskPageContext } from '../components/taskPageContext'
 import { createTaskSettledReloader } from '../components/taskResultHelpers'
@@ -212,6 +214,8 @@ export function ChapterShotEditPage() {
   const [extractingAssets, setExtractingAssets] = useState(false)
   const [batchExtractingAssets, setBatchExtractingAssets] = useState(false)
   const [skipExtractionUpdating, setSkipExtractionUpdating] = useState(false)
+  /** 「本镜无需声音」标记正在保存（Task 4：这条标记写的是本镜自己的那一格，不动角色声音） */
+  const [audioOptOutSaving, setAudioOptOutSaving] = useState(false)
   const extractInFlightRef = useRef(false)
   const [selectedShotIds, setSelectedShotIds] = useState<string[]>(shotId ? [shotId] : [])
   const pendingExternalAssetCreateRef = useRef(false)
@@ -799,6 +803,36 @@ export function ChapterShotEditPage() {
     })
   }, [])
 
+  /**
+   * 写入「本镜无需声音」这一个标记（Task 4）。
+   *
+   * 三件事必须说清：
+   *   1. 只带 `audio_opt_out` 一个字段（镜头详情补丁是"只改传进来的字段"）。
+   *      后端在置 true 时会顺手清掉这一镜的历史音频、置 false 时不再动它 —— 那是既有语义，
+   *      本页一个字都没改；
+   *   2. 用服务端返回体刷新详情，保证"界面看到的 = 刷新后仍在的"；
+   *   3. **不碰人物资产**：角色声音的绑定 / 更换只在第 2 步人物资产详情里。
+   *
+   * 失败时**抛错**，由 `ShotAudioOptOutSwitch` 走统一 message 包装层给提示
+   * （后端原文进技术详情，主区只出中文结论）。
+   */
+  const updateAudioOptOut = useCallback(
+    async (next: boolean) => {
+      if (!shotId) throw new Error('还没有选定分镜')
+      setAudioOptOutSaving(true)
+      try {
+        const res = await StudioShotDetailsService.updateShotDetailApiV1StudioShotDetailsShotIdPatch({
+          shotId,
+          requestBody: shotAudioOptOutPatch(next),
+        })
+        if (res.data) setShotDetail(res.data)
+      } finally {
+        setAudioOptOutSaving(false)
+      }
+    },
+    [shotId],
+  )
+
   const updateSkipExtraction = useCallback(
     async (skip: boolean) => {
       if (!shotId) return
@@ -1362,24 +1396,41 @@ export function ChapterShotEditPage() {
         </div>
       ),
       children: (
-        <ChapterShotBasicInfoSection
-          title={title}
-          scriptExcerpt={scriptExcerpt}
-          saving={saving}
-          semanticSaving={semanticSaving}
-          semantic={{
-            camera_shot: shotDetail?.camera_shot ?? undefined,
-            angle: shotDetail?.angle ?? undefined,
-            movement: shotDetail?.movement ?? undefined,
-            duration: shotDetail?.duration ?? 4,
-            action_beats: shotDetail?.action_beats ?? [],
-          }}
-          actionBeatPhases={preparationState?.action_beat_phases ?? []}
-          onTitleChange={setTitle}
-          onScriptExcerptChange={setScriptExcerpt}
-          onSemanticChange={updateShotSemantic}
-          onSave={() => void saveShot()}
-        />
+        <div className="space-y-4">
+          <ChapterShotBasicInfoSection
+            title={title}
+            scriptExcerpt={scriptExcerpt}
+            saving={saving}
+            semanticSaving={semanticSaving}
+            semantic={{
+              camera_shot: shotDetail?.camera_shot ?? undefined,
+              angle: shotDetail?.angle ?? undefined,
+              movement: shotDetail?.movement ?? undefined,
+              duration: shotDetail?.duration ?? 4,
+              action_beats: shotDetail?.action_beats ?? [],
+            }}
+            actionBeatPhases={preparationState?.action_beat_phases ?? []}
+            onTitleChange={setTitle}
+            onScriptExcerptChange={setScriptExcerpt}
+            onSemanticChange={updateShotSemantic}
+            onSave={() => void saveShot()}
+          />
+
+          {/*
+            本镜无需声音（Task 4）：入口从已删除的旧「声音绑定」区块搬到这里。
+            它与"角色声音继承"的关系写在开关下面（开启 = 本镜不继承人物资产的角色声音；
+            关闭 = 照常继承）。声音本身仍然只在第 2 步人物资产详情里选择或更换 ——
+            这里是**镜头自己的那一格标记**，不是第二个声音编辑入口。
+          */}
+          <div className="rounded-2xl border border-slate-200 bg-slate-50/70 px-4 py-4">
+            <ShotAudioOptOutSwitch
+              marked={shotDetail?.audio_opt_out === true}
+              saving={audioOptOutSaving}
+              disabled={!shotDetail}
+              onSave={updateAudioOptOut}
+            />
+          </div>
+        </div>
       ),
     },
     {
