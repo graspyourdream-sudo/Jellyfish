@@ -87,6 +87,63 @@ def _mask_provider(config: Any) -> dict[str, Any]:
     }
 
 
+async def resolve_video_model_choice(
+    db: AsyncSession, requested: str
+) -> tuple[Model, list[str], list[str], list[str]]:
+    """按页面选中的**模型档位**解析 Model，并给出可选范围。
+
+    口径（不静默改口）：
+
+    * ``requested`` 命中模型表里 ``category=video`` 的模型 → 用它，并记一条"与固定策略不一致，
+      请确认是否刻意切换"的提醒（沿用既有 ``resolve_pinned_video_model`` 的告警口径）；
+    * ``requested`` 为空 → 走固定策略（``resolve_pinned_video_model``）；
+    * ``requested`` 既非空又不在模型表里（或不是视频模型）→ **不采纳**，退回固定策略，
+      并在 warnings 里如实说明"这项没有生效、用的是哪一个"。
+
+    返回值：``(model, warnings, model_options, settings_notes)``。
+    ``model_options`` 是模型表里全部视频模型的**业务名**（页面据此渲染下拉框，
+    不再由前端写死一份模型清单）。
+    """
+    warnings: list[str] = []
+    notes: list[str] = []
+
+    option_stmt = select(Model).where(Model.category == ModelCategoryKey.video)
+    options = [str(getattr(item, "name", "") or "") for item in (await db.execute(option_stmt)).scalars().all()]
+    model_options = sorted({name for name in options if name})
+
+    wanted = str(requested or "").strip()
+    if not wanted:
+        model, pinned_warnings = await resolve_pinned_video_model(db)
+        warnings.extend(pinned_warnings)
+        notes.append(f"模型档位：按固定策略使用「{str(getattr(model, 'name', '') or '')}」。")
+        return model, warnings, model_options, notes
+
+    stmt = (
+        select(Model)
+        .where(Model.category == ModelCategoryKey.video, Model.name == wanted)
+        .order_by(Model.updated_at.desc())
+        .limit(1)
+    )
+    model = (await db.execute(stmt)).scalars().first()
+    if model is None:
+        fallback, pinned_warnings = await resolve_pinned_video_model(db)
+        warnings.extend(pinned_warnings)
+        warnings.append(
+            f"所选模型「{wanted}」不在本项目的可用视频模型里，本次**没有采纳**它；"
+            f"已按固定策略使用「{str(getattr(fallback, 'name', '') or '')}」。"
+        )
+        notes.append("模型档位：所选项不在可用范围内，已按固定策略执行（原因见提示）。")
+        return fallback, warnings, model_options, notes
+
+    name = str(getattr(model, "name", "") or "")
+    if name != pinned_video_model():
+        warnings.append(
+            f"本次使用你选择的模型「{name}」（固定策略是「{pinned_video_model()}」），请确认是否刻意切换。"
+        )
+    notes.append(f"模型档位：本次使用「{name}」。")
+    return model, warnings, model_options, notes
+
+
 async def resolve_pinned_video_model(db: AsyncSession) -> tuple[Model, list[str]]:
     """按固定模型名解析 Model；查不到才退回 ModelSettings 默认并记 warning。"""
     warnings: list[str] = []
@@ -106,6 +163,82 @@ async def resolve_pinned_video_model(db: AsyncSession) -> tuple[Model, list[str]
         )
         return fallback, warnings
     return model, warnings
+
+
+def describe_generation_settings(
+    *,
+    provider: str,
+    model: str,
+    requested_resolution: str,
+    requested_seconds: int | None,
+    requested_ratio: str,
+) -> dict[str, Any]:
+    """四项生成设置（画幅 / 模型档位 / 分辨率 / 时长）的**可选范围与实际取值**。
+
+    为什么必须由后端算：允许值来自供应商能力表（``resolve_video_capability``），
+    页面自己写一份就会漂移 —— 用户选了 1080p，提交时才被能力表拒掉。
+    本函数返回"允许什么、这次用的是什么、哪一项没被采纳"，页面只做展示与回传。
+
+    校验口径与 :func:`validate_legacy_video_input` / ``validate_video_options`` **同源**：
+    不在能力表内的取值一律**不采纳**并如实回报，不会静默换成别的档位。
+    """
+    from app.core.integrations.video_capabilities import resolve_video_capability
+
+    notes: list[str] = []
+    capability = resolve_video_capability(provider=provider, model=model or None)  # type: ignore[arg-type]
+
+    # 画幅
+    allowed_ratios = capability.allowed_ratios
+    ratio_options = sorted(allowed_ratios) if allowed_ratios else []
+    ratio = str(requested_ratio or "").strip() or DEFAULT_VIDEO_RATIO
+    if ratio_options and ratio not in ratio_options:
+        notes.append(f"画幅：所选「{ratio}」不在该模型支持的范围内，本次改用「{DEFAULT_VIDEO_RATIO}」。")
+        ratio = DEFAULT_VIDEO_RATIO
+    else:
+        notes.append(f"画幅：本次使用「{ratio}」。")
+
+    # 分辨率
+    allowed_resolutions = capability.allowed_resolutions
+    resolution_options = sorted(allowed_resolutions) if allowed_resolutions else []
+    wanted_resolution = str(requested_resolution or "").strip()
+    if wanted_resolution and resolution_options and wanted_resolution not in resolution_options:
+        resolution = str(capability.default_resolution or pinned_video_resolution())
+        notes.append(
+            f"分辨率：所选「{wanted_resolution}」不在该模型支持的范围内，本次改用「{resolution}」。"
+        )
+    elif wanted_resolution:
+        resolution = wanted_resolution
+        notes.append(f"分辨率：本次使用「{resolution}」。")
+    else:
+        # 没选分辨率 → 用**该模型的默认档**；能力表没有默认档时退回固定档
+        resolution = str(capability.default_resolution or pinned_video_resolution())
+        notes.append(f"分辨率：本次使用「{resolution}」。")
+
+    # 时长
+    allowed_seconds = resolve_plan_seconds(requested_seconds, [])
+    if capability.min_seconds is not None and allowed_seconds < int(capability.min_seconds):
+        allowed_seconds = int(capability.min_seconds)
+    if capability.max_seconds is not None and allowed_seconds > int(capability.max_seconds):
+        allowed_seconds = int(capability.max_seconds)
+    duration_options = [
+        int(item)
+        for item in ALLOWED_DURATION_SECONDS
+        if (capability.min_seconds is None or int(item) >= int(capability.min_seconds))
+        and (capability.max_seconds is None or int(item) <= int(capability.max_seconds))
+    ]
+    if allowed_seconds not in duration_options:
+        duration_options = sorted({*duration_options, allowed_seconds})
+    notes.append(f"时长：本次使用 {allowed_seconds} 秒。")
+
+    return {
+        "ratio": ratio,
+        "resolution": resolution,
+        "seconds": allowed_seconds,
+        "ratio_options": ratio_options,
+        "resolution_options": resolution_options,
+        "duration_options": duration_options,
+        "settings_notes": notes,
+    }
 
 
 async def describe_plan_frames(
@@ -298,7 +431,10 @@ async def build_video_submit_plan(
             ),
         )
 
-    model, model_warnings = await resolve_pinned_video_model(db)
+    # 模型档位：**页面选的优先**；没选或选了不可用的档位则退回固定策略（并如实回报）
+    model, model_warnings, model_options, model_notes = await resolve_video_model_choice(
+        db, str(getattr(body, "model", "") or "")
+    )
     warnings.extend(model_warnings)
     provider_config = await load_provider_config_by_model(db, model)
     provider_info = _mask_provider(provider_config)
@@ -361,7 +497,6 @@ async def build_video_submit_plan(
             "人物绑定音色（本镜没有单独配声音的入口）；这一镜确实不需要声音就明确标记「本镜无需声音」。"
         )
 
-    seconds = resolve_plan_seconds(body.duration_seconds, warnings)
 
     # 断点④·声音侧：计划阶段就把"这个镜头的声音到底会不会进请求"说清楚，
     # 免得用户以为绑了声音就一定会被用上。文案来自**提交端同一个准入函数**的结论
@@ -369,9 +504,26 @@ async def build_video_submit_plan(
     if audio["note"]:
         warnings.append(str(audio["note"]))
 
-    ratio = str(body.ratio or "").strip() or DEFAULT_VIDEO_RATIO
+    # 四项生成设置（画幅 / 模型档位 / 分辨率 / 时长）的**唯一解析点**：
+    # 允许范围来自供应商能力表，用户选的值在这里被采纳或被如实拒绝。
+    settings = describe_generation_settings(
+        provider=provider_key or "apimart",
+        model=model_name,
+        requested_resolution=str(getattr(body, "resolution", "") or ""),
+        requested_seconds=body.duration_seconds,
+        requested_ratio=str(body.ratio or ""),
+    )
+    ratio = str(settings["ratio"])
+    resolution = str(settings["resolution"])
+    seconds = int(settings["seconds"])
+    if body.duration_seconds is not None and int(body.duration_seconds) != seconds:
+        warnings.append(
+            f"所选时长 {int(body.duration_seconds)} 秒不在该模型允许的范围内，"
+            f"本次改用 {seconds} 秒。"
+        )
+    settings_notes = [*model_notes, *[str(item) for item in settings["settings_notes"]]]
     if not str(body.ratio or "").strip():
-        warnings.append(f"未指定 ratio，已按默认 {DEFAULT_VIDEO_RATIO} 提交。")
+        warnings.append(f"未指定画幅，已按默认 {DEFAULT_VIDEO_RATIO} 提交。")
 
     # 非 text_only 模式下，缺帧与"帧供应商取不到"都算阻断：两者共用同一份判定，
     # 页面据此禁用「直接生成视频」，提交端也会拿到同一结论（第二层兜底）。
@@ -386,6 +538,11 @@ async def build_video_submit_plan(
         )
 
     return VideoSubmitPlanRead(
+        ratio_options=[str(item) for item in settings["ratio_options"]],
+        model_options=model_options,
+        resolution_options=[str(item) for item in settings["resolution_options"]],
+        duration_options=[int(item) for item in settings["duration_options"]],
+        settings_notes=settings_notes,
         shot_id=body.shot_id,
         required_frame_types=[
             str(item.value if hasattr(item, "value") else item)
@@ -583,6 +740,8 @@ async def submit_video(
         ratio=str(body.ratio or ""),
         duration_seconds=body.duration_seconds,
         generate_audio=body.generate_audio,
+        model=str(getattr(body, "model", "") or ""),
+        resolution=str(getattr(body, "resolution", "") or ""),
         attempt=attempt,
     )
     async with video_idem.key_lock(idem_key):

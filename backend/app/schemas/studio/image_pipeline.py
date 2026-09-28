@@ -680,6 +680,21 @@ class VideoSubmitPlanRequest(BaseModel):
         description="是否让模型自带音频（供应商开关，seedance 默认 true）。"
         "设为 false 时模型不会自己生成音频，便于验证参考音频是否被采用。",
     )
+    model: str = Field(
+        "",
+        description=(
+            "**模型档位**（页面可选）。空串 = 沿用固定策略的默认视频模型。"
+            "非空时必须命中模型表里 category=video 的模型，否则**不采纳**并在 warnings 里如实说明"
+            "（不静默改成别的模型）"
+        ),
+    )
+    resolution: str = Field(
+        "",
+        description=(
+            "**分辨率档位**（页面可选）。空串 = 用该模型的默认档。"
+            "非空但不在该模型能力表内时**不采纳**并如实回报（不静默换成贵的档位）"
+        ),
+    )
 
 
 class VideoSubmitRequest(VideoSubmitPlanRequest):
@@ -826,6 +841,30 @@ class VideoSubmitPlanRead(BaseModel):
         ),
     )
     model_pinned: bool = Field(True, description="是否命中固定模型策略（seedance-2.0-mini）")
+    # ------------------------------------------------------------------
+    # 生成设置的**可选范围**（新）：页面上的「画幅 / 模型档位 / 分辨率 / 时长」四项
+    # 都从这里取，而不是前端自己写一份常量表 —— 否则会出现"页面给 1080p、
+    # 实际提交时被能力表拒掉"这种点了才知道的失败。
+    # ------------------------------------------------------------------
+    ratio_options: list[str] = Field(
+        default_factory=list, description="该模型允许的画幅（来自供应商能力表）"
+    )
+    model_options: list[str] = Field(
+        default_factory=list, description="可选的视频模型名（模型表里 category=video 的全部模型）"
+    )
+    resolution_options: list[str] = Field(
+        default_factory=list, description="该模型允许的分辨率档位（来自供应商能力表）"
+    )
+    duration_options: list[int] = Field(
+        default_factory=list, description="该模型允许的时长秒数（能力表的上下限 ∩ 业务白名单）"
+    )
+    settings_notes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "四项设置的**中文结论**：哪一项被采纳、哪一项因为不在能力表内没有被采纳；"
+            "页面直接展示它，不展示能力表原值"
+        ),
+    )
     provider_supported: bool = Field(True, description="provider 是否在既有的 openai/volcengine/apimart 白名单内")
     warnings: list[str] = Field(default_factory=list)
     guard_status: str = ""

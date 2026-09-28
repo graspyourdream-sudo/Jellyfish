@@ -86,6 +86,8 @@ def build_video_idempotency_key(
     ratio: str = "",
     duration_seconds: int | None = None,
     generate_audio: bool | None = None,
+    model: str = "",
+    resolution: str = "",
     attempt: int = 0,
 ) -> str:
     """同一镜头 + 同一生成参数 + 同一次 attempt → 稳定的幂等键。
@@ -102,6 +104,10 @@ def build_video_idempotency_key(
         str(ratio or "").strip(),
         "" if duration_seconds is None else str(int(duration_seconds)),
         "" if generate_audio is None else ("1" if generate_audio else "0"),
+        # 模型档位与分辨率也必须进键：改了这两项就是**另一轮**请求，
+        # 不能让"改完参数点生成"复用上一轮的结果（那等于参数没生效）。
+        str(model or "").strip(),
+        str(resolution or "").strip(),
         str(int(attempt or 0)),
     ]
     digest = hashlib.sha256("\u0001".join(parts).encode("utf-8")).hexdigest()
