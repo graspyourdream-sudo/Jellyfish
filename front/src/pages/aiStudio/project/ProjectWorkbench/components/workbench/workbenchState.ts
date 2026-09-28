@@ -164,9 +164,18 @@ export type WorkbenchItemLike = {
   asset_type?: string
   asset_id?: string
   name?: string
+  /** 关键资料摘要（卡面第 3 项；空 = 这一章还没有它的资料） */
+  profile_digest?: string
   status?: WorkbenchStatusLike | null
   prompt?: { quality?: WorkbenchPromptQualityLike | null; text?: string; saved?: boolean } | null
   image?: WorkbenchImageLike | null
+  /**
+   * 角色声音（设计包 §10：声音属于**人物资产**，是唯一事实来源）。
+   *
+   * `bound: false` = 后端**明确**说这个人物还没绑定角色声音 → 卡面「缺失项」显示「缺角色声音」。
+   * 字段还没落地（`undefined`）时一律不判缺失 —— 拿不到 ≠ 缺失。
+   */
+  voice?: { bound?: boolean } | null
   /** 后端显式给出的"能不能进批量"（需求 8：旧提示词的项为 false） */
   batch_eligible?: boolean
 }
@@ -802,6 +811,157 @@ export const WORKBENCH_STATUS_NOTICE: Record<WorkbenchStatusKey, string> = {
 export function workbenchStatusNotice(item: WorkbenchItemLike): string {
   if (!String(item.status?.reason ?? '').trim()) return ''
   return WORKBENCH_STATUS_NOTICE[workbenchStatusKey(item)]
+}
+
+/* ------------------------------------------- 卡面字段：缺失项 + 唯一主要操作 */
+
+/**
+ * 卡面上「缺失项」的类别（设计包 §8：卡面只放 7 项，其中一项是「缺失项」）。
+ *
+ * 只列**真的缺的**项；齐全时卡面写「无」。
+ */
+export type WorkbenchMissingKind = 'profile' | 'prompt' | 'image' | 'primary' | 'voice'
+
+export const WORKBENCH_MISSING_LABEL: Record<WorkbenchMissingKind, string> = {
+  profile: '缺资料',
+  prompt: '缺图片提示词',
+  image: '缺图片',
+  primary: '缺定版图',
+  voice: '缺角色声音',
+}
+
+/**
+ * 角色声音的补充说明：它**只能在人物资产详情里绑定**（设计包 §8/§10）。
+ *
+ * 为什么这句话要挂在「缺失项」上：用户在第 2 步卡片上看到"缺角色声音"时，
+ * 下一步动作必须是明确的 —— 去人物资产详情绑定，而不是在卡片上找一个并不存在的按钮。
+ */
+export const WORKBENCH_VOICE_BOUND_IN_DETAIL = '（在人物资产详情里绑定）'
+
+/**
+ * 这一项缺什么（顺序固定，便于扫一眼）。
+ *
+ * 两条**保守**规则 —— 拿不到 ≠ 缺失，后端没说的一律不判：
+ *   - 提示词：只有契约确实给了 `prompt` 对象时才判；
+ *   - 角色声音：只有后端**明确**说 `voice.bound === false` 才算缺（该字段还没落地时一律不判，
+ *     否则每个角色都会被误报成"缺角色声音"）。
+ */
+export function workbenchMissingItems(item: WorkbenchItemLike): WorkbenchMissingKind[] {
+  const missing: WorkbenchMissingKind[] = []
+  if (!String(item.profile_digest ?? '').trim()) missing.push('profile')
+  if (item.prompt && !String(item.prompt.text ?? '').trim()) missing.push('prompt')
+  if (item.image) {
+    if (item.image.has_image !== true) missing.push('image')
+    else if (item.image.has_primary !== true) missing.push('primary')
+  }
+  if (workbenchItemType(item) === 'character' && item.voice?.bound === false) missing.push('voice')
+  return missing
+}
+
+/** 卡面「缺失项」那一行：齐全时写「无」（设计包 §8）。 */
+export function describeWorkbenchMissingItems(item: WorkbenchItemLike): string {
+  const missing = workbenchMissingItems(item)
+  if (missing.length === 0) return '无'
+  return missing.map((kind) => WORKBENCH_MISSING_LABEL[kind]).join('、')
+}
+
+/**
+ * 卡面上**唯一**的主要操作（设计包 §8：一个操作区只允许一个主色按钮，
+ * 完整结构化资料 / 剧本依据 / 提示词全文 / 历史结果一律进详情抽屉）。
+ */
+export type WorkbenchCardActionKind =
+  | 'upload_product_image'
+  | 'view_progress'
+  | 'generate_prompt'
+  | 'supplement_profile'
+  | 'view_result'
+  | 'generate'
+  | 'regenerate'
+
+export type WorkbenchCardAction = {
+  kind: WorkbenchCardActionKind
+  label: string
+}
+
+/**
+ * 按**业务状态**给这一个动作（设计包 §8 的清单：
+ * 查看结果 / 查看进度 / 生成 / 生成提示词 / 重试 / 补充资料 / 重新上传 / 上传商品图 / 设为定版）。
+ *
+ * 「卡面上不放编辑资料 / 编辑提示词」不是能力丢失：编辑资料在详情抽屉里（`renderProfileEditor`），
+ * 修改提示词也在抽屉里（`onEditPrompt`）—— 只是不再平铺在卡面上。
+ */
+export function deriveCardAction(item: WorkbenchItemLike): WorkbenchCardAction {
+  // 商品只有一个动作，且不是出图（它的图由人工上传 + 手动定版，设计包 §9）
+  if (workbenchItemType(item) === 'product') {
+    return { kind: 'upload_product_image', label: '上传商品图 / 设为定版' }
+  }
+  const hasImage = workbenchItemType(item) !== null && item.image?.has_image === true
+  switch (workbenchStatusKey(item)) {
+    case 'generating':
+      return { kind: 'view_progress', label: '查看进度' }
+    case 'needs_prompt':
+      return { kind: 'generate_prompt', label: '生成提示词' }
+    case 'needs_profile':
+      return { kind: 'supplement_profile', label: '补充资料' }
+    case 'has_image':
+      return { kind: 'view_result', label: '查看结果' }
+    case 'primary':
+      return { kind: 'regenerate', label: '再生成一张' }
+    case 'failed':
+      // 失败项：已经有图就按"再来一张"走，否则按首次生成走（与既有的两条通道一致）
+      return hasImage ? { kind: 'regenerate', label: '重试' } : { kind: 'generate', label: '重试' }
+    case 'needs_product_image':
+      return { kind: 'upload_product_image', label: '上传商品图 / 设为定版' }
+    case 'ready':
+    default:
+      return { kind: 'generate', label: '生成图片' }
+  }
+}
+
+/**
+ * 卡面唯一动作的可用性与禁用原因（用户语言；可用时 `reason` 为空串）。
+ *
+ * 单独抽成纯函数的原因：卡面按钮的禁用理由有一堆分支（本轮进行中 / 类型不认识 /
+ * 服装不在契约内 / 提示词要重写 / 资料没齐 / 商品页打不开），散在 JSX 里只能靠肉眼回归。
+ */
+export function cardActionAvailability(
+  item: WorkbenchItemLike,
+  options: { busy: boolean; canOpenAssetEditor: boolean },
+): { disabled: boolean; reason: string } {
+  const action = deriveCardAction(item)
+  const bucket = workbenchItemType(item)
+  const submittable = isWorkbenchTabType(bucket) && isWorkbenchSubmittable(bucket)
+
+  if (options.busy) return { disabled: true, reason: '本轮正在提交 / 生成：等这一轮跑完再操作' }
+
+  // 商品：唯一的动作是去上传商品图并手动定版
+  if (action.kind === 'upload_product_image') {
+    return options.canOpenAssetEditor
+      ? { disabled: false, reason: '' }
+      : { disabled: true, reason: '商品图由人工上传：请从「商品」页签打开商品资产页' }
+  }
+
+  if (action.kind === 'generate' || action.kind === 'regenerate') {
+    if (!submittable) {
+      return {
+        disabled: true,
+        reason:
+          bucket === 'other'
+            ? '这一项的类型当前版本还不认识，先不要在这里出图'
+            : '服装暂不支持批量出图，可以先保存资料与提示词',
+      }
+    }
+    if (needsPromptRegeneration(item)) {
+      return { disabled: true, reason: '这条提示词需要先重新生成提示词，再生成图片' }
+    }
+    if (!isBatchEligible(item)) {
+      return { disabled: true, reason: '这一项暂时不能直接出图：先按卡片上的提示补齐资料或提示词' }
+    }
+    return { disabled: false, reason: '' }
+  }
+
+  // 查看进度 / 查看结果 / 补充资料 / 生成提示词：都是打开抽屉或弹窗，不涉及花钱，永远可点
+  return { disabled: false, reason: '' }
 }
 
 /** 提示词需要重新生成时，卡片正面那一句**写死**的说明（后端 reasons 只进技术详情）。 */

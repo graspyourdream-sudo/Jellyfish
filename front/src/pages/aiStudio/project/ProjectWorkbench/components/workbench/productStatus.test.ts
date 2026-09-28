@@ -16,7 +16,9 @@ import {
   MAIN_SCREEN_FORBIDDEN_SOURCE_TERMS,
   WORKBENCH_STATUS_LABEL,
   WORKBENCH_STATUS_ORDER,
+  cardActionAvailability,
   countByStatus,
+  deriveCardAction,
   deriveWorkbenchCommand,
   emptyStatusCounts,
   isWorkbenchSubmittable,
@@ -26,6 +28,15 @@ import {
 } from './workbenchState.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
+
+/** 逐行剥注释（块注释 + 行注释）：扫「按钮文案」时注释里的说明不算命中。 */
+function stripComments(text: string): string {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .map((line) => line.replace(/\/\/.*$/, ''))
+    .join('\n')
+}
 
 /** 一个商品项：默认「还没有图」（= 待上传商品图）。 */
 function product(overrides: Partial<WorkbenchItemLike> = {}): WorkbenchItemLike {
@@ -146,17 +157,46 @@ test('混选说明里的措辞不出现后台字段与原始状态值', () => {
 /* ------------------------------------------------- 卡片动作：商品没有出图 */
 
 test('商品卡片：只有「上传商品图 / 设为定版」，没有修改提示词、也没有生成图片', () => {
-  const source = readFileSync(join(here, 'AssetCardGrid.tsx'), 'utf8')
-  assert.match(source, /上传商品图 \/ 设为定版/, '商品的主操作必须叫「上传商品图 / 设为定版」')
-  assert.equal(source.includes('上传图片 / 设为定版'), false, '旧的「上传图片」措辞不许回来')
+  /* 卡面的动作现在是「状态 → 唯一动作」的纯函数给的（设计包 §8 要求一张卡片只有一个主要操作）。
+     所以商品的口径要在**映射函数**上断言，而不是在 JSX 分支上。 */
+  const action = deriveCardAction(product())
+  assert.equal(action.kind, 'upload_product_image')
+  assert.equal(action.label, '上传商品图 / 设为定版')
 
-  /* 商品分支里不许再出现出图 / 提示词动作：把商品那一支切出来逐条判。 */
-  const start = source.indexOf("type === 'product' ? (")
-  assert.ok(start > -1, '卡片必须对商品单独分支')
-  const end = source.indexOf(') : (', start)
-  assert.ok(end > start, '商品分支后应紧邻其他类型的动作')
-  const productBranch = source.slice(start, end)
-  for (const forbidden of ['生成图片', '重新生成图片', '修改提示词', '重新生成提示词']) {
-    assert.equal(productBranch.includes(forbidden), false, `商品卡片分支不许出现「${forbidden}」`)
+  // 商品的动作永远不是出图（哪怕它带着提示词、甚至后端说它可进批量）
+  const sneaky = product({
+    prompt: { text: '一杯鲜榨果汁', quality: null, saved: true },
+    batch_eligible: true,
+    image: { has_image: false },
+  })
+  assert.equal(deriveCardAction(sneaky).kind, 'upload_product_image')
+  assert.notEqual(deriveCardAction(sneaky).kind, 'generate')
+  assert.notEqual(deriveCardAction(sneaky).kind, 'regenerate')
+  assert.notEqual(deriveCardAction(sneaky).kind, 'generate_prompt')
+
+  /* 源码守卫：卡面上不再自己拼动作文案，只渲染映射出来那一个按钮；
+     并且卡片源码里不许出现出图 / 提示词动作的**按钮文案**（避免有人又把它们加回卡面）。
+     先剥注释再扫 —— 注释里正是"这些动作已经搬到抽屉里"的说明，不能当命中。 */
+  const source = stripComments(readFileSync(join(here, 'AssetCardGrid.tsx'), 'utf8'))
+  assert.match(source, /deriveCardAction\(/, '卡面动作必须来自状态映射，不许自己拼')
+  assert.match(source, /data-testid="asset-card-action"/, '卡面必须只有一个带标识的主要动作按钮')
+  for (const forbidden of ['修改提示词', '重新生成提示词', '重新生成图片']) {
+    assert.equal(source.includes(forbidden), false, `卡面上不许再出现「${forbidden}」`)
   }
+  // 「生成图片」只允许作为**映射结果**的兜底文案出现在 workbenchState，不许在卡面写死
+  assert.equal(source.includes('>生成图片<'), false, '卡面不许写死「生成图片」按钮')
+})
+
+test('商品动作在打不开商品资产页时如实禁用并说明（不给点了没反应的按钮）', () => {
+  const blocked = cardActionAvailability(product(), { busy: false, canOpenAssetEditor: false })
+  assert.equal(blocked.disabled, true)
+  assert.match(blocked.reason, /商品/)
+  const ok = cardActionAvailability(product(), { busy: false, canOpenAssetEditor: true })
+  assert.equal(ok.disabled, false)
+})
+
+test('本轮进行中时，卡面唯一动作一律禁用并说明原因', () => {
+  const result = cardActionAvailability(product(), { busy: true, canOpenAssetEditor: true })
+  assert.equal(result.disabled, true)
+  assert.match(result.reason, /本轮/)
 })

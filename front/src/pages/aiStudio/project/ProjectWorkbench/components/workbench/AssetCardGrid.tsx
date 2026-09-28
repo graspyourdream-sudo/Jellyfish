@@ -9,7 +9,6 @@
  *     提示词需要重新生成时，正面标出来并给单项入口（**点了才会调用，不自动调用**）。
  */
 
-import type { ReactNode } from 'react'
 import { Button, Checkbox, Empty, Tag, Tooltip } from 'antd'
 import { PictureOutlined } from '@ant-design/icons'
 
@@ -17,13 +16,15 @@ import {
   WORKBENCH_PROMPT_REGENERATION_MAIN_TEXT,
   WORKBENCH_STATUS_TONE,
   WORKBENCH_TAB_LABEL,
-  isBatchEligible,
-  isWorkbenchTabType,
-  isWorkbenchSubmittable,
+  WORKBENCH_VOICE_BOUND_IN_DETAIL,
+  cardActionAvailability,
+  deriveCardAction,
+  describeWorkbenchMissingItems,
   needsPromptRegeneration,
   workbenchItemKey,
   workbenchItemName,
   workbenchItemType,
+  workbenchMissingItems,
   workbenchStatusKey,
   workbenchStatusLabel,
   workbenchStatusNotice,
@@ -56,8 +57,6 @@ export type AssetCardGridProps = {
    * 落到商品资产编辑页（复用实体 CRUD 的上传与 `is_primary`），所以卡片上给的是这个入口。
    */
   onOpenAssetEditor?: (item: AssetWorkbenchItem) => void
-  /** 资料编辑入口（由工作台注入既有「补充/修改资产资料」组件） */
-  renderProfileEditor: (item: AssetWorkbenchItem) => ReactNode
 }
 
 export function AssetCardGrid(props: AssetCardGridProps) {
@@ -70,7 +69,6 @@ export function AssetCardGrid(props: AssetCardGridProps) {
     onEditPrompt,
     onGenerateOne,
     onOpenAssetEditor,
-    renderProfileEditor,
   } = props
   const selected = new Set(selectedKeys)
 
@@ -86,32 +84,29 @@ export function AssetCardGrid(props: AssetCardGridProps) {
   return (
     <div
       className="grid gap-3"
-      style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}
+      /* 设计包 §8：`auto-fill, minmax(236px, 1fr)` + gap 12 → 1440 下每行 4 张。
+         1280 时列数随宽度自然减少，不做横向滚动。 */
+      style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(236px, 1fr))' }}
       data-testid="asset-card-grid"
     >
       {items.map((item) => {
         const key = workbenchItemKey(item)
         const bucket = workbenchItemType(item)
-        /* 未登记的类型（`other`）不冒充某一类资产：卡片照旧显示，但类型名与出图动作都按"不认识"处理。 */
-        const type = isWorkbenchTabType(bucket) ? bucket : null
+        /* 未登记的类型（`other`）不冒充某一类资产：卡片照旧显示，但类型名与动作都按"不认识"处理
+           （类型名用的是桶自己的标签，出图动作在 `cardActionAvailability` 里按桶判定）。 */
         const statusKey = workbenchStatusKey(item)
         const label = workbenchStatusLabel(item)
         const requiresNewPrompt = needsPromptRegeneration(item)
-        const eligible = isBatchEligible(item)
-        const submittable = type !== null && isWorkbenchSubmittable(type)
-        /** 单项生成按钮的禁用原因（不撒谎：能点就点，不能点就说清楚为什么） */
-        const generateBlockedReason = !submittable
-          ? type === 'product'
-            ? '商品图不参与自动出图：请上传商品图并「设为定版」'
-            : type === null
-              ? '这一项的类型当前版本还不认识，先不要在这里出图'
-              : '服装暂不支持批量出图，可以先保存资料与提示词'
-          : requiresNewPrompt
-            ? '这条提示词需要先重新生成提示词，再生成图片'
-            : !eligible
-              ? '这一项暂时不能直接出图：先按卡片上的提示补齐资料或提示词'
-              : ''
-        const hasImg = item.image?.has_image === true
+        /* 卡面**唯一**主要操作及其可用性（设计包 §8）：状态 → 动作的映射与禁用理由
+           都在 workbenchState 的纯函数里（有单测），卡面只负责渲染那一个按钮。 */
+        const cardAction = deriveCardAction(item)
+        const availability = cardActionAvailability(item, {
+          busy,
+          canOpenAssetEditor: Boolean(onOpenAssetEditor),
+        })
+        /* 缺失项：只列真的缺的（拿不到 ≠ 缺失），齐全时写「无」（设计包 §8） */
+        const missingKinds = workbenchMissingItems(item)
+        const missingText = describeWorkbenchMissingItems(item)
         const thumbnail = String(item.image?.thumbnail ?? '')
         const shotRefs = item.script_relation?.shot_refs ?? []
         /* 审计 §4.5 模式 6（`:158`）：改前这里把 `item.status?.reason` 原文渲在卡片正面
@@ -119,6 +114,29 @@ export function AssetCardGrid(props: AssetCardGridProps) {
            现在卡片正面只放**按业务状态键映射出的中文结论**；后端原文不在这里渲染 ——
            它的落点是「资产详情」抽屉里默认收起的「技术详情」（`AssetDetailDrawer`）。 */
         const statusNotice = workbenchStatusNotice(item)
+        /** 卡面那个唯一动作按 kind 分派（进度 / 结果 / 补充资料都在详情抽屉里） */
+        const runCardAction = (target: AssetWorkbenchItem) => {
+          switch (cardAction.kind) {
+            case 'generate':
+              onGenerateOne(target, 'generate')
+              return
+            case 'regenerate':
+              onGenerateOne(target, 'regenerate')
+              return
+            case 'generate_prompt':
+              onEditPrompt(target)
+              return
+            case 'upload_product_image':
+              onOpenAssetEditor?.(target)
+              return
+            case 'view_progress':
+            case 'view_result':
+            case 'supplement_profile':
+            default:
+              // 完整结构化资料 / 剧本依据 / 提示词全文 / 历史结果一律进详情抽屉（设计包 §8）
+              onOpenDetail(target)
+          }
+        }
         return (
           <article
             key={key}
@@ -134,14 +152,23 @@ export function AssetCardGrid(props: AssetCardGridProps) {
                   onChange={(event) => onToggleSelect(key, event.target.checked)}
                   aria-label={`选择 ${workbenchItemName(item)}`}
                 />
-                <div className="min-w-0">
+                {/*
+                  名称 + 类型整块**就是抽屉入口**（设计包 §8）：悬停变色，右侧标「完整资料」。
+                  卡面上因此不再放单独的「详情 / 编辑资料 / 编辑提示词」按钮 ——
+                  完整结构化资料、剧本依据、提示词全文、历史结果都在抽屉里。
+                */}
+                <div className="group min-w-0">
                   <button
                     type="button"
-                    className="block max-w-full truncate text-left text-sm font-medium text-slate-900 hover:text-blue-600"
-                    title={workbenchItemName(item)}
+                    className="flex max-w-full items-center gap-1 rounded px-0.5 text-left hover:bg-blue-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500"
+                    title={`${workbenchItemName(item)} · 打开完整资料`}
+                    data-testid="asset-card-detail-entry"
                     onClick={() => onOpenDetail(item)}
                   >
-                    {workbenchItemName(item)}
+                    <span className="max-w-full truncate text-sm font-medium text-slate-900 group-hover:text-blue-600">
+                      {workbenchItemName(item)}
+                    </span>
+                    <span className="shrink-0 text-[10px] text-gray-400 group-hover:text-blue-600">完整资料</span>
                   </button>
                   <div className="text-[11px] text-gray-400">{WORKBENCH_TAB_LABEL[bucket]}</div>
                 </div>
@@ -170,9 +197,10 @@ export function AssetCardGrid(props: AssetCardGridProps) {
               </div>
             </div>
 
+            {/* 缩略区：16/9、最高 150（设计包 §8 只在本页收紧，换取同屏一行完整卡片） */}
             <div
-              className="grid w-full place-items-center bg-slate-100 text-gray-400"
-              style={{ aspectRatio: '16 / 9' }}
+              className="grid w-full place-items-center overflow-hidden bg-slate-100 text-gray-400"
+              style={{ aspectRatio: '16 / 9', maxHeight: 150 }}
             >
               {thumbnail ? (
                 <img src={thumbnail} alt={workbenchItemName(item)} className="h-full w-full object-cover" />
@@ -185,8 +213,24 @@ export function AssetCardGrid(props: AssetCardGridProps) {
             </div>
 
             <div className="flex min-h-0 flex-1 flex-col gap-1 px-3 py-2">
-              <div className="line-clamp-3 text-[12px] leading-5 text-slate-700" title={item.profile_digest}>
+              {/* 关键资料摘要：**最多两行后截断**（设计包 §8），全文在详情抽屉里 */}
+              <div className="line-clamp-2 text-[12px] leading-5 text-slate-700" title={item.profile_digest}>
                 {item.profile_digest || '这一章还没有它的资料摘要'}
+              </div>
+              {/* 缺失项：只列真的缺的；齐全时写「无」（设计包 §8） */}
+              <div className="flex flex-wrap items-center gap-1 text-[11px]">
+                <span className="text-gray-400">缺失项</span>
+                {missingKinds.length > 0 ? (
+                  <span className="text-amber-700" data-testid="asset-card-missing">
+                    {missingText}
+                    {/* 角色声音只能在人物资产详情里绑定：把下一步动作写在这一行上 */}
+                    {missingKinds.includes('voice') ? WORKBENCH_VOICE_BOUND_IN_DETAIL : ''}
+                  </span>
+                ) : (
+                  <span className="text-gray-500" data-testid="asset-card-missing">
+                    无
+                  </span>
+                )}
               </div>
               {shotRefs.length > 0 ? (
                 <div className="flex flex-wrap items-center gap-1">
@@ -207,61 +251,35 @@ export function AssetCardGrid(props: AssetCardGridProps) {
               {statusNotice ? <div className="text-[11px] text-red-500">{statusNotice}</div> : null}
               {requiresNewPrompt ? (
                 <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-700">
-                  <div className="font-medium">提示词需要重新生成</div>
-                  {/* 卡片正面只留写死的中文结论 + 按钮；后端 `quality.reasons[]` 数组
-                      只进「资产详情」抽屉的技术详情层（审计 §4.5 模式 6，`:162`）。 */}
                   <div>{WORKBENCH_PROMPT_REGENERATION_MAIN_TEXT}</div>
                 </div>
               ) : null}
             </div>
 
-            <div className="flex flex-wrap items-center gap-1 border-t border-slate-100 px-2 py-2">
-              <Button size="small" type="text" onClick={() => onOpenDetail(item)}>
-                详情
+            {/*
+              操作行：**唯一**一个主要操作（设计包 §8）。
+              「编辑资料」「修改提示词」不再平铺在卡面上 —— 它们在详情抽屉里
+              （名称 + 类型整块就是抽屉入口，见上面），能力没有减少，只是不再抢卡面的位置。
+            */}
+            <div className="flex items-center gap-1 border-t border-slate-100 px-2 py-2">
+              <Button
+                size="small"
+                type="primary"
+                ghost={cardAction.kind !== 'generate' && cardAction.kind !== 'regenerate'}
+                disabled={availability.disabled}
+                data-testid="asset-card-action"
+                data-action-kind={cardAction.kind}
+                onClick={() => runCardAction(item)}
+              >
+                {cardAction.label}
               </Button>
-              {renderProfileEditor(item)}
-              {/*
-                商品 = 第五类资产，也是**唯一不参与自动出图**的一类（设计包 §9）。
-                所以它的卡片上**没有**「修改提示词」、也**没有**「生成图片 / 重新生成图片」：
-                商品图只有一条路 —— 上传商品图并手动「设为定版」。
-                把出图按钮留在卡片上（哪怕禁用）只会让用户以为存在一条能出商品图的通道。
-              */}
-              {type === 'product' ? (
-                onOpenAssetEditor ? (
-                  <Button size="small" type="primary" ghost onClick={() => onOpenAssetEditor(item)}>
-                    上传商品图 / 设为定版
-                  </Button>
-                ) : null
-              ) : (
-                <>
-                  <Button size="small" type="text" onClick={() => onEditPrompt(item)}>
-                    {requiresNewPrompt ? '重新生成提示词' : '修改提示词'}
-                  </Button>
-                  {hasImg ? (
-                    <Tooltip title={generateBlockedReason}>
-                      <Button
-                        size="small"
-                        type="text"
-                        disabled={busy || Boolean(generateBlockedReason)}
-                        onClick={() => onGenerateOne(item, 'regenerate')}
-                      >
-                        重新生成图片
-                      </Button>
-                    </Tooltip>
-                  ) : (
-                    <Tooltip title={generateBlockedReason}>
-                      <Button
-                        size="small"
-                        type="text"
-                        disabled={busy || Boolean(generateBlockedReason)}
-                        onClick={() => onGenerateOne(item, 'generate')}
-                      >
-                        生成图片
-                      </Button>
-                    </Tooltip>
-                  )}
-                </>
-              )}
+              {availability.disabled && availability.reason ? (
+                <Tooltip title={availability.reason}>
+                  <span className="truncate text-[11px] text-gray-400" data-testid="asset-card-action-reason">
+                    {availability.reason}
+                  </span>
+                </Tooltip>
+              ) : null}
             </div>
           </article>
         )

@@ -540,7 +540,6 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
                 onEditPrompt={handleEditPrompt}
                 onGenerateOne={handleGenerateOne}
                 onOpenAssetEditor={handleOpenAssetEditor}
-                renderProfileEditor={renderProfileEditor}
               />
 
               {/* 技术详情（默认收起）：内部信息唯一的落点 */}
