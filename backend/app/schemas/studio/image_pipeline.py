@@ -198,6 +198,41 @@ class ImageServiceStatusRead(BaseModel):
     probe_skipped_reason: str = Field("", description="未探测的原因")
 
 
+class AssetStrategyRead(BaseModel):
+    """**一个资产类型**的出图口径（画幅 / 模板 / 结果类型 / 通道 / 是否自动出图）。"""
+
+    asset_type: str = Field(description="资产类型：character / scene / prop / costume / product")
+    asset_zh: str = Field(description="类型中文名（页面直接展示）")
+    prompt_slot: str = Field("", description="提示词槽位（内部标识，仅供排障）")
+    prompt_template: str = Field("", description="该类型使用的出图模板名（内部标识，仅供排障）")
+    result_kind: str = Field("", description="结果类型标签（机器可读）")
+    result_label: str = Field("", description="结果类型标签（中文，页面直接展示）")
+    aspect_ratio: str = Field("", description="不传画幅时这次会用什么比例；空串 = 没有比例口径")
+    aspect_ratio_fixed: bool = Field(
+        False, description="true = 连调用方显式传入也不采纳（人物参考图专有）"
+    )
+    aspect_ratio_note: str = Field("", description="为什么是这个比例（中文，可直接上屏）")
+    batch_reference_allowed: bool = Field(False, description="是否允许「按定版参考图批量出图」")
+    generation_type: str = Field("", description="上游服务契约里的 generation_type（内部标识）")
+    channel: str = Field("", description="出图通道（机器可读）")
+    channel_label: str = Field("", description="出图通道中文名")
+    auto_generate: bool = Field(
+        True, description="是否参与自动出图；**商品是唯一 false 的类型**（人工上传 + 手动定版）"
+    )
+
+
+class AssetStrategiesRead(BaseModel):
+    """按资产类型下发的出图口径集合（**画幅分流的唯一读口**）。"""
+
+    strategies: list[AssetStrategyRead] = Field(
+        default_factory=list, description="逐类型的出图口径（含不参与自动出图的商品）"
+    )
+    notes: list[str] = Field(default_factory=list, description="中文说明（通道分流原因等）")
+    ratio_map: dict[str, str] = Field(
+        default_factory=dict, description="类型 → 默认画幅（**唯一事实来源**的只读镜像，仅供展示核对）"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 请求
 # ---------------------------------------------------------------------------

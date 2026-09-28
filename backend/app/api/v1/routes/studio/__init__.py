@@ -22,6 +22,7 @@ from app.api.v1.routes.studio import (
     shots,
     timeline,
     shot_character_links,
+    video_delivery,
 )
 
 router = APIRouter()
@@ -44,6 +45,8 @@ router.include_router(timeline.router, prefix="/timeline", tags=["studio/timelin
 router.include_router(image_tasks.router, prefix="/image-tasks", tags=["studio/image-tasks"])
 router.include_router(shot_character_links.router, prefix="/shot-character-links", tags=["studio/shot-character-links"])
 router.include_router(prompt_delivery.router, prefix="/prompt-delivery", tags=["studio/prompt-delivery"])
+# 出口B「视频交付 · 批量下载」：只打包生成成功并已落库的成片（第 9 条批量下载）
+router.include_router(video_delivery.router, prefix="/video-delivery", tags=["studio/video-delivery"])
 router.include_router(prompt_board.router, prefix="/prompt-board", tags=["studio/prompt-board"])
 router.include_router(jurilu_import.router, prefix="/jurilu-import", tags=["studio/jurilu-import"])
 router.include_router(quick_skill.router, prefix="/quick-skill", tags=["studio/quick-skill"])

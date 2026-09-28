@@ -21,6 +21,7 @@ from app.dependencies import get_db
 from app.schemas.common import ApiResponse, success_response
 from app.schemas.studio.image_pipeline import (
     AdoptImageRead,
+    AssetStrategiesRead,
     AdoptImageRequest,
     FrameSubmitPlanRead,
     FrameSubmitPlanRequest,
@@ -77,6 +78,11 @@ from app.services.studio.image_pipeline.video_submit import (
     submit_video,
 )
 from app.services.studio.llm_orchestration import dry_run
+
+#: 商品（第五类资产）：唯一**不参与自动出图**的类型。
+#: 与 `asset_strategies.SUPPORTED_ASSET_TYPES`（出图管线覆盖的四类）区分开：
+#: 前者是"能自动出图的类型"，这里是"第五类资产但不自动出图"。
+PRODUCT_ASSET_TYPE = "product"
 
 router = APIRouter()
 
@@ -168,6 +174,68 @@ async def get_image_pipeline_status() -> ApiResponse[ImageServiceStatusRead]:
             ],
             probe=probe,
             probe_skipped_reason=skipped,
+        )
+    )
+
+
+@router.get(
+    "/asset-strategies",
+    response_model=ApiResponse[AssetStrategiesRead],
+    summary="按资产类型下发的出图口径（画幅 / 模板 / 结果类型 / 通道；只读、不触网）",
+)
+async def get_asset_strategies() -> ApiResponse[AssetStrategiesRead]:
+    """**画幅按类型下发的唯一读口**（需求清单第 2 条第 3 项）。
+
+    为什么要有这个端点，而不是让页面自己写一张比例表：
+    「人物 16:9 / 场景 16:9 / 道具 1:1」的真实口径在
+    :data:`asset_strategies.ASSET_TYPE_ASPECT_RATIOS`（以及人物的**写死**口径里），
+    提交出图时也由同一张表解析（:func:`asset_strategies.resolve_aspect_ratio`）。
+    页面如果自己再写一份，就会出现"卡片上写 1:1、实际请求发 16:9"这种无法察觉的漂移。
+    所以这里把**同一份口径**下发给页面：卡片、详情抽屉、工作室素材卡读的都是它。
+
+    内容与提交时的实际行为一一对应：
+
+    * ``aspect_ratio``：不传画幅时这次会用什么（人物恒 16:9）；
+    * ``aspect_ratio_fixed``：true = 连调用方显式传入也不采纳（人物专有）；
+    * ``aspect_ratio_note``：为什么是这个比例（中文，可直接上屏）；
+    * ``auto_generate``：是否参与自动出图（**商品是唯一 false 的类型**）；
+    * ``channel`` / ``channel_label``：这一项会发给哪条通道。
+
+    纯读：不写库、不触网、不触发任何付费出口。
+    """
+    strategies: list[dict[str, Any]] = []
+    for asset_type in image_pipeline_strategies.SUPPORTED_ASSET_TYPES:
+        item = image_pipeline_strategies.strategy_for(asset_type).to_read()
+        item["auto_generate"] = True
+        strategies.append(item)
+    # 商品是第五类资产，但它**不参与自动出图**（人工上传 + 手动设为定版）。
+    # 口径与页面文案同源：`auto_generate=False` 就是"不要给它生成按钮"的机器可读依据。
+    strategies.append(
+        {
+            "asset_type": PRODUCT_ASSET_TYPE,
+            "asset_zh": "商品",
+            "prompt_slot": "",
+            "prompt_template": "",
+            "result_kind": "",
+            "result_label": "商品图（人工上传）",
+            "aspect_ratio": "",
+            "aspect_ratio_fixed": False,
+            "aspect_ratio_note": "商品不参与自动出图：由人工上传商品图并手动「设为定版」，因此没有画面比例口径",
+            "batch_reference_allowed": False,
+            "generation_type": "",
+            "channel": "",
+            "channel_label": "",
+            "auto_generate": False,
+        }
+    )
+    return success_response(
+        AssetStrategiesRead(
+            strategies=strategies,
+            notes=[
+                image_pipeline_strategies.describe_channel_for(asset_type)
+                for asset_type in image_pipeline_strategies.SUPPORTED_ASSET_TYPES
+            ],
+            ratio_map=dict(image_pipeline_strategies.ASSET_TYPE_ASPECT_RATIOS),
         )
     )
 
