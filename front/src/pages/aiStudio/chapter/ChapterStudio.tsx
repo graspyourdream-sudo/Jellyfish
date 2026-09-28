@@ -62,7 +62,7 @@ import {
 } from '@ant-design/icons'
 import { useLocation, useNavigate, useParams, Link } from 'react-router-dom'
 import { ChapterShotAssetBindingSection } from '../shots/components/ChapterShotAssetBindingSection'
-import { ShotAudioBindingSection } from '../shots/components/ShotAudioBindingSection'
+import { ShotVoiceInheritancePanel } from './components/ShotVoiceInheritancePanel'
 import { audioStateTag, describeAudioAdmission } from '../shots/components/audioAdmissionCore'
 import { StudioStepProgressStrip } from './components/StudioStepProgressStrip'
 import {
@@ -492,17 +492,6 @@ const NOT_SELECTED_STATUS: ShotStatusText = {
 
 const LAYOUT_STORAGE_KEY = 'jellyfish_chapter_studio_layout_v2'
 type PromptFrameType = 'first' | 'key' | 'last'
-
-/**
- * 读取镜头的声音绑定（``shot_detail.audio_file_id``）。
- *
- * 该列是本次新增的，而 ``src/services/generated/**`` 是 openapi 生成产物
- * （本环境没有 pnpm，不能重新生成），因此这里做一次显式读取，避免用 any 到处撒。
- */
-function readBoundAudioFileId(detail: ShotDetailRead | null | undefined): string | null {
-  const raw = (detail as unknown as { audio_file_id?: string | null } | null | undefined)?.audio_file_id
-  return typeof raw === 'string' && raw.trim() ? raw.trim() : null
-}
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n))
@@ -5763,27 +5752,14 @@ function Inspector(props: {
                         />
                       </div>
                       <div className="mt-4 border-t border-slate-200 pt-4">
-                        <ShotAudioBindingSection
+                        {/* 角色声音（**只读**）：声音的唯一事实来源是人物资产，
+                            第 2 步人物资产详情是全站唯一的选择 / 更换入口；
+                            这里只显示继承结果与来源，缺项时给「返回人物资产补充」。
+                            此前这一块是逐镜的声音绑定区（第二套编辑入口），已按设计包 §10 移除。 */}
+                        <ShotVoiceInheritancePanel
                           shotId={selectedShot.id}
-                          audioFileId={readBoundAudioFileId(shotDetail)}
-                          audioOptOut={Boolean((shotDetail as unknown as { audio_opt_out?: boolean } | null)?.audio_opt_out)}
-                          // 参考音频审计（来自生成计划）：把"绑了但供应商取不到"在提交前就显示出来
-                          audioAudit={requestPlan.plan?.audio ?? null}
                           projectId={projectId}
                           chapterId={chapterId}
-                          onSave={async (fileId) => {
-                            // 走既有的镜头详情写入路径：它写完用服务端返回体刷新，
-                            // 因此刷新页面后绑定仍在（不是只改了本地 state）。
-                            await onPatchShotDetailImmediate({
-                              audio_file_id: fileId,
-                            } as Partial<ShotDetailRead>)
-                          }}
-                          onSaveOptOut={async (optOut) => {
-                            // 后端保证互斥：标记无需声音会解绑音频，反之亦然
-                            await onPatchShotDetailImmediate({
-                              audio_opt_out: optOut,
-                            } as Partial<ShotDetailRead>)
-                          }}
                         />
                       </div>
                     </div>
