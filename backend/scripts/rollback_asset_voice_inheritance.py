@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
 """回滚 ``migrate_asset_voice_inheritance.py``（迁移 009）。
 
-**与迁移共用同一份清单**（``scripts/_asset_voice_inheritance.py``）：回滚删的就是迁移加的东西，
+**与迁移共用同一份清单**（``scripts/_asset_voice_inheritance.py``）：回滚撤的就是迁移加的东西，
 两边不会漂移。
 
-语义（与 ``rollback_ad_flow.py`` 同一条口径）：
-1. 先删掉本迁移**提升**出来的资产声音行（判定：资产声音行的 ``source_ref`` 与某镜的
-   ``voice_inherited_from`` 相同、且它的文件正是该镜的历史音频）；
-   —— 这一步必须在 ``DROP COLUMN`` **之前**，配对条件依赖那一列；
-2. 再 ``DROP COLUMN shot_details.voice_inherited_from``；
+语义（**保守回滚**，与 ``rollback_ad_flow.py`` 同一条口径：只撤自己加的结构）
+============================================================================
+
+1. ``DROP COLUMN shot_details.voice_inherited_from``（+ 存在性守卫，重复执行为空操作）；
+2. **一行 ``file_usages`` 都不删。** 迁移提升出来的角色声音**保留**。
+
+为什么不再删"提升出来的行"：那条判定**无法区分来源** —— 迁移提升行与
+"迁移前就存在的、资产 + 音频文件都一样的用户绑定"在库里完全一样（迁移没有、
+也无法给提升行留下可核验的来源标记）。旧的"同资产 + 同音频文件"配对删除会：
+
+- 删掉迁移前就存在的**合法角色声音**（用户数据丢失）；
+- 删掉用户在迁移后**重新绑定的同一个**音频文件。
+
+两者都是丢用户数据。判定分不清来源时不许拿它驱动删除，所以这里保留数据、只回滚结构。
+代价说清楚：回滚**不能**回到迁移前的数据状态，只能回到迁移前的结构状态 ——
+库里可能多出一条历史来源的角色声音，用户可在第 2 步自行解绑；
+错误删除则是永久丢失。重跑前滚不会重复插入（``NOT EXISTS`` 守卫），
+因此「前滚 → 回滚 → 前滚」仍然得到同一份结果。
+
 3. ``shot_details.audio_file_id`` 一个字节都不动：那是迁移前就存在的用户数据。
-   迁移**之后**用户在第 2 步重新绑定过的资产声音同样保留（除非它与某个历史快照
-   「同一资产 + 同一个音频文件」完全一致 —— 那种行无法与迁移提升的行区分，按回滚语义一并撤掉）。
 
 两种模式：
 1. ``--restore <备份文件名>``（最干净）：直接用迁移时生成的备份覆盖当前库；会连同迁移
-   之后产生的新数据一起回到当时的状态；
-2. 默认：只删提升行 + DROP 那一列，保留其他数据（需要 SQLite ≥ 3.35；Django/CPython 3.12
+   之后产生的新数据一起回到当时的状态 —— 需要"数据也回到过去"时用它；
+2. 默认：只 DROP 那一列，保留全部数据（需要 SQLite ≥ 3.35；Django/CPython 3.12
    自带的版本满足）。DROP COLUMN 不可用时脚本会提示改用模式 1；
-3. ``--check``：只报告"会删掉几行提升行、会删掉哪一列"，不写库、不加备份。
+3. ``--check``：只报告"会删掉哪一列、会保留几行资产声音"，不写库、不加备份。
 
 用法：
     cd backend && uv run python scripts/rollback_asset_voice_inheritance.py
@@ -45,12 +57,13 @@ if str(SCRIPT_DIR) not in sys.path:
 # pylint: disable=import-error,wrong-import-position  # 上面刚把 scripts/ 注入 sys.path
 from _asset_voice_inheritance import (  # noqa: E402
     COLUMN,
-    DELETE_PROMOTED_ASSET_VOICE_SQL,
     DROP_COLUMN_SQL,
+    ROLLBACK_KEEPS_ASSET_VOICE_NOTE,
     TABLE,
+    asset_voice_row_count,
     column_exists,
+    describe_rollback,
     missing_tables,
-    promoted_row_count,
 )
 
 DB_PATH = BACKEND_ROOT / "jellyfish.db"
@@ -82,7 +95,10 @@ def restore_from_backup(name: str, *, db_path: Path | None = None) -> int:
 
 
 def rollback(*, check_only: bool = False, db_path: Path | None = None) -> int:
-    """删掉本迁移提升的资产声音行 + 去掉新增列；``check_only`` 只报告。返回进程退出码。"""
+    """去掉本迁移新增的列（**保守回滚**：不删任何资产声音行）；``check_only`` 只报告。
+
+    返回进程退出码。
+    """
     target_db = Path(db_path) if db_path is not None else DB_PATH
     if not target_db.exists():
         print(f"✗ 找不到数据库：{target_db}", file=sys.stderr)
@@ -95,20 +111,20 @@ def rollback(*, check_only: bool = False, db_path: Path | None = None) -> int:
             print(f"✗ 缺前置表：{missing}；这个库不是目标库", file=sys.stderr)
             return 1
 
+        print(f"回滚清单：{describe_rollback()}")
+
         # 幂等：列已经不在了（说明从没迁移过、或已经回滚过）→ 没有可回滚的东西
         if not column_exists(conn, TABLE, COLUMN):
             print(f"✓ {TABLE}.{COLUMN} 不存在：无需回滚（重复回滚是空操作）")
             return 0
 
-        promoted = promoted_row_count(conn)
-        print(f"将删除本迁移提升出来的资产声音行：{promoted} 行")
+        kept = asset_voice_row_count(conn)
         print(f"将删除列：{TABLE}.{COLUMN}")
+        print(f"将保留的资产声音行：{kept} 行（{ROLLBACK_KEEPS_ASSET_VOICE_NOTE}）")
         if check_only:
             print("（--check 模式，未执行）")
             return 0
 
-        deleted = conn.execute(DELETE_PROMOTED_ASSET_VOICE_SQL).rowcount
-        print(f"  ✓ 已删除提升行 {max(int(deleted or 0), 0)} 行")
         try:
             conn.execute(DROP_COLUMN_SQL)
         except sqlite3.OperationalError as exc:
@@ -123,7 +139,14 @@ def rollback(*, check_only: bool = False, db_path: Path | None = None) -> int:
         if column_exists(conn, TABLE, COLUMN):
             print(f"✗ 校验失败：{TABLE}.{COLUMN} 仍存在", file=sys.stderr)
             return 1
-        print("✓ 回滚完成并校验通过")
+        after = asset_voice_row_count(conn)
+        if after != kept:
+            print(
+                f"✗ 校验失败：资产声音行数变了（{kept} → {after}）；保守回滚不许改动任何声音数据",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"✓ 回滚完成并校验通过（资产声音行仍为 {after} 行，一行未删）")
         return 0
     except sqlite3.Error as exc:
         print(f"✗ 回滚失败：{exc}", file=sys.stderr)

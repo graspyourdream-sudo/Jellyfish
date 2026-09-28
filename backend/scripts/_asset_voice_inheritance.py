@@ -31,6 +31,18 @@
 资产声音存在 ``file_usages``（``usage_kind='asset_voice'`` + ``source_ref='<类型>:<资产ID>'``，
 写入路径在 ``app/services/studio/asset_voices.py``）：本迁移**不新增**第二份存储。
 
+回滚是**保守回滚**（重要）
+==========================
+
+回滚**只撤掉无歧义属于本迁移的东西**：新增的 ``shot_details.voice_inherited_from`` 列。
+它**不删任何 ``file_usages`` 行** —— 迁移提升出来的角色声音会留在库里。
+
+为什么：迁移提升行**没有**可核验的来源标记，与"迁移前就存在的、资产 + 音频文件都一样的
+用户绑定"在库里长得完全一样。旧回滚按「同资产 + 同音频文件」配对删除，会把
+迁移前就存在的合法角色声音、以及用户在迁移后重新绑定的同一个文件一起删掉 ——
+那是丢用户数据。判定分不清来源时，不许拿它驱动删除。
+完整说明与代价见 :data:`ROLLBACK_KEEPS_ASSET_VOICE_NOTE`。
+
 范围：只处理**角色声音（人物配音）**。配乐 / 环境音 / 音效 / 最终成片音轨不在此范围内。
 """
 
@@ -133,19 +145,36 @@ WHERE {attributable_legacy_voice_predicate("sd")}
   AND sd.{COLUMN} IS NULL
 """
 
-#: 回滚：删掉本迁移「提升」出来的资产声音行。
-#: 判定 = 资产声音行的 source_ref 与某镜的继承来源相同，且它的文件正是该镜的历史音频。
-DELETE_PROMOTED_ASSET_VOICE_SQL = f"""
-DELETE FROM file_usages
-WHERE usage_kind = '{ASSET_VOICE_KIND}'
-  AND EXISTS (
-        SELECT 1 FROM {TABLE} sd
-        WHERE sd.{COLUMN} = file_usages.source_ref
-          AND sd.audio_file_id IS NOT NULL
-          AND sd.audio_file_id <> ''
-          AND sd.audio_file_id = file_usages.file_id
-      )
-"""
+#: 回滚①：**删掉本迁移「提升」出来的资产声音行** —— 这一条**已经被删掉，不再执行**。
+#:
+#: 旧实现按「资产声音行的 source_ref 与某镜的 voice_inherited_from 相同、且 file_id 正是
+#: 该镜的 audio_file_id」配对删除。这个判定**无法区分来源**：迁移提升出来的行与
+#: 「迁移前就存在的、资产+音频文件都一样的用户绑定」在库里长得完全一样，于是它会
+#:   · 删掉迁移前就存在的合法角色声音（用户数据丢失）；
+#:   · 删掉用户在迁移后重新绑定的**同一个**音频文件。
+#: 只要判定分不清"这条行是谁写的"，就不许拿它驱动删除 —— 见 :data:`ROLLBACK_KEEPS_ASSET_VOICE_NOTE`。
+#: 这里保留一个具名常量（而不是静默删掉那个 SQL），是为了让"为什么不再删"留在清单里可追溯。
+LEGACY_UNSAFE_DELETE_PROMOTED_SQL_REMOVED = (
+    "旧的 DELETE ... WHERE 资产声音行与镜头历史快照『同资产 + 同音频文件』配对 —— "
+    "该判定无法区分迁移提升行与用户既有行，已移除（见 ROLLBACK_KEEPS_ASSET_VOICE_NOTE）"
+)
+
+#: 回滚语义的**唯一文案**（SQLite 回滚脚本输出、MySQL 回滚脚本注释、迁移文档、测试都引这一份结论）。
+#:
+#: 结论：**回滚不删任何 ``file_usages`` 行**，只回滚无歧义属于本迁移的**结构**部分
+#: （新增的 ``shot_details.voice_inherited_from`` 列）。
+#:
+#: 取舍（说清楚代价）：保守回滚之后，迁移提升出来的那条角色声音**会留在库里** ——
+#: 也就是说回滚不能"回到迁移前的数据状态"，只能"回到迁移前的结构状态"。
+#: 代价是多一条（历史来源的）角色声音绑定，用户可以在第 2 步自行解绑；
+#: 而错误删除的代价是**用户的配音数据永久丢失、无法找回**。两者不对等，所以选保守。
+#: 重跑前滚不会重复插入（``NOT EXISTS`` 守卫），所以
+#: 「前滚 → 回滚 → 前滚」仍然得到同一份结果，不会叠加数据。
+ROLLBACK_KEEPS_ASSET_VOICE_NOTE = (
+    "回滚是**保守回滚**：只删本迁移新增的列，"
+    "**不删任何资产声音行**（迁移提升出来的行与迁移前就存在的、内容相同的用户绑定在库里无法区分，"
+    "用启发式删除会丢用户数据；重跑前滚不会重复插入）。"
+)
 
 
 def describe() -> str:
@@ -155,6 +184,11 @@ def describe() -> str:
         f"；回填：可归属的历史逐镜声音 → 角色资产声音（{ASSET_VOICE_KIND}，"
         "仅『这一镜只有一个角色』且该角色历史声音唯一时）+ 标注继承来源"
     )
+
+
+def describe_rollback() -> str:
+    """回滚清单的一行说明（与 :func:`describe` 同源，避免"两份说法各自漂移"）。"""
+    return f"回滚 {TABLE}.{COLUMN}（{COLUMN_DDL}）：{ROLLBACK_KEEPS_ASSET_VOICE_NOTE}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,21 +244,8 @@ def pending_source_mark_count(conn: sqlite3.Connection) -> int:
     return int(row[0]) if row else 0
 
 
-def promoted_row_count(conn: sqlite3.Connection) -> int:
-    """只读：库里有几行「本迁移提升出来的」资产声音（回滚会删掉的行）。"""
-    if not column_exists(conn, TABLE, COLUMN):
-        return 0
-    row = conn.execute(
-        f"SELECT COUNT(*) FROM file_usages WHERE usage_kind = '{ASSET_VOICE_KIND}' AND EXISTS ("
-        f"  SELECT 1 FROM {TABLE} sd WHERE sd.{COLUMN} = file_usages.source_ref"
-        "     AND sd.audio_file_id IS NOT NULL AND sd.audio_file_id <> ''"
-        "     AND sd.audio_file_id = file_usages.file_id)"
-    ).fetchone()
-    return int(row[0]) if row else 0
-
-
 def asset_voice_row_count(conn: sqlite3.Connection) -> int:
-    """只读：库里资产声音行的总数（幂等断言用）。"""
+    """只读：库里资产声音行的总数（幂等断言用；回滚一行都不删，所以它也是回滚后的保留数）。"""
     row = conn.execute(
         f"SELECT COUNT(*) FROM file_usages WHERE usage_kind = '{ASSET_VOICE_KIND}'"
     ).fetchone()
@@ -239,18 +260,19 @@ __all__ = [
     "COLUMN",
     "COLUMN_DDL",
     "COLUMN_WHY",
-    "DELETE_PROMOTED_ASSET_VOICE_SQL",
     "DROP_COLUMN_SQL",
+    "LEGACY_UNSAFE_DELETE_PROMOTED_SQL_REMOVED",
     "MARK_LEGACY_SHOT_VOICE_SOURCE_SQL",
     "Promotion",
+    "ROLLBACK_KEEPS_ASSET_VOICE_NOTE",
     "TABLE",
     "asset_voice_row_count",
     "column_exists",
     "describe",
+    "describe_rollback",
     "missing_tables",
     "pending_source_mark_count",
     "promote_legacy_shot_voice_sql",
-    "promoted_row_count",
     "promotion_candidates",
     "required_tables",
     "source_ref_for_character",

@@ -14,6 +14,10 @@
 所以这里有一份**能真的被执行与回归**的实现，两者的一致性由
 ``tests/test_asset_voice_inheritance_migration.py`` 对拍。
 
+回滚是**保守回滚**（与 ``rollback_asset_voice_inheritance.py`` 同一份结论）：只撤掉本迁移
+新增的列，**一行资产声音都不删** —— 迁移提升行没有可核验的来源标记，与"迁移前就存在的、
+资产 + 音频文件都一样的用户绑定"无法区分，用启发式删除会丢用户数据。
+
 幂等与安全：
 - 列已存在 → 跳过；提升语句带 ``NOT EXISTS``、标注语句带 ``IS NULL`` 守卫，重跑为空操作；
 - ``--check`` 走**只读连接**：不加列、不写库、不生成备份、不动 ``-wal``；
@@ -45,8 +49,8 @@ if str(SCRIPT_DIR) not in sys.path:
 from _asset_voice_inheritance import (  # noqa: E402
     ADD_COLUMN_SQL,
     COLUMN,
-    DELETE_PROMOTED_ASSET_VOICE_SQL,  # noqa: F401  (回滚脚本与测试从同一份清单取用)
     MARK_LEGACY_SHOT_VOICE_SOURCE_SQL,
+    ROLLBACK_KEEPS_ASSET_VOICE_NOTE,  # 回滚脚本 / 文档 / 测试从同一份清单取用
     TABLE,
     asset_voice_row_count,
     column_exists,
@@ -153,6 +157,7 @@ def migrate(*, check_only: bool, db_path: Path | None = None) -> int:
             f"✓ 迁移完成并校验通过（{TABLE}.{COLUMN} 已存在；"
             f"库内资产声音行共 {asset_voice_row_count(conn)} 行）"
         )
+        print(f"ℹ 回滚口径：{ROLLBACK_KEEPS_ASSET_VOICE_NOTE}")
         return 0
     except sqlite3.Error as exc:
         print(f"✗ 迁移失败：{exc}", file=sys.stderr)
