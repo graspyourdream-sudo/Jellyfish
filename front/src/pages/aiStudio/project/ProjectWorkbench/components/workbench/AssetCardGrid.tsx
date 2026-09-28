@@ -30,6 +30,7 @@ import {
   workbenchStatusNotice,
 } from './workbenchState.ts'
 import type { AssetWorkbenchItem } from './assetWorkbenchContract.ts'
+import type { AssetStrategyRead } from '../../../../../../services/generated'
 
 const TONE_COLOR: Record<string, string | undefined> = {
   default: undefined,
@@ -57,6 +58,14 @@ export type AssetCardGridProps = {
    * 落到商品资产编辑页（复用实体 CRUD 的上传与 `is_primary`），所以卡片上给的是这个入口。
    */
   onOpenAssetEditor?: (item: AssetWorkbenchItem) => void
+  /**
+   * 该资产类型的**业务出图口径**（画幅 / 结果类型 / 是否参与自动出图）。
+   *
+   * 来自后端 `GET /studio/image-pipeline/asset-strategies` 的只读读口 ——
+   * 页面**不自己写比例表**，否则会出现"卡片写 1:1、实际请求发 16:9"这种用户无法察觉的漂移。
+   * 读不到时返回 null，卡片就不显示比例（宁可少一个标签，也不给错的口径）。
+   */
+  strategyFor?: (assetType: string) => AssetStrategyRead | null
 }
 
 export function AssetCardGrid(props: AssetCardGridProps) {
@@ -69,6 +78,7 @@ export function AssetCardGrid(props: AssetCardGridProps) {
     onEditPrompt,
     onGenerateOne,
     onOpenAssetEditor,
+    strategyFor,
   } = props
   const selected = new Set(selectedKeys)
 
@@ -97,6 +107,17 @@ export function AssetCardGrid(props: AssetCardGridProps) {
         const statusKey = workbenchStatusKey(item)
         const label = workbenchStatusLabel(item)
         const requiresNewPrompt = needsPromptRegeneration(item)
+        /*
+         * 业务比例 / 出图口径：**直接展示后端下发的那一份**。
+         * 商品是唯一不参与自动出图的类型，卡面上必须写清楚（否则用户会等一个永远不会来的生成按钮）。
+         */
+        const strategy = strategyFor?.(String(workbenchItemType(item))) ?? null
+        const ratioHint =
+          strategy && strategy.auto_generate === false
+            ? '不参与自动出图'
+            : strategy?.aspect_ratio
+              ? `业务比例 ${strategy.aspect_ratio}`
+              : ''
         /* 卡面**唯一**主要操作及其可用性（设计包 §8）：状态 → 动作的映射与禁用理由
            都在 workbenchState 的纯函数里（有单测），卡面只负责渲染那一个按钮。 */
         const cardAction = deriveCardAction(item)
@@ -170,7 +191,10 @@ export function AssetCardGrid(props: AssetCardGridProps) {
                     </span>
                     <span className="shrink-0 text-[10px] text-gray-400 group-hover:text-blue-600">完整资料</span>
                   </button>
-                  <div className="text-[11px] text-gray-400">{WORKBENCH_TAB_LABEL[bucket]}</div>
+                  <div className="text-[11px] text-gray-400">
+                    {WORKBENCH_TAB_LABEL[bucket]}
+                    {ratioHint ? <span className="ml-1 text-gray-500">{ratioHint}</span> : null}
+                  </div>
                 </div>
               </div>
               <div className="flex flex-col items-end gap-1">

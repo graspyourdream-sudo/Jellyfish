@@ -26,6 +26,7 @@ import { Alert, Button, Modal, Spin, message } from 'antd'
 
 import type { ProjectSignalAsset, ProjectStepSignalDetail } from '../../hooks/useProjectStepSignals'
 import { useGenerationGate } from '../../../../components/generationGate'
+import { useAssetStrategies } from '../../../../hooks/useAssetStrategies'
 import { GenerationGateBanner } from '../../../../components/GenerationGateBanner'
 import { AssetProductionArea, type AssetProductionAreaHandle } from '../AssetProductionArea'
 import { AssetImagePromptLlmPanel } from '../AssetImagePromptLlmPanel'
@@ -133,7 +134,17 @@ export type AssetWorkbenchProps = {
 }
 
 export function AssetWorkbench(props: AssetWorkbenchProps) {
+  /*
+   * 资产类型的出图口径（画幅 / 结果类型 / 是否自动出图）：**只读读口**，读不到就不显示比例。
+   * 卡片与详情抽屉读的是同一份，因此不会出现"卡面写 1:1、抽屉写 16:9"的分叉。
+   */
+  const assetStrategies = useAssetStrategies()
+  const strategyFor = useCallback(
+    (assetType: string) => assetStrategies.byType[String(assetType ?? '').trim().toLowerCase()] ?? null,
+    [assetStrategies.byType],
+  )
   const {
+
     projectId,
     chapter,
     assets,
@@ -598,6 +609,7 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
                 onEditPrompt={handleEditPrompt}
                 onGenerateOne={handleGenerateOne}
                 onOpenAssetEditor={handleOpenAssetEditor}
+                strategyFor={strategyFor}
               />
 
               {/* 技术详情（默认收起）：内部信息唯一的落点 */}
@@ -631,7 +643,7 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
             onCancel={() => setPromptPanelOpen(false)}
             footer={null}
             width={1040}
-            destroyOnClose={false}
+            destroyOnHidden={false}
           >
             <div className="space-y-2">
               <Alert
@@ -701,6 +713,7 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
 
       <AssetDetailDrawer
         open={Boolean(detailItem)}
+        strategy={detailItem ? strategyFor(String(workbenchItemType(detailItem))) : null}
         item={detailItem}
         focusShotIndex={detailShotIndex}
         projectId={projectId ?? null}

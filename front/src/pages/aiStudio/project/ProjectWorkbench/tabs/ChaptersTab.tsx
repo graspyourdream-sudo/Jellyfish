@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
-import { Card, Button, Tag, Space, Table, Empty, Modal, Input, Dropdown, Tooltip, Upload, message } from 'antd'
-import type { MenuProps, TableColumnsType } from 'antd'
+import { Card, Button, Tag, Space, Empty, Modal, Input, Dropdown, Tooltip, Upload, Spin, message } from 'antd'
+import type { MenuProps } from 'antd'
 import {
   EditOutlined,
   FileSearchOutlined,
@@ -15,7 +15,6 @@ import {
 } from '@ant-design/icons'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ScriptProcessingService, StudioChaptersService } from '../../../../../services/generated'
-import { chapterStatusMap } from '../constants'
 import { getChapterShotsPath, getChapterStudioPath } from '../routes'
 import { useChapters, newId, type Chapter } from '../hooks/useProjectData'
 import { ChapterRawTextEditorModal } from '../../../chapter/components/ChapterRawTextEditorModal'
@@ -28,7 +27,6 @@ import { parseScriptDocument } from '../../../../../services/llmPipelineApi'
 import { classifyGenerationFailure, failureText } from '../../../components/generationGate'
 import { useTaskPageContext } from '../../../components/taskPageContext'
 import { useTaskUiStore } from '../../../components/taskUiStore'
-import { formatUserFacingTime } from '../../../components/userFacingTime'
 import { showUserError, showUserWarning } from '../../../components/userFacingMessage'
 import {
   createRelationTaskState,
@@ -525,184 +523,148 @@ export function ChaptersTab() {
     ].filter(Boolean)
   }
 
-  const columns: TableColumnsType<Chapter> = [
-    // 集数是**编号**（由 `index` 推出来的序号），不是剧集名称；名称单独一列且可改
-    { title: '集数', dataIndex: 'index', key: 'index', width: 80, render: (v: number) => `第${v}集` },
-    {
-      title: '剧集名称',
-      dataIndex: 'title',
-      key: 'title',
-      ellipsis: true,
-      render: (title: string, record) => (
-        /*
-         需求清单第 1 条：**剧集名称可编辑**。
-         此前这一列点开的是「原文编辑器」（它只发 raw_text / condensed_text，改不了名字），
-         所以界面上根本没有改剧集名的入口。现在这一列开的是**改名**；
-         原文编辑仍然在右侧「更多操作」里的「编辑原文」，两个入口不再互相顶替。
-        */
-        <Space size={4}>
-          <Button
-            type="link"
-            size="small"
-            style={{ paddingInline: 0 }}
-            onClick={() => openRenameModal(record)}
-            data-testid={`rename-chapter-${record.id}`}
-          >
-            {chapterDisplayName(record, title)}
-          </Button>
-          <Tooltip title="修改剧集名称">
-            <Button
-              type="text"
-              size="small"
-              icon={<FormOutlined />}
-              aria-label="修改剧集名称"
+
+  /**
+   * 剧集卡片网格（需求清单第 1 条：**剧集列表卡片化**，不再用横贯整页的表格长条）。
+   *
+   * 每张卡只放 6 项用户看得懂的信息：
+   *   剧集名称（可改名）/ 镜头数 / 当前状态 / 封面（没有就明确写空状态）/
+   *   最近保存状态 / 进入本集的主操作。
+   *
+   * 「最近保存状态」只说**我们确知**的事（库里有没有原文、有没有镜头），
+   * 不显示一个前端凭空生成的"更新时间" —— 那会让用户以为内容刚保存过。
+   */
+  const renderChapterCard = (record: Chapter) => {
+    const state = getChapterPreparationState(record)
+    const activeTask = chapterDivisionTaskMap[record.id]
+    const stats = chapterFlowMap[record.id]
+    const shotCount = record.storyboardCount ?? 0
+    const hasRawText = Boolean((record.rawText ?? '').trim())
+    const savedHint = hasRawText
+      ? shotCount > 0
+        ? `原文已保存 · 已拆出 ${shotCount} 个镜头`
+        : '原文已保存 · 还没有拆解分镜'
+      : '还没有保存剧本原文'
+    const primaryIcon = activeTask
+      ? activeTask.cancelRequested
+        ? <SyncOutlined spin />
+        : <LoadingOutlined />
+      : state.primaryIcon
+    const primaryText = activeTask
+      ? activeTask.cancelRequested
+        ? '查看取消进度'
+        : '查看提取进度'
+      : chapterDivisionActionId === record.id && state.key === 'extract_shots'
+        ? '同步提取中…'
+        : state.primaryAction
+    const primaryLoading = chapterDivisionActionId === record.id && state.key === 'extract_shots' && !activeTask
+
+    return (
+      <Card
+        key={record.id}
+        size="small"
+        data-testid={`chapter-card-${record.id}`}
+        title={
+          <div className="flex min-w-0 items-center gap-2">
+            <Tag bordered={false} className="mr-0 shrink-0">{`第${record.index}集`}</Tag>
+            <button
+              type="button"
+              className="min-w-0 truncate text-left text-sm font-medium text-slate-900 hover:text-blue-600"
+              title="点这里修改剧集名称"
               onClick={() => openRenameModal(record)}
-            />
-          </Tooltip>
-        </Space>
-      ),
-    },
-    { title: '分镜数', dataIndex: 'storyboardCount', key: 'storyboardCount', width: 90 },
-    {
-      title: '准备状态',
-      key: 'preparation',
-      width: 180,
-      render: (_, record) => {
-        const activeTask = chapterDivisionTaskMap[record.id]
-        if (activeTask) {
-          return (
-            <div className="space-y-1">
-              <Tag color={activeTask.cancelRequested ? 'orange' : 'processing'}>
+              data-testid={`rename-chapter-${record.id}`}
+            >
+              {chapterDisplayName(record, record.title)}
+            </button>
+            <EditOutlined className="shrink-0 text-[11px] text-gray-400" />
+          </div>
+        }
+        extra={
+          <Dropdown trigger={['click']} menu={{ items: buildActionMenuItems(record) }}>
+            <Button size="small" icon={<MoreOutlined />} aria-label="更多操作" />
+          </Dropdown>
+        }
+      >
+        {/* 封面位：本环境章节没有封面字段 → 给**明确的空状态**，不放占位图充数 */}
+        <div className="mb-2 grid h-20 w-full place-items-center rounded border border-dashed border-gray-200 bg-gray-50 text-[11px] text-gray-400">
+          这一集还没有封面
+        </div>
+
+        <div className="space-y-1 text-xs text-gray-600">
+          <div className="flex items-center gap-2">
+            <span className="text-gray-400">镜头数</span>
+            <span className="font-medium text-slate-800">{shotCount}</span>
+            {stats ? (
+              <span className="flex flex-wrap gap-1">
+                <Tag bordered={false} color="gold" className="mr-0">
+                  {`待确认 ${stats.pendingConfirmShots ?? 0}`}
+                </Tag>
+                <Tag bordered={false} color="green" className="mr-0">
+                  {`已就绪 ${stats.readyShots ?? 0}`}
+                </Tag>
+                <Tag bordered={false} color="processing" className="mr-0">
+                  {`生成中 ${stats.generatingShots ?? 0}`}
+                </Tag>
+              </span>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-gray-400">当前状态</span>
+            {activeTask ? (
+              <Tag color={activeTask.cancelRequested ? 'orange' : 'processing'} className="mr-0">
                 {activeTask.cancelRequested ? '正在取消提取' : '分镜提取中'}
               </Tag>
-              <div className="text-[11px] text-gray-500 leading-5">
-                {activeTask.cancelRequested ? '已请求取消，将在当前步骤结束后停止' : '系统正在异步提取当前章节分镜'}
-              </div>
-            </div>
-          )
-        }
-        if (chapterDivisionActionId === record.id) {
-          return (
-            <div className="space-y-1">
-              <Tag color="processing">同步提取中</Tag>
-              <div className="text-[11px] text-gray-500 leading-5">
-                本环境无后台 worker，AI 在本次请求内同步执行，通常数十秒
-              </div>
-            </div>
-          )
-        }
-        const state = getChapterPreparationState(record)
-        return (
-          <div className="space-y-1">
-            <Tag color={state.color}>{state.text}</Tag>
-            <div className="text-[11px] text-gray-500 leading-5">{state.hint}</div>
+            ) : (
+              <Tag color={state.color} className="mr-0">
+                {state.text}
+              </Tag>
+            )}
           </div>
-        )
-      },
-    },
-    {
-      title: '分镜流转',
-      key: 'shotFlow',
-      width: 220,
-      render: (_, record) => {
-        const stats = chapterFlowMap[record.id]
-        return (
-          <div className="flex flex-wrap gap-1">
-            <Tag bordered={false} color="gold" className="mr-0">
-              待确认 {stats?.pendingConfirmShots ?? 0}
-            </Tag>
-            <Tag bordered={false} color="green" className="mr-0">
-              已就绪 {stats?.readyShots ?? 0}
-            </Tag>
-            <Tag bordered={false} color="processing" className="mr-0">
-              生成中 {stats?.generatingShots ?? 0}
-            </Tag>
+          <div className="flex items-center gap-2">
+            <span className="text-gray-400">最近保存</span>
+            <span>{savedHint}</span>
           </div>
-        )
-      },
-    },
-    {
-      title: '状态',
-      dataIndex: 'status',
-      key: 'status',
-      width: 100,
-      render: (status: Chapter['status']) => (
-        <Tag color={chapterStatusMap[status].color}>{chapterStatusMap[status].text}</Tag>
-      ),
-    },
-    {
-      title: '更新时间',
-      dataIndex: 'updatedAt',
-      key: 'updatedAt',
-      width: 160,
-      /**
-       * 审计 §4.2 模式 3：这一列原先**没有 `render`**，后端给的 ISO 串
-       * （`2026-09-26T04:02:58.135Z`）于是原样上了屏。时间口径统一走
-       * `formatUserFacingTime`（全仓唯一实现），不在渲染点直渲后端值。
-       */
-      render: (value: string) => formatUserFacingTime(value),
-    },
-    {
-      title: '操作',
-      key: 'action',
-      width: 230,
-      render: (_, record) => {
-        const state = getChapterPreparationState(record)
-        const activeTask = chapterDivisionTaskMap[record.id]
-        const primaryIcon = activeTask
-          ? activeTask.cancelRequested
-            ? <SyncOutlined spin />
-            : <LoadingOutlined />
-          : state.primaryIcon
-        const primaryText = activeTask
-          ? activeTask.cancelRequested
-            ? '查看取消进度'
-            : '查看提取进度'
-          : chapterDivisionActionId === record.id && state.key === 'extract_shots'
-            ? '同步提取中…'
-            : state.primaryAction
-        const primaryLoading = chapterDivisionActionId === record.id && state.key === 'extract_shots' && !activeTask
-        const showSyncHint = state.key === 'extract_shots' && !activeTask
+        </div>
 
-        return (
-          <Space size={8}>
-            <Tooltip title={showSyncHint ? SYNC_DIVIDE_HINT : undefined}>
-              <span>
-                <Button
-                  type="primary"
-                  size="small"
-                  onClick={() => {
-                    if (state.key === 'extract_shots' && !activeTask) {
-                      void handleDivideAsync(record)
-                      return
-                    }
-                    handlePrimaryAction(record)
-                  }}
-                  style={{ minWidth: 132, justifyContent: 'center' }}
-                  icon={primaryIcon}
-                  loading={primaryLoading}
-                  disabled={primaryLoading}
-                >
-                  {primaryText}
-                </Button>
-              </span>
-            </Tooltip>
-            <Dropdown
-              trigger={['click']}
-              menu={{ items: buildActionMenuItems(record) }}
-            >
+        <div className="mt-3 flex items-center gap-2">
+          <Tooltip title={state.key === 'extract_shots' && !activeTask ? SYNC_DIVIDE_HINT : undefined}>
+            <span className="min-w-0 flex-1">
               <Button
+                type="primary"
                 size="small"
-                icon={<MoreOutlined />}
-                aria-label="更多操作"
-                loading={chapterDivisionActionId === record.id && !!activeTask}
-              />
-            </Dropdown>
-          </Space>
-        )
-      },
-    },
-  ]
+                block
+                onClick={() => {
+                  if (state.key === 'extract_shots' && !activeTask) {
+                    void handleDivideAsync(record)
+                    return
+                  }
+                  handlePrimaryAction(record)
+                }}
+                icon={primaryIcon}
+                loading={primaryLoading}
+                disabled={primaryLoading}
+              >
+                {primaryText}
+              </Button>
+            </span>
+          </Tooltip>
+          <Button
+            size="small"
+            data-testid={`enter-chapter-${record.id}`}
+            onClick={() =>
+              navigate(
+                state.key === 'prepare_shots' && shotCount === 0
+                  ? getChapterShotsPath(projectId as string, record.id)
+                  : getChapterStudioPath(projectId as string, record.id),
+              )
+            }
+          >
+            进入本集
+          </Button>
+        </div>
+      </Card>
+    )
+  }
 
   if (chapters.length === 0 && !loading) {
     return (
@@ -772,14 +734,16 @@ export function ChaptersTab() {
         </Space>
       }
     >
-      <Table<Chapter>
-        rowKey="id"
-        loading={loading}
-        columns={columns}
-        dataSource={chapters}
-        pagination={{ pageSize: 10 }}
-        size="small"
-      />
+      <Spin spinning={loading}>
+        <div
+          className="grid gap-3"
+          /* 设计系统：独立卡片网格（`auto-fill, minmax(260px, 1fr)`），不做横贯整页的大长条 */
+          style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}
+          data-testid="chapter-card-grid"
+        >
+          {chapters.map(renderChapterCard)}
+        </div>
+      </Spin>
 
       <ChapterRawTextEditorModal
         open={editOpen}
@@ -807,7 +771,7 @@ export function ChaptersTab() {
         okText="保存名称"
         confirmLoading={renaming}
         width={480}
-        destroyOnClose
+        destroyOnHidden
       >
         <div className="space-y-3">
           <div>

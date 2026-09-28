@@ -150,7 +150,7 @@ export function AssetProfileEditEntry(props: AssetProfileEditEntryProps) {
         okText="保存资料"
         cancelText="取消"
         confirmLoading={saving}
-        destroyOnClose={false}
+        destroyOnHidden={false}
         width={760}
       >
         <Spin spinning={loading}>

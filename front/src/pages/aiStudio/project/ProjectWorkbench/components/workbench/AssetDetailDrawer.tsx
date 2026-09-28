@@ -10,7 +10,7 @@
  */
 
 import type { ReactNode } from 'react'
-import { Button, Descriptions, Divider, Drawer, Empty, Space, Tag, Typography } from 'antd'
+import { Button, Descriptions, Divider, Drawer, Empty, Space, Tag, Tooltip, Typography } from 'antd'
 
 import {
   WORKBENCH_PROMPT_REGENERATION_MAIN_TEXT,
@@ -27,6 +27,7 @@ import { VoiceBindingSection } from './VoiceBindingSection.tsx'
 import { voiceSectionAppliesTo } from './voiceBindingState.ts'
 import { buildUserFacingMessage } from '../../../../components/userFacingMessage.ts'
 import type { AssetWorkbenchItem } from './assetWorkbenchContract.ts'
+import type { AssetStrategyRead } from '../../../../../../services/generated'
 
 export type AssetDetailDrawerProps = {
   open: boolean
@@ -38,6 +39,14 @@ export type AssetDetailDrawerProps = {
   onClose: () => void
   onEditPrompt: (item: AssetWorkbenchItem) => void
   renderProfileEditor: (item: AssetWorkbenchItem) => ReactNode
+  /**
+   * 该资产类型的**业务出图口径**（画幅 / 结果类型 / 是否参与自动出图）。
+   *
+   * 来自后端只读读口；**读不到就什么都不显示**（不猜比例、不编结果类型）。
+   * 产品口径：人物出的是**角色设定图**（左面部特写 + 右全身三视图），固定 16:9；
+   * 商品不参与自动出图 —— 这两件事都由后端下发，不在页面里写死。
+   */
+  strategy?: AssetStrategyRead | null
   /** 角色声音绑定 / 更换成功后的通知（工作台据此刷新卡片上的缺项） */
   onVoiceSaved?: () => void
 }
@@ -58,7 +67,17 @@ function profileRows(item: AssetWorkbenchItem): { label: string; value: string }
 }
 
 export function AssetDetailDrawer(props: AssetDetailDrawerProps) {
-  const { open, item, focusShotIndex, projectId, onClose, onEditPrompt, renderProfileEditor, onVoiceSaved } = props
+  const {
+    open,
+    item,
+    focusShotIndex,
+    projectId,
+    onClose,
+    onEditPrompt,
+    renderProfileEditor,
+    onVoiceSaved,
+    strategy,
+  } = props
   const rows = item ? profileRows(item) : []
   const shotRefs = item?.script_relation?.shot_refs ?? []
   const evidence = item?.script_relation?.evidence ?? []
@@ -88,6 +107,28 @@ export function AssetDetailDrawer(props: AssetDetailDrawerProps) {
         <div className="space-y-4">
           <Space size={8} wrap>
             <Tag bordered={false}>{workbenchStatusLabel(item)}</Tag>
+            {/* 业务出图口径：结果类型标签 + 画幅 + 是否参与自动出图（全部来自后端下发） */}
+            {strategy ? (
+              <>
+                {strategy.result_label ? (
+                  <Tag bordered={false} data-testid="asset-detail-result-label">
+                    {`出图结果：${strategy.result_label}`}
+                  </Tag>
+                ) : null}
+                {strategy.aspect_ratio ? (
+                  <Tooltip title={strategy.aspect_ratio_note || undefined}>
+                    <Tag bordered={false} data-testid="asset-detail-aspect-ratio">
+                      {`业务比例 ${strategy.aspect_ratio}${strategy.aspect_ratio_fixed ? '（固定）' : ''}`}
+                    </Tag>
+                  </Tooltip>
+                ) : null}
+                {strategy.auto_generate === false ? (
+                  <Tag color="gold" bordered={false} data-testid="asset-detail-auto-generate">
+                    不参与自动出图
+                  </Tag>
+                ) : null}
+              </>
+            ) : null}
             {statusNotice ? <span className="text-[11px] text-red-500">{statusNotice}</span> : null}
           </Space>
 

@@ -429,15 +429,26 @@ test('工作台五步：审计 §4.2 点名的后端字段名不再出现在任�
 
 /* --------------------------------------------- ② 渲染点口径（扫描器看不见的那类） */
 
-test('步骤 1：更新时间列不再直渲 ISO 串（§4.2 模式 3）', () => {
-  const source = readWorkbench('tabs/ChaptersTab.tsx')
-  const column = /title: '更新时间'[\s\S]{0,400}?\n\s*\},/.exec(source)
-  assert.ok(column, 'ChaptersTab.tsx 里找不到「更新时间」列定义')
-  assert.ok(/render:/.test(column[0]), '列必须有 render —— 没有 render 就是把后端值直接渲出来')
+/**
+ * 步骤 1 · 剧集列表卡片化之后的**时间口径**（需求清单第 1 条 + 审计 §4.2 模式 3）。
+ *
+ * 改造前这里是一列「更新时间」，靠 `formatUserFacingTime` 把后端值格式化成中文时间；
+ * 但 `ChapterRead` **根本没有** `updated_at` 字段 —— 那个值来自前端适配器的
+ * `updatedAt: new Date().toISOString()`（每次加载都变），也就是**前端凭空造的时间**。
+ * 卡片化时按"最近保存状态"改成只说**确知**的事（库里有没有原文、有没有镜头）：
+ * 显示一个假时间比不显示更糟 —— 用户会以为内容刚被保存过。
+ *
+ * 本测试改为钉住两件事：① 卡片不再渲染任何"更新时间"；② 纯函数口径保持不变。
+ */
+test('步骤 1：剧集卡不再渲染任何凭空生成的时间，只给确知的保存状态（§4.2 模式 3）', () => {
+  const source = stripComments(readWorkbench('tabs/ChaptersTab.tsx'))
+  assert.ok(source.includes('chapter-card-grid'), '剧集列表必须是卡片网格（需求清单第 1 条）')
+  assert.ok(!/title: '更新时间'/.test(source), '卡片化之后不该再有「更新时间」列')
   assert.ok(
-    column[0].includes('formatUserFacingTime'),
-    '时间口径必须走全仓唯一的 formatUserFacingTime（审计指定「复用既有实现」）',
+    !/formatUserFacingTime\([^)]*updatedAt/.test(source) && !/\{record\.updatedAt\}/.test(source),
+    '不许渲染 updatedAt：ChapterRead 没有这个字段，前端适配器给的是每次加载都变的假时间（新建章节时为了拼出合法的 Chapter 对象仍会赋值，那不是渲染点）',
   )
+  assert.ok(/最近保存/.test(source), '要有「最近保存状态」这一项（需求清单第 1 条要求）')
   // 纯函数级：机器时间串必须被格式化成可读中文时间
   const formatted = formatUserFacingTime('2026-09-26T04:02:58.135Z')
   assert.match(formatted, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/, `格式化结果不像本地时间：${formatted}`)
