@@ -29,6 +29,8 @@ import {
   readStructuredServerError,
   resolvePromptQuality,
   selectAssetsForSubmit,
+  conflictsFor,
+  findDuplicateConflicts,
 } from './assetPromptQuality.ts'
 import { groupAssetsByType } from './assetResultKind.ts'
 
@@ -471,4 +473,69 @@ test('⑤ 最终四条提示词的差异：逐条算出与同批最像的那条�
   const lines = buildPromptDifferenceLines(rows)
   assert.equal(lines.length, 4)
   assert.match(lines[0], /^韩虹（人物）：与「/)
+})
+
+/* ------------------------------------------------------------------ */
+/* 跨资产重复必须**点名冲突对手**（需求清单第 4 条第 6、7 项）           */
+/* ------------------------------------------------------------------ */
+
+test('findDuplicateConflicts：找出高度重复项并点名对手（不露内部标识）', () => {
+  const same = '人物设定图，左面部特写加右侧全身三视图，纯白背景，正面站姿，写实质感，柔和布光'
+  const conflicts = findDuplicateConflicts(
+    [same, same, '完全不同的一条：中年男性，方下颌，短寸发，深灰布衣'],
+    ['丫鬟甲', '丫鬟乙', '管家'],
+  )
+  assert.deepEqual(conflicts.map((item) => item.index), [0, 1])
+  assert.deepEqual(conflicts[0].conflictsWith, ['丫鬟乙'])
+  assert.deepEqual(conflicts[1].conflictsWith, ['丫鬟甲'])
+  // 不冲突的那一项不在结果里
+  assert.ok(!conflicts.some((item) => item.index === 2))
+})
+
+test('findDuplicateConflicts：同一个资产在多个镜头复用同一提示词不算重复错误', () => {
+  const prompt = '人物设定图，左面部特写加右侧全身三视图，纯白背景，正面站姿，写实质感'
+  // 同名 = 同一个资产（同一人物在多镜复用）→ 不判重
+  assert.deepEqual(findDuplicateConflicts([prompt, prompt], ['小林', '小林']), [])
+})
+
+test('findDuplicateConflicts：名字缺失时用中文兜底序号，不回显内部 id', () => {
+  const prompt = '道具白底图，方图构图，干净背景，1:1 比例，材质清晰，柔和布光'
+  const conflicts = findDuplicateConflicts([prompt, prompt], ['', ''])
+  assert.deepEqual(conflicts[0].conflictsWith, ['第 2 项资产'])
+  assert.doesNotMatch(conflicts[0].conflictsWith[0], /[0-9a-f]{8}-/)
+})
+
+test('跨资产重复的阻断文案点名具体资产（改成"与谁重复"而不是泛泛而谈）', () => {
+  const verdict = resolvePromptQuality({
+    prompt: '人物设定图，左面部特写加右侧全身三视图，纯白背景，正面站姿，写实质感',
+    assetName: '丫鬟甲',
+    duplicated: true,
+    duplicatedWith: ['丫鬟乙'],
+  })
+  assert.equal(verdict.status, 'unusable')
+  assert.equal(verdict.code, 'duplicated')
+  assert.match(verdict.reason, /丫鬟乙/)
+})
+
+test('批量闸门透出冲突关系：谁和谁撞了、可据此只重试冲突项', () => {
+  const same = '人物设定图，左面部特写加右侧全身三视图，纯白背景，正面站姿，写实质感，柔和布光'
+  const gate = buildBatchPromptQualityGate({
+    assets: [
+      { key: 'a', id: 'a1', type: 'character', name: '丫鬟甲' },
+      { key: 'b', id: 'b1', type: 'character', name: '丫鬟乙' },
+      { key: 'c', id: 'c1', type: 'character', name: '管家' },
+    ],
+    promptFor: (asset) => (asset.key === 'c' ? '中年男性，方下颌，短寸发，深灰布衣，写实影视质感' : same),
+  })
+  assert.deepEqual(gate.duplicatedKeys.sort(), ['a', 'b'])
+  assert.deepEqual(
+    gate.duplicateConflicts.map((item) => [item.conflictAssetKey, item.conflictsWith]).sort(),
+    [
+      ['a', ['丫鬟乙']],
+      ['b', ['丫鬟甲']],
+    ],
+  )
+  assert.deepEqual(conflictsFor(gate, 'a'), ['丫鬟乙'])
+  // 被阻断的只有冲突的那两项；无冲突的照样可以提交（批量只重试冲突项）
+  assert.deepEqual(selectAssetsForSubmit(gate).map((asset) => asset.key), ['c'])
 })

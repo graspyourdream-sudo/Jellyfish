@@ -376,6 +376,66 @@ export function findDuplicatedPromptIndexes(
   return Array.from(duplicates).sort((a, b) => a - b)
 }
 
+/**
+ * 一个被判定为「跨资产高度重复」的资产，**与它具体冲突的是哪几个资产**（按名称）。
+ *
+ * 需求清单第 4 条要求：阻断时必须**点名冲突的是哪几项**（例如"两个丫鬟"），
+ * 只说"与其它资产高度重复"用户根本不知道该改哪一条。
+ */
+export type DuplicateConflict = {
+  index: number
+  /** 与它高度重复的**其它资产名称**（按输入顺序，去重） */
+  conflictsWith: string[]
+}
+
+/** 闸门里的冲突关系（把索引换成资产 key，页面可以直接用来定位冲突项）。 */
+export type PromptQualityConflict = {
+  conflictAssetKey: string
+  conflictsWith: string[]
+}
+
+/**
+ * 找出高度重复项，并**点名冲突对手**（`findDuplicatedPromptIndexes` 的带名字版本）。
+ *
+ * 与只回索引的那一版同源同阈值（`promptSimilarity` + `DUPLICATE_SIMILARITY_THRESHOLD`），
+ * 区别只是把对手名字一起带出来，供页面在阻断提示里直接点名。
+ * 名字为空时给「未命名资产」这类中文兜底，**绝不回显内部资产 id**。
+ */
+export function findDuplicateConflicts(
+  prompts: readonly (string | null | undefined)[],
+  assetNames: readonly string[] = [],
+): DuplicateConflict[] {
+  const label = (index: number): string => {
+    const name = String(assetNames[index] ?? '').trim()
+    return name || `第 ${index + 1} 项资产`
+  }
+  const conflicts = new Map<number, Set<string>>()
+  const push = (index: number, other: number) => {
+    const set = conflicts.get(index) ?? new Set<string>()
+    set.add(label(other))
+    conflicts.set(index, set)
+  }
+  for (let i = 0; i < prompts.length; i += 1) {
+    const current = String(prompts[i] ?? '')
+    if (!current.trim()) continue
+    for (let j = i + 1; j < prompts.length; j += 1) {
+      const other = String(prompts[j] ?? '')
+      if (!other.trim()) continue
+      // 同一个资产（名字相同）不算"多个资产重复"（同一个人在多个镜头复用不是错误）
+      const currentName = String(assetNames[i] ?? '').trim()
+      const otherName = String(assetNames[j] ?? '').trim()
+      if (currentName && otherName && currentName === otherName) continue
+      if (promptSimilarity(current, other) >= DUPLICATE_SIMILARITY_THRESHOLD) {
+        push(i, j)
+        push(j, i)
+      }
+    }
+  }
+  return Array.from(conflicts.entries())
+    .map(([index, names]) => ({ index, conflictsWith: Array.from(names) }))
+    .sort((a, b) => a.index - b.index)
+}
+
 /** 后端结构化判定的**读取**（字段名容错；读不到返回 null）。 */
 export type ServerPromptQuality = {
   usable: boolean | null
@@ -622,6 +682,12 @@ export type PromptQualityInput = {
   peerPrompts?: readonly string[]
   /** 自己是否已被跨资产重复检测命中 */
   duplicated?: boolean
+  /**
+   * 与它高度重复的**其它资产名称**（`findDuplicateConflicts` 的结果）。
+   *
+   * 有名字时阻断提示会点名"与「丫鬟乙」高度重复"，用户才能直接去改对应的那一条。
+   */
+  duplicatedWith?: readonly string[]
 }
 
 function maskAll(list: readonly string[]): string[] {
@@ -738,10 +804,14 @@ export function resolvePromptQuality(input: PromptQualityInput): PromptQualityVe
   }
 
   if (input.duplicated === true) {
-    return unusableVerdict('duplicated', '这条提示词与同一批里其它资产高度重复（同一个模板套出来的）。', {
-      source: 'local',
-      rawReasons: warnings,
-    })
+    const others = (input.duplicatedWith ?? []).map((name) => String(name ?? '').trim()).filter(Boolean)
+    return unusableVerdict(
+      'duplicated',
+      others.length > 0
+        ? `这条提示词与「${others.join('、')}」高度重复（同一个模板套出来的）：请为各自补充不同的外观特征，或只重新生成冲突的那几项。`
+        : '这条提示词与同一批里其它资产高度重复（同一个模板套出来的）：请为各自补充不同的外观特征，或只重新生成冲突的那几项。',
+      { source: 'local', rawReasons: warnings },
+    )
   }
 
   if (knowsPrompt && prompt.trim()) {
@@ -845,6 +915,25 @@ export type BatchPromptQualityGate<T extends PromptQualityGateAsset> = {
   unknown: PromptQualityGateItem<T>[]
   /** 其它资产是否与本批高度重复（技术详情用） */
   duplicatedKeys: string[]
+  /**
+   * 跨资产高度重复的**具体冲突关系**（谁和谁撞了）。
+   *
+   * 需求清单第 4 条要求阻断时点名冲突项：页面据此给出
+   * 「与「丫鬟乙」高度重复」这种能直接照做的提示，并只重试冲突的那几项。
+   */
+  duplicateConflicts: PromptQualityConflict[]
+}
+
+/** 一个资产在质量闸门里的冲突对手名称（没有冲突时返回空数组）。 */
+export function conflictsFor<T extends PromptQualityGateAsset>(
+  gate: BatchPromptQualityGate<T>,
+  assetKey: string,
+): string[] {
+  const index = gate.blocked.findIndex((item) => item.asset.key === assetKey)
+  if (index < 0) return []
+  const asset = gate.blocked[index].asset
+  const conflict = gate.duplicateConflicts.find((item) => item.conflictAssetKey === asset.key)
+  return conflict?.conflictsWith ?? []
 }
 
 /**
@@ -865,12 +954,10 @@ export function buildBatchPromptQualityGate<T extends PromptQualityGateAsset>(ar
     const value = promptFor(asset)
     return typeof value === 'string' ? value : null
   })
-  const duplicatedIndexes = new Set(
-    findDuplicatedPromptIndexes(
-      prompts,
-      assets.map((asset) => asset.name),
-    ),
-  )
+  const names = assets.map((asset) => asset.name)
+  const duplicatedIndexes = new Set(findDuplicatedPromptIndexes(prompts, names))
+  const conflictList = findDuplicateConflicts(prompts, names)
+  const conflictsByIndex = new Map(conflictList.map((item) => [item.index, item.conflictsWith]))
   const blocked: PromptQualityGateItem<T>[] = []
   const allowed: PromptQualityGateItem<T>[] = []
   const unknown: PromptQualityGateItem<T>[] = []
@@ -884,6 +971,8 @@ export function buildBatchPromptQualityGate<T extends PromptQualityGateAsset>(ar
       serverQuality: serverQualityFor?.(asset),
       serverWarnings: serverWarningsFor?.(asset),
       duplicated,
+      /* 点名冲突对手：阻断提示要说清"与谁重复"，用户才知道去改哪一条 */
+      duplicatedWith: duplicated ? conflictsByIndex.get(index) ?? [] : [],
       peerPrompts: prompts.filter((_, other) => other !== index).map((item) => item ?? ''),
     })
     const item: PromptQualityGateItem<T> = { asset, prompt: prompts[index] ?? '', verdict }
@@ -891,7 +980,16 @@ export function buildBatchPromptQualityGate<T extends PromptQualityGateAsset>(ar
     else if (verdict.status === 'unknown') unknown.push(item)
     else allowed.push(item)
   })
-  return { blocked, allowed, unknown, duplicatedKeys }
+  return {
+    blocked,
+    allowed,
+    unknown,
+    duplicatedKeys,
+    duplicateConflicts: conflictList.map((item) => ({
+      conflictAssetKey: assets[item.index]?.key ?? '',
+      conflictsWith: item.conflictsWith,
+    })),
+  }
 }
 
 export type PromptQualityGateModal = {
