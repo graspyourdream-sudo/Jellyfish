@@ -96,6 +96,40 @@ ASSET_TYPE_ASPECT_RATIOS: dict[str, str] = {
     "prop": "1:1",
 }
 
+#: **允许的画幅白名单**（唯一事实来源）：调用方传入的比例必须落在集合内，否则**明确拒绝**。
+#:
+#: 依据全部来自本仓库已声明的契约，不凭猜测扩集：
+#:
+#: | 来源 | 取值 |
+#: |---|---|
+#: | 业务最小集（需求清单第 2 条点名的五个） | ``16:9`` / ``9:16`` / ``1:1`` / ``4:3`` / ``3:4`` |
+#: | 上游 APIMart 图片通道实测支持（``core/integrations/apimart/images.SUPPORTED_RATIOS``） | ``1:1`` / ``3:4`` / ``16:9`` |
+#:
+#: 两点刻意的取舍：
+#:
+#: 1. 上游服务（人物及场景生产项目）**没有**在仓库里声明它的比例白名单，
+#:    因此这里不写一个比自有契约更窄的集合 —— 那会把原本能用的请求拒掉；
+#:    但也不放宽到业务最小集之外：``21:9`` 之类视频侧支持、图片侧两个通道都没有声明的取值
+#:    **不放行**（让它穿透只会变成上游 4xx，正是本轮要修的形态）。
+#: 2. 白名单只管"调用方显式传入"的比例；人物仍是**写死 16:9**（连显式传入也不采纳，见
+#:    :data:`CHARACTER_REFERENCE_RATIO`）。
+ASSET_ASPECT_RATIO_ALLOWED: tuple[str, ...] = ("16:9", "9:16", "1:1", "4:3", "3:4")
+
+
+class AssetAspectRatioRejected(ValueError):
+    """调用方传入的画幅不在白名单内。
+
+    为什么单独一个异常类型：路由层要把这种情况映射成 **422**（"你给的参数不合法"），
+    而其它 ``ValueError``（例如不认识的 asset_type）保持 400。
+    两种情况都是**明确拒绝 + 中文说明**，绝不静默忽略、也绝不穿透给上游。
+    """
+
+
+def describe_allowed_aspect_ratios() -> str:
+    """允许的比例的中文清单（进错误说明，页面可直接展示）。"""
+    return " / ".join(ASSET_ASPECT_RATIO_ALLOWED)
+
+
 #: 场景画幅的说明（进响应，供页面标注「本次会用什么画幅、为什么」）
 SCENE_RATIO_NOTE = "16:9 是场景资产图的横版建立镜头口径（空间结构看得全）"
 #: 道具画幅的说明
@@ -379,6 +413,15 @@ def resolve_aspect_ratio(asset_type: str, requested: str) -> AspectRatioResoluti
         )
 
     if clean:
+        # **白名单校验**（需求清单第 2 条："后端必须校验，不信任前端传来的任意比例"）。
+        # 不在集合内的取值一律**明确拒绝**：既不静默忽略（用户会以为生效了），
+        # 也不穿透给上游（上游只会回 4xx，而且那时钱和时间都已经花了）。
+        if clean not in ASSET_ASPECT_RATIO_ALLOWED:
+            raise AssetAspectRatioRejected(
+                f"画幅「{clean}」不在支持的范围内：{strategy.result_label}只接受 "
+                f"{describe_allowed_aspect_ratios()}；不传就用该类型的默认画幅"
+                f"（{strategy.default_aspect_ratio or strategy.aspect_ratio}）。"
+            )
         return AspectRatioResolution(ratio=clean, source=RATIO_SOURCE_REQUEST)
     if strategy.default_aspect_ratio:
         return AspectRatioResolution(ratio=strategy.default_aspect_ratio, source=RATIO_SOURCE_ASSET_TYPE_DEFAULT)
@@ -396,6 +439,7 @@ def describe_batch_reference_refusal(asset_type: str) -> str:
 
 
 __all__ = [
+    "ASSET_ASPECT_RATIO_ALLOWED",
     "ASSET_TYPE_ASPECT_RATIOS",
     "CHANNEL_APIMART",
     "CHANNEL_LABELS",
@@ -420,6 +464,7 @@ __all__ = [
     "SLOT_BY_ASSET_TYPE",
     "STRATEGIES",
     "SUPPORTED_ASSET_TYPES",
+    "AssetAspectRatioRejected",
     "AssetImageStrategy",
     "AspectRatioResolution",
     "aspect_ratio_for",
@@ -427,6 +472,7 @@ __all__ = [
     "channel_label",
     "describe_batch_reference_refusal",
     "describe_channel_for",
+    "describe_allowed_aspect_ratios",
     "describe_mixed_channels",
     "is_character_only_kind",
     "resolve_aspect_ratio",

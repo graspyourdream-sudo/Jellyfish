@@ -304,6 +304,17 @@ async def preview_image_plan(
                         for asset_id, item in resolved.items()
                     }
                 )
+    except image_pipeline_strategies.AssetAspectRatioRejected as exc:
+        # 画幅不在白名单：**422**（调用方参数不合法）+ 中文说明（列出支持的比例）。
+        # 必须排在下面的 ValueError 之前（它是 ValueError 的子类）。
+        return _error_envelope(
+            code=422,
+            detail={
+                "code": "aspect_ratio_not_allowed",
+                "message": str(exc),
+                "supported_aspect_ratios": list(image_pipeline_strategies.ASSET_ASPECT_RATIO_ALLOWED),
+            },
+        )
     except ValueError as exc:
         return _error_envelope(code=400, detail=str(exc))
     except HTTPException as exc:
@@ -384,6 +395,17 @@ async def submit_image_plan(
             # 混合批量（items）：逐项兜底，任一项失败不污染其它项；
             # 旧的单类型形态保持既有行为（异常照旧抛给路由映射成 400/409/502）。
             isolate_errors=bool(getattr(body, "items", None)),
+        )
+    except image_pipeline_strategies.AssetAspectRatioRejected as exc:
+        # 画幅不在白名单：**422**（调用方参数不合法）+ 中文说明（列出支持的比例）。
+        # 必须排在下面的 ValueError 之前（它是 ValueError 的子类）。
+        return _error_envelope(
+            code=422,
+            detail={
+                "code": "aspect_ratio_not_allowed",
+                "message": str(exc),
+                "supported_aspect_ratios": list(image_pipeline_strategies.ASSET_ASPECT_RATIO_ALLOWED),
+            },
         )
     except ValueError as exc:
         return _error_envelope(code=400, detail=str(exc))

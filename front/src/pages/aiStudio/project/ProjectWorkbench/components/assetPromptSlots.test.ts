@@ -12,6 +12,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   ASSET_PROMPT_CATEGORY,
@@ -29,6 +32,27 @@ import {
   resolveAssetPromptSlot,
   type PromptSlotRowLike,
 } from './assetPromptSlots.ts'
+import { ASPECT_RATIO_OPTIONS } from './assetProduction.ts'
+
+/** `front/src/pages/aiStudio/project/ProjectWorkbench/components` → 用于读后端契约源码做对拍 */
+const HERE = dirname(fileURLToPath(import.meta.url))
+
+/**
+ * 读后端源码做契约对拍。
+ *
+ * 为什么不写死 `'../../..'` 的层数：层数会随目录调整而失效（本护栏第一次就因为这个报 ENOENT），
+ * 而 ENOENT 会被误读成"护栏挂了"。改为**向上找仓库根**（含该后端文件的那一层），
+ * 找不到就明确报错，不静默跳过。
+ */
+function readBackendSource(relative: string): string {
+  let dir = HERE
+  for (let i = 0; i < 12; i += 1) {
+    const candidate = resolve(dir, 'backend', relative)
+    if (existsSync(candidate)) return readFileSync(candidate, 'utf8')
+    dir = resolve(dir, '..')
+  }
+  throw new Error(`找不到仓库根：从本文件向上 12 层都没有 backend/${relative}`)
+}
 
 type Row = PromptSlotRowLike & { status: string; draft: string; existingMap?: Record<string, string> }
 
@@ -220,4 +244,45 @@ test('道具：后端槽位表补上后，槽位名与「能一键生成」按�
   // 提示里带上类型名（人话），并且四类都不出现「不支持」
   assert.match(describeServerSlotPendingNote([{ type: 'scene', supported: true, generateSupported: false }]), /场景/)
   assert.equal(describeServerSlotPendingNote([{ type: 'prop', supported: true, generateSupported: true }]), '')
+})
+
+/* ------------------------------------------------------------------ */
+/* 画幅白名单：前端可选值必须与后端白名单逐值相同（需求清单第 2 条）      */
+/* ------------------------------------------------------------------ */
+
+test('画面比例可选值 ⊆ 后端白名单（前端不许给出后端会拒的值）', () => {
+  /*
+   * 后端 `asset_strategies.ASSET_ASPECT_RATIO_ALLOWED` 是画幅的**唯一事实来源**：
+   * 调用方传入不在集合内的比例会被**明确拒绝（422）**。前端下拉里多出一个值，
+   * 用户选中后就会拿到一个 422 —— 这正是"点下去才知道不行"的失败形态。
+   *
+   * 这里从**两个真实文件**各抽一次取值集合逐值比较，而不是在测试里再抄一份
+   * （抄一份就等于又造了一个漂移点，与本仓库既有的契约对拍护栏同源做法）。
+   */
+  const backend = readBackendSource('app/services/studio/image_pipeline/asset_strategies.py')
+  const allowedBlock = /ASSET_ASPECT_RATIO_ALLOWED[^=]*=\s*\(([^)]*)\)/.exec(backend)
+  assert.ok(allowedBlock, '后端找不到 ASSET_ASPECT_RATIO_ALLOWED')
+  // 引号风格两种都认（Python 源码里既有单引号也有双引号；只认一种会把护栏变成假红）
+  const backendAllowed = new Set(
+    Array.from(allowedBlock[1].matchAll(/(['"])([^'"]+)\1/g)).map((m) => m[2]),
+  )
+
+  const frontendOptions = new Set(ASPECT_RATIO_OPTIONS.map((item) => item.value))
+
+  assert.ok(backendAllowed.size > 0, '后端白名单解析为空（护栏可能没扫到正确文件）')
+  assert.ok(frontendOptions.size > 0, '前端可选值解析为空')
+
+  const offenders = [...frontendOptions].filter((value) => !backendAllowed.has(value))
+  assert.deepEqual(
+    offenders,
+    [],
+    `前端给了后端会拒绝的画幅：${offenders.join('、')}（后端允许：${[...backendAllowed].join(' / ')}）`,
+  )
+
+  /* 反向自检：把后端白名单临时"收窄一格"必须能让上面那条判定变红（防止护栏恒真）。 */
+  const narrowed = new Set([...backendAllowed].filter((item) => item !== '3:4'))
+  assert.ok(
+    [...frontendOptions].some((value) => !narrowed.has(value)),
+    '反向自检失败：收窄后端白名单竟然没有命中任何前端取值，说明这条护栏是恒真的',
+  )
 })
