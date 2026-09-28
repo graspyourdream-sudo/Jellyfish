@@ -2284,6 +2284,31 @@ const ChapterStudio: React.FC = () => {
     }
   }, [projectId, chapterId, selectedShotIds])
 
+  /**
+   * 打包**整集全部**成片（不看勾选，按镜头顺序）。
+   *
+   * 与「下载所选」**同一份实现**（同一个 ZIP 接口、同一份实现），差别只在范围：
+   * 不传 `shot_ids` 就是整集。这是"导出整集成片"在本环境**真实可做**的那一半 ——
+   * 拼接成单个视频文件需要服务端的媒体合成流水线，本环境没有（也没允许引入新依赖），
+   * 因此按钮与提示都如实说明"包内是按镜号命名的逐个成片"。
+   */
+  const downloadWholeEpisodeBundle = useCallback(async () => {
+    if (!projectId) {
+      await message.warning('还没有读到项目信息，暂时不能打包下载')
+      return
+    }
+    try {
+      const result = await downloadVideoBundleZip({ projectId, scope: 'episode', chapterId })
+      await message.success(
+        result.excluded > 0
+          ? `已打包整集 ${result.included} 条成片（另有 ${result.excluded} 个镜头没有可交付成片，未包含）：${result.filename}`
+          : `已打包整集 ${result.included} 条成片：${result.filename}`,
+      )
+    } catch (error) {
+      await message.error(toUserFacingText(error, '打包下载失败，请稍后重试'))
+    }
+  }, [projectId, chapterId])
+
   /** 交付清单 TXT（与「实际使用的文件」同一份数据；后端既有出口，纯读不花钱）。 */
   const downloadDeliveryManifest = useCallback(() => {
     if (!projectId) return
@@ -2471,6 +2496,8 @@ const ChapterStudio: React.FC = () => {
           shots={railShots}
           selectedCount={selectedShotIds.length}
           onDownloadSelected={() => void downloadSelectedBundle()}
+          onDownloadWholeEpisode={() => void downloadWholeEpisodeBundle()}
+          wholeEpisodeCount={railShots.filter((shot) => shot.hasDeliverableVideo).length}
           onDownloadManifest={() => downloadDeliveryManifest()}
           manifestDisabled={!projectId || railShots.length === 0}
         />
@@ -2486,6 +2513,7 @@ const ChapterStudio: React.FC = () => {
     selectedShotId,
     selectedShotIds,
     downloadSelectedBundle,
+    downloadWholeEpisodeBundle,
     downloadSingleShotVideo,
     downloadDeliveryManifest,
     goAssetPrepWithTab,
