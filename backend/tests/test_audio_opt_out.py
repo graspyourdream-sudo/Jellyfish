@@ -8,6 +8,12 @@
 为什么不再有"绑定音频 → 清掉无需声音"这条反向用例：``audio_file_id`` 已经从更新契约
 （``ShotDetailUpdate``）里拿掉了 —— 角色声音的唯一事实来源是人物资产，
 镜头级不能再建立 / 改写一条声音绑定，那个反向联动也随之不存在。
+
+``audio_opt_out`` 的**作用范围**（本批口径，三条用例分别钉住）：
+它只影响**生效优先级**（生成侧 ``resolve_audio_admission``：``opt_out`` → 人物资产音色 →
+历史兼容快照 → 无），**不删除任何历史数据**。开启它**不会**清空 ``audio_file_id``
+（那一列是迁移 009 之前留下的用户既有快照）；把它关回去之后，生效声音重新按
+「人物资产声音 → 历史兼容快照」的顺序解析。
 """
 
 from __future__ import annotations
@@ -16,10 +22,18 @@ import pytest
 
 from app.models.studio import FileItem, ShotDetail
 from app.models.types import FileType
-from app.schemas.studio.shots import ShotDetailUpdate
+from app.schemas.studio.shots import ShotDetailCreate, ShotDetailUpdate
 from app.services.studio import shot_details as shot_details_service
 from app.services.studio.bound_asset_files import render_bound_file_lines, resolve_shot_audio_file
+from app.services.studio.video_audio_input import (
+    VOICE_SOURCE_CHARACTER_ASSET,
+    VOICE_SOURCE_LEGACY_SNAPSHOT,
+    resolve_audio_admission,
+)
 from tests.llm_orchestration_fixtures import build_session, seed_project_chapter_shot
+
+#: 生成侧准入解析用的供应商（只做本地判定，不触网）
+PROVIDER = "apimart"
 
 
 async def _seed_shot(db, *, audio_file_id: str | None = None, opt_out: bool = False) -> None:
@@ -35,6 +49,34 @@ async def _seed_shot(db, *, audio_file_id: str | None = None, opt_out: bool = Fa
         )
     )
     await db.flush()
+
+
+async def _bind_character_voice(
+    db,
+    *,
+    character_id: str = "CHAR_1",
+    file_id: str = "f-role",
+) -> None:
+    """造一个"人物资产已绑角色声音"的镜头：人物 + 音频文件 + 镜头关联 + 资产声音行。
+
+    走既有的 ``bind_asset_voice``（与第 2 步同一条写入口），不手写 ``file_usages``。
+    """
+    from app.models.studio import Character, ShotCharacterLink
+    from app.services.studio.asset_voices import bind_asset_voice
+
+    db.add(Character(id=character_id, project_id="proj-1", name="林小满", style="真人都市"))
+    db.add(
+        FileItem(
+            id=file_id,
+            name="角色音色.mp3",
+            storage_key=f"audio/{file_id}.mp3",
+            type=FileType.audio,
+        )
+    )
+    await db.flush()
+    db.add(ShotCharacterLink(shot_id="shot-1", character_id=character_id, index=0))
+    await db.flush()
+    await bind_asset_voice(db, asset_type="character", asset_id=character_id, file_id=file_id)
 
 
 @pytest.mark.asyncio
@@ -66,10 +108,13 @@ async def test_no_audio_and_no_flag_keeps_old_behaviour():
 
 
 @pytest.mark.asyncio
-async def test_patch_opt_out_clears_legacy_snapshot():
-    """标记「无需声音」时，服务端同时清掉迁移前留下的逐镜声音快照。
+async def test_patch_opt_out_keeps_legacy_snapshot_while_generation_carries_no_voice():
+    """开启「无需声音」：**只更新开关**，历史快照原样保留；生成侧不带声音。
 
-    （快照只是兼容数据；留着它会让交付文本与生成口径互相矛盾 —— 生成本镜已经不带声音了。）
+    快照是迁移 009 之前留下的**用户既有数据**，不是这个开关的附属物。
+    开关只影响生效优先级，所以"本镜不带声音"由 ``opt_out`` 这一条保证，
+    不需要（也不应该）靠清空 ``audio_file_id`` 来实现 —— 否则用户把开关关回去时，
+    那条历史声音就永久没了（见下面两条用例）。
     """
     db, engine = await build_session()
     try:
@@ -84,20 +129,83 @@ async def test_patch_opt_out_clears_legacy_snapshot():
         )
 
         assert updated.audio_opt_out is True
-        assert updated.audio_file_id is None
+        assert updated.audio_file_id == "f-audio", "开启无需声音不许清空历史快照"
+
+        # 生成侧：opt_out 优先级最高 → 本次不带任何声音
+        admission = await resolve_audio_admission(db, shot_id="shot-1", provider=PROVIDER, model=None)
+        assert admission.opt_out is True
+        assert admission.included is False
+        assert admission.file_id == ""
+        assert admission.state == "opt_out"
+        assert admission.source != VOICE_SOURCE_LEGACY_SNAPSHOT
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_patch_contract_has_no_shot_level_voice_binding():
-    """更新契约里**没有** ``audio_file_id``：普通调用方无法再建立 / 改写逐镜角色声音。
+async def test_turning_opt_out_off_falls_back_to_the_legacy_snapshot_for_a_voiceless_character():
+    """关掉「无需声音」且人物没有音色 → 重新用上历史兼容快照（它一直在）。"""
+    db, engine = await build_session()
+    try:
+        db.add(FileItem(id="f-audio", name="配音.mp3", storage_key="audio/a.mp3", type=FileType.audio))
+        await db.flush()
+        await _seed_shot(db, audio_file_id="f-audio")
 
-    口径：角色声音只绑在**人物资产**上（第 2 步「人物资产详情」是全站唯一入口）。
+        # 先开启，再关回去
+        await shot_details_service.update(db, shot_id="shot-1", body=ShotDetailUpdate(audio_opt_out=True))
+        reopened = await shot_details_service.update(
+            db, shot_id="shot-1", body=ShotDetailUpdate(audio_opt_out=False)
+        )
+
+        assert reopened.audio_opt_out is False
+        assert reopened.audio_file_id == "f-audio", "快照必须还在（否则这里就回不去了）"
+
+        admission = await resolve_audio_admission(db, shot_id="shot-1", provider=PROVIDER, model=None)
+        assert admission.opt_out is False
+        assert admission.source == VOICE_SOURCE_LEGACY_SNAPSHOT
+        assert admission.file_id == "f-audio"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_turning_opt_out_off_still_prefers_the_character_voice():
+    """关掉「无需声音」且人物**有**音色 → 仍按优先级用人物当前音色（不是快照）。"""
+    db, engine = await build_session()
+    try:
+        db.add(FileItem(id="f-audio", name="配音.mp3", storage_key="audio/a.mp3", type=FileType.audio))
+        await db.flush()
+        await _seed_shot(db, audio_file_id="f-audio")
+        await _bind_character_voice(db, file_id="f-role")
+
+        await shot_details_service.update(db, shot_id="shot-1", body=ShotDetailUpdate(audio_opt_out=True))
+        reopened = await shot_details_service.update(
+            db, shot_id="shot-1", body=ShotDetailUpdate(audio_opt_out=False)
+        )
+
+        assert reopened.audio_file_id == "f-audio", "历史快照保持原样"
+
+        admission = await resolve_audio_admission(db, shot_id="shot-1", provider=PROVIDER, model=None)
+        assert admission.opt_out is False
+        assert admission.source == VOICE_SOURCE_CHARACTER_ASSET, "人物资产声音优先于历史快照"
+        assert admission.file_id == "f-role"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_write_contracts_have_no_shot_level_voice_binding():
+    """**创建与更新**两条普通接口契约里都**没有** ``audio_file_id``。
+
+    口径：角色声音只绑在**人物资产**上（第 2 步「人物资产详情」是全站唯一入口），
+    镜头级不能再建立 / 改写一条角色声音 —— 只留 ``audio_opt_out`` 这一个合法声明。
+    创建接口也必须一起收口：POST 新建一条带 ``audio_file_id`` 的镜头同样是"第二套逐镜声音绑定"。
     这里同时证明"传了也没用"：pydantic 会忽略这个未声明字段，库里不会被改写。
     """
     assert "audio_file_id" not in ShotDetailUpdate.model_fields
     assert "audio_opt_out" in ShotDetailUpdate.model_fields, "镜头级唯一的合法声明必须保留"
+    assert "audio_file_id" not in ShotDetailCreate.model_fields, "创建接口也不许写入逐镜声音"
+    assert "audio_opt_out" in ShotDetailCreate.model_fields
 
     db, engine = await build_session()
     try:

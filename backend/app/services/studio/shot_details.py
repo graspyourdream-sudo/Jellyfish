@@ -129,10 +129,14 @@ async def update(
     # 角色声音属于**人物资产**（第 2 步「人物资产详情」是全站唯一绑定入口），
     # 所以这里不再有"绑定音频 → 清掉无需声音"的反向联动：更新契约里
     # 已经没有 audio_file_id，普通调用方无法再建立 / 改写一条逐镜角色声音。
-    # 置 true 时连迁移前留下的兼容快照也一并清掉：本镜的生效结论就是没有声音
-    # （快照只是兼容数据，留着只会让交付文本与生成口径互相矛盾）。
-    if "audio_opt_out" in update_data and update_data.get("audio_opt_out"):
-        update_data["audio_file_id"] = None
+    #
+    # 置 true **只更新这个开关本身**，不动 ``audio_file_id``：
+    # 那一列是迁移 009 之前留下的**历史兼容快照**，属于用户既有数据，不是本开关的附属物。
+    # 生效结论由生成侧按优先级解析（``resolve_audio_admission``：
+    # ``audio_opt_out`` → 人物资产音色 → 历史快照 → 无），
+    # 所以"本镜不带声音"已经由 opt_out 这一条保证，不需要（也不应该）破坏快照。
+    # 用户把开关关回去时，快照还在，解析会重新按「人物资产声音 → 历史快照」的顺序走。
+    # 见 tests/test_audio_opt_out.py 的三条用例。
 
     old_scene_id = obj.scene_id
     scene_obj = None

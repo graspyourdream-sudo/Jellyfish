@@ -424,19 +424,49 @@ def test_ordinary_shot_update_api_cannot_create_a_voice_binding(sot_client: Any)
 
 
 def test_opt_out_is_the_only_shot_level_voice_declaration(sot_client: Any) -> None:
-    """置 ``audio_opt_out=true`` → 连历史快照一起清掉；并且**不再**被任何音频绑定翻回 false。"""
+    """置 ``audio_opt_out=true`` → **只更新开关、保留历史快照**；并且**不再**被任何音频绑定翻回 false。
+
+    开关只影响生效优先级（``resolve_audio_admission``：opt_out → 人物资产音色 → 历史快照 → 无），
+    不删除用户既有数据 —— 那一列是迁移 009 之前的兼容快照，关掉开关后还要靠它重新解析
+    （见 ``tests/test_audio_opt_out.py`` 的三条用例）。
+    """
     client, factory = sot_client
+
+    before = _shot_snapshot(factory, SHOT_SNAPSHOT)
+    assert before[0] == AUDIO_OLD_SNAPSHOT, "本用例前提：这一镜确实有一条历史快照"
 
     response = client.patch(f"{SHOT_DETAILS}/{SHOT_SNAPSHOT}", json={"audio_opt_out": True})
     assert response.status_code == 200, response.text
-    assert _shot_snapshot(factory, SHOT_SNAPSHOT) == (None, True)
+    assert _shot_snapshot(factory, SHOT_SNAPSHOT) == (AUDIO_OLD_SNAPSHOT, True), (
+        "开启无需声音只改开关，不许清空历史快照"
+    )
     assert _admission(factory, SHOT_SNAPSHOT).state == "opt_out"
 
     # 旧客户端硬塞 audio_file_id：既写不进去，也不许把 opt_out 翻成 false
     response = client.patch(f"{SHOT_DETAILS}/{SHOT_SNAPSHOT}", json={"audio_file_id": AUDIO_OLD_SNAPSHOT})
     assert response.status_code == 200
-    assert _shot_snapshot(factory, SHOT_SNAPSHOT) == (None, True), "音频绑定不许翻掉无需声音"
+    assert _shot_snapshot(factory, SHOT_SNAPSHOT) == (AUDIO_OLD_SNAPSHOT, True), "音频绑定不许翻掉无需声音"
     assert _admission(factory, SHOT_SNAPSHOT).state == "opt_out"
+
+    # 关回去：人物有音色 → 仍按优先级用人物当前音色（历史快照不参与）
+    response = client.patch(f"{SHOT_DETAILS}/{SHOT_SNAPSHOT}", json={"audio_opt_out": False})
+    assert response.status_code == 200
+    assert _shot_snapshot(factory, SHOT_SNAPSHOT) == (AUDIO_OLD_SNAPSHOT, False), "快照仍在库里"
+    reopened = _admission(factory, SHOT_SNAPSHOT)
+    assert reopened.state != "opt_out"
+    assert reopened.source == VOICE_SOURCE_CHARACTER_ASSET, "人物资产声音优先于历史快照"
+    assert reopened.file_id == AUDIO_SNAPSHOT_ROLE
+
+    # 人物**没有**音色的镜头：关回去后重新用上历史兼容快照（同一套规则的另一半）
+    response = client.patch(f"{SHOT_DETAILS}/{SHOT_PLAIN}", json={"audio_opt_out": True})
+    assert response.status_code == 200
+    assert _shot_snapshot(factory, SHOT_PLAIN) == (AUDIO_PLAIN_SNAPSHOT, True), "开关不许清空快照"
+    assert _admission(factory, SHOT_PLAIN).state == "opt_out"
+    response = client.patch(f"{SHOT_DETAILS}/{SHOT_PLAIN}", json={"audio_opt_out": False})
+    assert response.status_code == 200
+    fallback = _admission(factory, SHOT_PLAIN)
+    assert fallback.source == VOICE_SOURCE_LEGACY_SNAPSHOT
+    assert fallback.file_id == AUDIO_PLAIN_SNAPSHOT
 
 
 # ---------------------------------------------------------------------------
