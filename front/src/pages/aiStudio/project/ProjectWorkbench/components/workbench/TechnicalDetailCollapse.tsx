@@ -213,7 +213,7 @@ const STEP_PRECEDENCE = [
   '3. 已有分镜但项目资产（角色/场景/道具）为空 → extract_assets（提取资产）',
   '4. 有资产但没有参考图片/图片提示词        → image_prep（图片准备）',
   '5. 有图片但当前集镜头都没有 video_prompt  → video_prompt（视频提示词）',
-  '6. 有提示词但当前集镜头都没有关联资产      → binding（关联绑定）',
+  '6. 有提示词但当前集镜头都没有关联资产      → binding（资产与声音检查）',
   '7. 以上都满足                            → generate_deliver（生成与交付）',
 ].join('\n')
 

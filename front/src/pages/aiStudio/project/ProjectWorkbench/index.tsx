@@ -283,7 +283,7 @@ const ProjectWorkbench: React.FC = () => {
    * 历史问题（本次修复）：旧实现里按钮文案来自项目级六步判定，而点击动作在
    * 「已处于目标步骤」时回退执行章节级 `getChapterPreparationState()` 得出的 primaryCta，
    * 于是按钮写着「继续：准备资产图片」却跳进了分镜工作室，直接跳过
-   * 图片准备 → 整集视频提示词 → 关联绑定。现在只认 resolution.step。
+   * 图片准备 → 整集视频提示词 → 资产与声音检查。现在只认 resolution.step。
    */
   const continueTarget = resolution.step
   /** 第 4 步的主入口在工作台内（集级提示词页面），不进工作室。 */
@@ -293,6 +293,19 @@ const ProjectWorkbench: React.FC = () => {
   const continueOpensChapterCreate = continueTarget === 'script' && !recommendedChapter
   const continueChangesView =
     continueEntersStudio || continueOpensChapterCreate || continueTarget !== activeStep
+
+  /**
+   * 本屏的「推荐下一步」主入口归谁。
+   *
+   * 第 2 步的资产工作台自带底部固定操作条（`StickyActionBar`）**就是**这一步的主入口，
+   * 所以那一屏的「继续」主按钮只在固定条上出现一次；步骤摘要条与顶部项目上下文里
+   * 的同名按钮都降级成普通按钮（文案 / 禁用理由 / 点击动作仍是下面这**同一份**判定，
+   * 不新建第二套流程，也不新建第二个文案来源）。
+   *
+   * 历史问题（真实 1440×900 走查）：那一屏上同时渲染了三个蓝色实心的「继续：资产准备」，
+   * 用户看不出哪一个才是推荐动作。
+   */
+  const workbenchOwnsContinuePrimary = activeStep === 'extract_assets' || activeStep === 'image_prep'
 
   const continueDisabledReason = signalsLoading
     ? '正在判断项目进度，稍候…'
@@ -579,9 +592,15 @@ const ProjectWorkbench: React.FC = () => {
           </div>
 
           <Space size="small" wrap className="shrink-0">
+            {/*
+              顶部项目上下文条（项目 / 当前集 / 步骤状态）里的这颗按钮是**导航**，
+              不是「推荐下一步」的主入口：主入口在步骤内容区（第 2 步是工作台底部的固定条，
+              其余步骤是步骤摘要条）。所以它一律用默认样式，避免同屏出现几个同权重的蓝色主按钮。
+              文案、禁用理由与点击动作仍取自下面这**同一份**判定（`continueLabel` /
+              `continueDisabledReason` / `handleContinue`），不做第二套「下一步」口径。
+            */}
             <Tooltip title={continueDisabledReason || resolution.reason}>
               <Button
-                type="primary"
                 icon={<RightOutlined />}
                 loading={signalsLoading}
                 disabled={Boolean(continueDisabledReason)}
@@ -677,6 +696,8 @@ const ProjectWorkbench: React.FC = () => {
                 loading={signalsLoading}
                 continueDisabledReason={continueDisabledReason}
                 continueLabel={continueLabel}
+                /* 第 2 步的主入口在工作台底部固定条上：这里只保留状态与降级后的入口。 */
+                continuePrimary={!workbenchOwnsContinuePrimary}
                 onGoStep={openStep}
                 onContinue={handleContinue}
                 devInfo={

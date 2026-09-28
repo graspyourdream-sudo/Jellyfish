@@ -18,7 +18,7 @@ type ChapterShotPreparationGuideProps = {
    * 继续项目流程：回到项目工作台的下一个步骤。
    *
    * 以前这里叫 onGoToStudio，直接跳分镜工作室——分镜刚做完就进工作室会跳过
-   * 资产提取 / 图片准备 / 整集提示词 / 关联绑定。现在交给六步流程。
+   * 资产提取 / 图片准备 / 整集提示词 / 资产与声音检查。现在交给六步流程。
    */
   onContinueFlow: () => void
 }
@@ -68,7 +68,7 @@ export function ChapterShotPreparationGuide({
           >
             {expanded ? '收起' : '详情'}
           </Button>
-          <Tooltip title="回到项目工作台，按顺序继续：剧本与分镜 → 资产准备 → 整集视频提示词 → 资产与声音绑定 → 生成与交付。分镜工作室保留单镜查看与补漏。">
+          <Tooltip title="回到项目工作台，按顺序继续：剧本与分镜 → 资产准备 → 整集视频提示词 → 资产与声音检查 → 生成与交付。分镜工作室保留单镜查看与补漏。">
             <Button
               type={statusReady ? 'primary' : 'default'}
               size="small"
@@ -84,7 +84,7 @@ export function ChapterShotPreparationGuide({
         <div className="mt-2 space-y-2 border-t border-slate-200/70 pt-2">
           <div className="rounded-lg border border-slate-200 bg-white/70 px-3 py-2 text-xs text-slate-600">
             这里负责当前镜头的准备工作：提取并确认资产、对白和基础信息。完成后再回到项目工作台继续后续步骤
-            （剧本与分镜 → 资产准备 → 整集视频提示词 → 资产与声音绑定 → 生成与交付）。
+            （剧本与分镜 → 资产准备 → 整集视频提示词 → 资产与声音检查 → 生成与交付）。
           </div>
 
           <div className="flex flex-wrap gap-2">

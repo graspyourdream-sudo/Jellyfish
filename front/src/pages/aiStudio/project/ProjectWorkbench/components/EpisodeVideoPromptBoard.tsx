@@ -180,7 +180,7 @@ type EpisodeVideoPromptBoardProps = {
   onEnterStudio?: () => void
   /** 保存后继续第 2 步「资产准备」 */
   onContinueAssets?: () => void
-  /** 已有资产，直接去第 4 步「资产与声音绑定」 */
+  /** 已有资产，直接去第 4 步「资产与声音检查」 */
   onGoBinding?: () => void
 }
 

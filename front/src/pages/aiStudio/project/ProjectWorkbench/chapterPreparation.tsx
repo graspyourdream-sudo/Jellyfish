@@ -50,7 +50,7 @@ export function getChapterPreparationState(chapter: Chapter): ChapterPreparation
     }
   }
   // 有分镜之后的「下一步」不再直接进分镜工作室：
-  // 六步流程要求先做资产提取 → 图片准备 → 整集视频提示词 → 关联绑定，最后才进工作室。
+  // 六步流程要求先做资产提取 → 图片准备 → 整集视频提示词 → 资产与声音检查，最后才进工作室。
   // 这里只把用户交回项目工作台，由 `resolveProjectStep`（唯一判定来源）决定落在哪一步；
   // 工作室仍然保留「单镜查看与补漏」的入口（步骤条第 5/6 步、章节列表行内按钮）。
   return {

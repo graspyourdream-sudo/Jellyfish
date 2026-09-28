@@ -38,6 +38,17 @@ type ProjectStepSummaryStripProps = {
   /** 「继续」按钮文案（与顶部主按钮同一份判定算出的同一句话）。 */
   continueLabel?: string
   /**
+   * 「继续」是否作为**本屏唯一推荐下一步**渲染成主要（蓝色实心）样式。
+   *
+   * 为什么要这个开关：第 2 步的资产工作台自带底部固定操作条（`StickyActionBar`），
+   * 那里才是这一步的主入口。摘要条上这颗同名按钮仍留在原位（文案、禁用理由、
+   * 点击动作全部由调用方给**同一份**判定），但降级成普通按钮，
+   * 于是 1440×900 同屏只剩一个「主要」的下一步入口，不再出现三个同权重的按钮。
+   *
+   * 第 2 步以外的步骤没有自己的固定条，这里保持 `true` —— 那些屏上它就是唯一主入口。
+   */
+  continuePrimary?: boolean
+  /**
    * 折叠起来的「技术详情」节点（默认收起）。
    *
    * 接口路径、字段口径、模型与供应商、原始状态值、任务编号、内部文件编号这类
@@ -63,6 +74,7 @@ export function ProjectStepSummaryStrip({
   loading = false,
   continueDisabledReason = '',
   continueLabel,
+  continuePrimary = true,
   devInfo,
 }: ProjectStepSummaryStripProps) {
   // 用户看到的是五步：第 2 步内部由 extract_assets + image_prep 共同构成
@@ -84,7 +96,13 @@ export function ProjectStepSummaryStrip({
             <span className="text-gray-400">（读取章节、分镜、资产与提示词状态后给出下一步）</span>
           </div>
           <Space size="small" className="shrink-0">
-            <Button size="small" type="primary" icon={<RightOutlined />} disabled loading>
+            <Button
+              size="small"
+              type={continuePrimary ? 'primary' : 'default'}
+              icon={<RightOutlined />}
+              disabled
+              loading
+            >
               正在判断项目进度
             </Button>
           </Space>
@@ -144,7 +162,8 @@ export function ProjectStepSummaryStrip({
           <Tooltip title={continueDisabledReason || resolution.reason}>
             <Button
               size="small"
-              type="primary"
+              /* 降级时只换样式，不换文案 / 不换判定 / 不换动作（同一份 `continueLabel` + `onContinue`）。 */
+              type={continuePrimary ? 'primary' : 'default'}
               icon={<RightOutlined />}
               disabled={Boolean(continueDisabledReason)}
               onClick={onContinue}

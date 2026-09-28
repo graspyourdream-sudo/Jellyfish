@@ -302,7 +302,7 @@ export function ProjectStudioStepPanel({
             进入章节工作室（{meta.label}）
           </Button>
           <div className="text-xs text-gray-500">
-            进入后会直接落在本步骤：工作室已按「视频提示词 / 关联绑定 / 生成与交付」分成三步，
+            进入后会直接落在本步骤：工作室已按「视频提示词 / 资产与声音检查 / 生成与交付」分成三步，
             步骤标识写在地址栏，刷新后仍停在同一步，切换步骤时当前分镜不会丢。
           </div>
 
@@ -311,7 +311,7 @@ export function ProjectStudioStepPanel({
               size="small"
               title={
                 step === 'binding'
-                  ? '本集镜头 · 关联绑定进度（只读，不写库）'
+                  ? '本集镜头 · 资产与声音检查进度（只读，不写库）'
                   : '本集镜头 · 视频提示词进度（只读，不写库）'
               }
               extra={

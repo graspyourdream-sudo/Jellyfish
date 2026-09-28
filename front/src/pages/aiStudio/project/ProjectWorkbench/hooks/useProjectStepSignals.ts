@@ -276,7 +276,7 @@ export function useProjectStepSignals(args: {
         }),
       )
 
-      /** 镜头级关联（用于「关联绑定」判定）：shot_id 非空的行 */
+      /** 镜头级关联（用于「资产与声音检查」判定）：shot_id 非空的行 */
       const shotIdsWithLinks = new Set<string>()
       linkResults.forEach((rows) => {
         rows.forEach((row) => {

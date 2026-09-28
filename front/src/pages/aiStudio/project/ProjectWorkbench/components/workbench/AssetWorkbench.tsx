@@ -72,6 +72,16 @@ import { StickyActionBar } from './StickyActionBar.tsx'
 import { resolveStickyActionBarCounts } from './stickyActionBarState.ts'
 
 
+/**
+ * 左侧剧本原文面板的两个宽度（px），只在这里写一份。
+ *
+ * 收起态 36 是那条竖排书脊的宽度；展开态从 380 收到 320：380 时 1440×900 的主区
+ * 装不下四张卡片（见 `scriptCollapsed` 的说明），320 让"展开看剧本"时也少挤一点主区。
+ */
+const SCRIPT_PANEL_WIDTH = 320
+const SCRIPT_PANEL_COLLAPSED_WIDTH = 36
+
+
 export type AssetWorkbenchProps = {
   projectId: string | null
   chapter: {
@@ -158,7 +168,19 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
     [onTabChange],
   )
   const [selectedKeys, setSelectedKeys] = useState<string[]>([])
-  const [scriptCollapsed, setScriptCollapsed] = useState(false)
+  /**
+   * 左侧剧本原文面板**默认收起**（进入第 2 步的初始状态）。
+   *
+   * 为什么要改默认值（1440×900 桌面验收实测）：卡片网格是 `repeat(auto-fill, minmax(236px, 1fr))`
+   * + 间距 12，一行四张需要网格宽度 ≥ 4×236 + 3×12 = 980。
+   * 面板展开占 380 时，1440 下网格只有 806 宽，实测每行 3 张（卡片 261）。
+   * 收起后网格宽到 1150，实测每行 4 张（卡片 279，仍不低于 236 的下限），
+   * 页面既没有横向滚动，1280 宽时列数也随宽度自然回落。
+   *
+   * 剧本原文没有被拿掉：面板仍是一键展开，展开的宽度也从 380 收到 320，
+   * 让「要看剧本」和「要看四列卡片」这两件事在 1440 下都能做。
+   */
+  const [scriptCollapsed, setScriptCollapsed] = useState(true)
   const [detailItem, setDetailItem] = useState<AssetWorkbenchItem | null>(null)
   const [detailShotIndex, setDetailShotIndex] = useState<number | null>(null)
   const [pendingOpen, setPendingOpen] = useState(false)
@@ -537,11 +559,11 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
         <Alert type="info" showIcon message={<span className="text-xs">{analysisAction.staleNotice}</span>} />
       ) : null}
 
-      {/* 两栏工作区：左剧本原文（可收起）+ 右主区 */}
+      {/* 两栏工作区：左剧本原文（**默认收起**，见 `scriptCollapsed` 的说明）+ 右主区 */}
       <div className="flex min-h-0 flex-1 overflow-hidden rounded-lg border border-slate-200 bg-white">
         <div
           className="h-full shrink-0"
-          style={{ width: scriptCollapsed ? 36 : 380 }}
+          style={{ width: scriptCollapsed ? SCRIPT_PANEL_COLLAPSED_WIDTH : SCRIPT_PANEL_WIDTH }}
           data-testid="script-panel"
         >
           <ScriptTextPanel

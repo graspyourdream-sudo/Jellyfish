@@ -418,7 +418,7 @@ type KeyframeResolutionProfile = 'standard' | 'high'
  * 章节工作室里的三个步骤（对齐项目后三步）。
  *
  * 分镜工作室原本是一排平铺的检查器页签，分不清「先做什么」。这里把它按项目主流程
- * 收成三步：视频提示词 → 关联绑定 → 生成与交付。只做**分组与切换**，各面板本身
+ * 收成三步：视频提示词 → 资产与声音检查 → 生成与交付。只做**分组与切换**，各面板本身
  * 一个字都没改，因此不会影响已有行为。
  *
  * 「当前分镜」不在分组内——它由外层（项目 / 分镜列表）持有，切换步骤时天然保留。
@@ -440,8 +440,8 @@ const STUDIO_STEPS: StudioStepMeta[] = [
   },
   {
     key: 'binding',
-    label: '资产与声音绑定',
-    hint: '确认角色 / 场景 / 道具 / 服装与声音的绑定；推荐只做建议，保存后才写入绑定。',
+    label: '资产与声音检查',
+    hint: '逐镜核对角色 / 场景 / 道具 / 服装与声音是否都已关联上；推荐只做建议，保存后才写入绑定。角色声音本身在第 2 步的人物资产里设定。',
   },
   {
     key: 'deliver',
@@ -1604,7 +1604,7 @@ const ChapterStudio: React.FC = () => {
   /**
    * 进入工作室时，如果检查器是折叠的，先自动展开一次。
    *
-   * 为什么：现在工作室的**步骤内容全在右侧检查器里**（视频提示词 / 关联绑定 / 生成与交付
+   * 为什么：现在工作室的**步骤内容全在右侧检查器里**（视频提示词 / 资产与声音检查 / 生成与交付
    * 的页签与按钮），而上面那条「无视频才展开」的规则在镜头都达到 ready、且已生成视频后会
    * 判定为"不需要展开"——结果用户进来只看到主预览，找不到提示词编辑与绑定入口，
    * 只能点别处乱跳。这里保证首次进入一定看得到本步骤的界面；用户之后仍可手动收起。
@@ -3005,7 +3005,7 @@ function Inspector(props: {
   const [hideShot, setHideShot] = useState(false)
   /** 「维护设置」移出日常页签后，从这里进入（高级设置） */
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false)
-  // 工作室三步（视频提示词 / 关联绑定 / 生成与交付）。初始步骤来自 URL 的
+  // 工作室三步（视频提示词 / 资产与声音检查 / 生成与交付）。初始步骤来自 URL 的
   // `?studio=`（项目工作台第 4-6 步会带上），因此从项目列表进来直接落在对应步骤，
   // 刷新后也停在同一步；没有参数时落在第一步。
   const [studioStepKey, setStudioStepKey] = useState<StudioStepKey>(() =>
@@ -5727,11 +5727,11 @@ function Inspector(props: {
             },
               {
               key: 'binding',
-              label: '资产绑定',
+              label: '资产与声音检查',
               children: (
                 <div>
                   <div className="cs-group-title">
-                    <LinkOutlined /> 关联绑定
+                    <LinkOutlined /> 资产与声音检查
                   </div>
                   {selectedShot?.id && projectId && chapterId ? (
                     <div className="rounded-2xl border border-slate-200 bg-slate-50/70 px-3 py-3">

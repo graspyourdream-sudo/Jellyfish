@@ -2,7 +2,7 @@
  * 项目工作台「生产步骤」模型。
  *
  * 用户可见的是**五步**（第二部分统一口径，见 `DISPLAY_STEPS`）：
- *   1. 剧本与分镜 → 2. 资产准备 → 3. 整集视频提示词 → 4. 资产与声音绑定 → 5. 生成与交付
+ *   1. 剧本与分镜 → 2. 资产准备 → 3. 整集视频提示词 → 4. 资产与声音检查 → 5. 生成与交付
  * 内部的 key 仍是下面这 6 个（旧深链、旧字段一律保留可用）：
  *   script → extract_assets → image_prep → video_prompt → binding → generate_deliver
  * 其中 `extract_assets` 与 `image_prep` **共同**构成用户看到的第 2 步「资产准备」，
@@ -58,8 +58,11 @@ export const PROJECT_STEPS: ProjectStepMeta[] = [
   },
   {
     key: 'binding',
-    label: '关联绑定',
-    description: '把角色、场景、道具绑定到对应镜头，确保生成时选用正确参考图',
+    /* 第 4 步的用户口径是「资产与声音检查」：这一步**只核对**镜头上的资产与声音有没有关联齐，
+       角色声音本身在第 2 步的人物资产里设定（`VoiceBindingSection` 是全站唯一的角色声音入口），
+       所以这一步的名字与说明都不许写成"在这里绑定声音"。 */
+    label: '资产与声音检查',
+    description: '逐镜核对角色、场景、道具与声音是否都已关联到对应镜头；角色声音在第 2 步的人物资产里设定',
     group: 'studio',
   },
   {
@@ -105,8 +108,9 @@ export const DISPLAY_STEPS: DisplayStep[] = [
   },
   {
     key: 'asset_binding',
-    label: '资产与声音绑定',
-    description: '把角色、场景、道具与声音绑定到对应镜头',
+    label: '资产与声音检查',
+    description:
+      '逐镜核对角色、场景、道具是否都已关联到镜头、该出声的角色是否都已带上声音；声音本身在第 2 步的人物资产里设定',
     stepKeys: ['binding'],
   },
   {
@@ -250,7 +254,7 @@ export const PROJECT_STEP_ACTION_LABELS: Record<ProjectStepKey, string> = {
    */
   image_prep: '资产准备',
   video_prompt: '编写视频提示词',
-  binding: '关联绑定资产',
+  binding: '资产与声音检查',
   generate_deliver: '进入生成与交付',
 }
 
@@ -330,7 +334,7 @@ export function resolveProjectStep(input?: ProjectStepInput | null): ProjectStep
       ])
     }
     if (shotsWithAssetLinkCount <= 0) {
-      return buildResolution('binding', '已有提示词与资产，接下来把资产与声音绑定到镜头', ['镜头还没有关联任何资产'])
+      return buildResolution('binding', '已有提示词与资产，接下来核对镜头上的资产与声音是否都已关联', ['镜头还没有关联任何资产'])
     }
     return buildResolution('generate_deliver', '主流程前置条件已就绪，可以进入视频生成与交付', [])
   }
@@ -390,7 +394,7 @@ export function resolveProjectStep(input?: ProjectStepInput | null): ProjectStep
     ])
   }
 
-  // 6. 有提示词但镜头没有关联资产 → 关联绑定
+  // 6. 有提示词但镜头没有关联资产 → 资产与声音检查
   if (shotsWithAssetLinkCount <= 0) {
     return buildResolution('binding', '已有视频提示词，但镜头还没有绑定角色/场景/道具/商品', [
       '镜头还没有关联任何资产',
