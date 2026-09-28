@@ -6,6 +6,11 @@
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+
+const here = dirname(fileURLToPath(import.meta.url))
 
 import type { TaskProgressSummary } from '../assetProduction.ts'
 import {
@@ -65,23 +70,33 @@ test('空摘要判定与运行中计数', () => {
 /* ------------------------------------------------------------ 收起态那一行 */
 
 test('没有任务时收起态只说明还没有任务（不编造数量）', () => {
-  assert.equal(describeResultAreaCollapsedLine(emptyResultAreaSnapshot(), 0), '生成结果 · 本轮还没有任务')
+  assert.equal(describeResultAreaCollapsedLine(emptyResultAreaSnapshot(), 0), '本轮还没有任务')
 })
 
 test('收起态那一行保留：本轮数量 + 已完成 / 生成中 / 失败', () => {
   const snapshot = snapshotFromProgress(progress({ total: 3, done: 1, generating: 1, failed: 1 }))
   const line = describeResultAreaCollapsedLine(snapshot, 0)
-  assert.equal(line, '生成结果 · 本轮 3 项 · 已完成 1 · 生成中 1 · 失败 1')
+  assert.equal(line, '本轮 3 项 · 已完成 1 · 生成中 1 · 失败 1')
 })
 
 test('没有失败时「失败 0」照样出现（数字位置固定，便于扫一眼）', () => {
   const snapshot = snapshotFromProgress(progress({ total: 2, done: 2 }))
-  assert.equal(describeResultAreaCollapsedLine(snapshot, 0), '生成结果 · 本轮 2 项 · 已完成 2 · 生成中 0 · 失败 0')
+  assert.equal(describeResultAreaCollapsedLine(snapshot, 0), '本轮 2 项 · 已完成 2 · 生成中 0 · 失败 0')
 })
 
 test('有未读时收起态标出「N 项新结果待处理」', () => {
   const snapshot = snapshotFromProgress(progress({ total: 2, done: 2 }))
   assert.match(describeResultAreaCollapsedLine(snapshot, 2), /2 项新结果待处理$/)
+})
+
+test('收起态摘要**不重复**标题里的「生成结果」（浏览器实测抓到过重复）', () => {
+  const snapshot = snapshotFromProgress(progress({ total: 1, done: 1 }))
+  const line = describeResultAreaCollapsedLine(snapshot, 0)
+  assert.equal(line.includes('生成结果'), false, `摘要不该再写一遍标题：${line}`)
+  // 渲染点上标题只出现一次
+  const source = readFileSync(join(here, 'ResultArea.tsx'), 'utf8')
+  const headings = (source.match(/>生成结果</g) ?? []).length
+  assert.equal(headings, 1, `面板标题「生成结果」只允许出现一次，实际 ${headings} 次`)
 })
 
 test('收起态那一行不出现后台字段与原始状态值', () => {

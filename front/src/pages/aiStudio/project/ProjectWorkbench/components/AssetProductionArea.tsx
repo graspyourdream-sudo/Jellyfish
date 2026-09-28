@@ -2203,20 +2203,71 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
     },
   ]
 
+  /**
+   * 「读取已有出图任务」的只读入口（不计费）。
+   *
+   * 抽成变量是因为它有**两个**渲染点：主界面，以及"还没有任何资产"时的空状态。
+   * 后者以前是一个提前 return，连结果区都不渲染 —— 而设计包 §7 明确要求
+   * 「无任务、无未读结果」时结果区也要**默认收起地存在**（一行摘要 + 读取入口），
+   * 否则用户在"还没有资产"时找不到"把之前那轮出图结果读回来"的入口。
+   */
+  const readExistingEntry = (
+    <div className="rounded border border-slate-200 bg-slate-50/60 p-2" data-testid="read-existing-task">
+      <div className="mb-1 text-xs text-slate-600">
+        {OUTPUT_MODE_STATEMENT}
+        {' '}
+        读取已有出图任务：把**之前**某次出图的结果找回来。只读取结果，不会重新出图、不产生费用。
+      </div>
+      <Space wrap size="small">
+        <Select
+          size="small"
+          style={{ minWidth: 200 }}
+          placeholder="这条结果属于哪个资产"
+          value={readAssetKey || undefined}
+          onChange={(value) => setReadAssetKey(String(value))}
+          options={productionAssets.map((asset) => ({
+            value: asset.key,
+            label: `${asset.name}（${asset.type}）`,
+          }))}
+        />
+        <Input
+          size="small"
+          style={{ width: 340 }}
+          placeholder="出图结果编号"
+          value={readTaskId}
+          onChange={(event) => setReadTaskId(event.target.value)}
+          onPressEnter={() => void readExistingTask()}
+        />
+        <Button size="small" icon={<ReloadOutlined />} loading={readingTask} onClick={() => void readExistingTask()}>
+          读取结果
+        </Button>
+      </Space>
+    </div>
+  )
+
   if (productionAssets.length === 0) {
     return (
-      <Empty
-        image={Empty.PRESENTED_IMAGE_SIMPLE}
-        description="项目还没有人物 / 场景 / 道具 / 服装资产：请先在上面把剧本里的角色/场景/道具/服装确认下来（关联已有资产或新建）"
-      >
-        <Button
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={() => navigate(`/projects/${effectiveProjectId}?step=extract_assets`)}
+      <div className="space-y-3">
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="项目还没有人物 / 场景 / 道具 / 服装资产：请先在上面把剧本里的角色/场景/道具/服装确认下来（关联已有资产或新建）"
         >
-          去提取资产
-        </Button>
-      </Empty>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={() => navigate(`/projects/${effectiveProjectId}?step=extract_assets`)}
+          >
+            去提取资产
+          </Button>
+        </Empty>
+        {/* 结果区照常渲染（收起态）：读取入口与「本轮还没有任务」必须始终在（设计包 §7） */}
+        <ResultArea
+          snapshot={resultSnapshot}
+          busy={busyNow}
+          roundSignal={resultRoundSignal}
+          readEntry={readExistingEntry}
+        />
+      </div>
     )
   }
 
@@ -2498,45 +2549,7 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
         snapshot={resultSnapshot}
         busy={busyNow}
         roundSignal={resultRoundSignal}
-        readEntry={
-          /*
-            读取已有出图任务（适配缺口修复）。
-            出图提交不写库、任务号只存在浏览器内存 / localStorage，而 localStorage 按 origin
-            隔离：换端口 / 换会话后就再也找不到那条任务。这里给一个**只读**入口把结果找回来，
-            命中后掉进下面同一套结果卡片，采纳 / 设为定版完全复用既有逻辑。
-          */
-          <div className="rounded border border-slate-200 bg-slate-50/60 p-2" data-testid="read-existing-task">
-            <div className="mb-1 text-xs text-slate-600">
-              {OUTPUT_MODE_STATEMENT}
-              {' '}
-              读取已有出图任务：把**之前**某次出图的结果找回来。只读取结果，不会重新出图、不产生费用。
-            </div>
-            <Space wrap size="small">
-              <Select
-                size="small"
-                style={{ minWidth: 200 }}
-                placeholder="这条结果属于哪个资产"
-                value={readAssetKey || undefined}
-                onChange={(value) => setReadAssetKey(String(value))}
-                options={productionAssets.map((asset) => ({
-                  value: asset.key,
-                  label: `${asset.name}（${asset.type}）`,
-                }))}
-              />
-              <Input
-                size="small"
-                style={{ width: 340 }}
-                placeholder="出图结果编号"
-                value={readTaskId}
-                onChange={(event) => setReadTaskId(event.target.value)}
-                onPressEnter={() => void readExistingTask()}
-              />
-              <Button size="small" icon={<ReloadOutlined />} loading={readingTask} onClick={() => void readExistingTask()}>
-                读取结果
-              </Button>
-            </Space>
-          </div>
-        }
+        readEntry={readExistingEntry}
       >
         {/* 任务进度：数字全部来自真实任务状态（与顶部条读的是同一份 progress） */}
         {tasks.length > 0 ? (

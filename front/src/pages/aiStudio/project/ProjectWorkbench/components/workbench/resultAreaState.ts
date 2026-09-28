@@ -120,7 +120,11 @@ export function countNewResults(seenDone: number, snapshot: ResultAreaSnapshot):
 }
 
 /**
- * 收起态那一行：本轮数量 + 已完成 / 生成中 / 失败 + 未读标记。
+ * 收起态那一行：数量 + 已完成 / 生成中 / 失败 + 未读标记。
+ *
+ * 刻意**不带**「生成结果」这个前缀：面板标题已经是「生成结果」了，
+ * 摘要再写一遍就是「生成结果 生成结果 · 本轮 3 项」（浏览器实测里出现过这句重复）。
+ * 设计包 §7 说的「一行『生成结果 + 数量 + 状态摘要』」= 标题 + 本函数返回的这段。
  *
  * 三个数字**恒定出现**（不因为为 0 就隐藏）：收起态是用户扫一眼的地方，
  * 数字位置固定才好对比；只在有失败时用文字说清"这几项可以重试"。
@@ -129,7 +133,7 @@ export function describeResultAreaCollapsedLine(
   snapshot: ResultAreaSnapshot,
   unread: number,
 ): string {
-  if (isEmptyResultAreaSnapshot(snapshot)) return '生成结果 · 本轮还没有任务'
+  if (isEmptyResultAreaSnapshot(snapshot)) return '本轮还没有任务'
   const parts = [
     `本轮 ${snapshot.total} 项`,
     `${DONE_LABEL} ${snapshot.done}`,
@@ -137,7 +141,7 @@ export function describeResultAreaCollapsedLine(
     `${FAILED_LABEL} ${snapshot.failed}`,
   ]
   if (snapshot.stopped > 0) parts.push(`已停止 ${snapshot.stopped}`)
-  const head = `生成结果 · ${parts.join(' · ')}`
+  const head = parts.join(' · ')
   return unread > 0 ? `${head} · ${unread} 项新结果待处理` : head
 }
 
