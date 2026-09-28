@@ -22,6 +22,7 @@ import {
   workbenchMissingItems,
   type WorkbenchItemLike,
 } from './workbenchState.ts'
+import { normalizeAssetWorkbench } from './assetWorkbenchContract.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -95,6 +96,48 @@ test('非人物资产不出现声音缺项（声音只属于人物资产）', ()
     workbenchMissingItems(item({ asset_type: 'scene', voice: { bound: false } })).includes('voice'),
     false,
   )
+})
+
+/**
+ * 上面几条钉的是**规则**（`item.voice?.bound === false` 才判缺）。
+ * 这条钉的是**数据供给**：后端工作台契约里的人声结论确实被归一化带进来 ——
+ * 否则规则再对，卡面也永远不会显示「缺角色声音」（那正是本任务要修的缺陷）。
+ */
+test('契约回包 → 卡面：voice.bound=false 真的走到「缺角色声音」这一步', () => {
+  const data = normalizeAssetWorkbench({
+    chapter_id: 'c-1',
+    items: [
+      { asset_type: 'character', asset_id: 'char-1', name: '林小满', voice: { bound: false } },
+      {
+        asset_type: 'character',
+        asset_id: 'char-2',
+        name: '周迟',
+        voice: {
+          bound: true,
+          file_id: 'file-audio-9',
+          file_name: '周迟配音.mp3',
+          url: 'files/a9.mp3',
+        },
+      },
+      // 老后端 / 字段未落地：整格没有 → 不判缺失
+      { asset_type: 'character', asset_id: 'char-3', name: '叶老夫人' },
+      // 其它类型给不给这一格都不判（规则层已钉，这里再钉一次数据层）
+      { asset_type: 'scene', asset_id: 'scene-1', name: '咖啡店', voice: { bound: false } },
+    ],
+  })
+  const byName = new Map(data.items.map((row) => [row.name, row]))
+  const miss = (name: string) => workbenchMissingItems(byName.get(name) ?? {})
+
+  assert.equal(byName.get('林小满')?.voice?.bound, false, '没绑的人物必须如实带出 bound=false')
+  /* 这条最小载荷里资料 / 图片字段都没给，所以「缺失项」还会列出「缺资料」；
+     要钉的是**声音那一项真的进了这一行**（顺序固定：资料在前、声音在后）。 */
+  assert.equal(describeWorkbenchMissingItems(byName.get('林小满') ?? {}), '缺资料、缺角色声音')
+  assert.equal(byName.get('周迟')?.voice?.bound, true)
+  assert.equal(byName.get('周迟')?.voice?.file_name, '周迟配音.mp3', '已绑音色的显示名要带回来')
+  assert.equal(miss('周迟').includes('voice'), false)
+  assert.equal(byName.get('叶老夫人')?.voice, null, '契约没给这一格时留空，不猜成"没绑"')
+  assert.equal(miss('叶老夫人').includes('voice'), false)
+  assert.equal(miss('咖啡店').includes('voice'), false)
 })
 
 /* ------------------------------------------------------- 唯一主要操作 */

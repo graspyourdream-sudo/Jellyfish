@@ -16,6 +16,9 @@
 本模块是这一页的**单一数据源**，只读、不调用任何模型、不出图、不写库：
 
 - ``items``：**一项资产只出现一次**，四类资产同构（人物 / 场景 / 道具 / 服装共用这一份）；
+  人物那一行额外带 ``voice``（角色声音的只读摘要：``bound`` + 已绑音色的标识）——
+  声音的唯一事实来源是**人物资产**（设计包 §10），所以这一格只出现在人物那一行，
+  本接口只读、也没有第二条写路径；
 - ``pending_review``：只收**真正需要人工**的（别名指向两个不同资产、同名异类、
   同一名称的候选各自关联了不同资产、候选里有服装但还没有服装资产）；
   无冲突的候选按 ``auto_confirm_unconflicted`` 的既有口径**自动合并 / 自动匹配**，
@@ -32,6 +35,7 @@
 资产资料 / 人工修改             ``chapter_asset_record_store``（生效画像 = 模型 ⊕ 人工）
 提示词质量（含旧数据重判）      ``asset_prompt_quality.audit_saved_prompts``
 图片与定版图                   ``entity_thumbnails.resolve_thumbnail_infos``
+角色声音（人物资产的只读摘要）  ``asset_voices.read_asset_voices``（**批量**读，不逐项查）
 剧本/分镜变化判定               ``chapter_asset_profile_cache.build_chapter_profile_cache_key``
 ============================  =========================================================
 
@@ -71,6 +75,7 @@ from app.services.studio.asset_prompt_quality import (
     audit_saved_prompts,
     saved_prompt_texts,
 )
+from app.services.studio.asset_voices import read_asset_voices
 from app.services.studio.chapter_asset_candidates import build_chapter_asset_candidates
 from app.services.studio.chapter_asset_profile_cache import build_chapter_profile_cache_key
 from app.services.studio.chapter_asset_profiles import (
@@ -159,6 +164,51 @@ TASK_FAILED = "failed"
 TASK_RELATION_TYPE: dict[str, str] = {
     asset_type: f"{asset_type}_image" for asset_type in ASSET_TYPES
 }
+
+#: 工作台 ``items[].voice`` 只出现在**人物资产**上。
+#:
+#: 为什么不是四类都带一格：角色声音（人物配音）的唯一事实来源是人物资产（设计包 §10），
+#: 镜头只做只读继承。给场景 / 道具 / 服装也摆一格"声音"，只会让人以为它们各自还有
+#: 一套声音要维护 —— 那是本需求明确禁止的第二套绑定口径。
+#: 字段在人物那一行**恒存在**（没绑时 ``bound=false``），缺字段 ≠ 没绑，两者不许混为一谈。
+VOICE_ASSET_TYPES: tuple[str, ...] = ("character",)
+
+
+def _voice_summary(binding: Any | None) -> dict[str, Any]:
+    """角色声音的只读摘要。
+
+    ``bound=False`` 时其余字段一律空串（页面据此显示「缺角色声音」，而不是显示一个空文件名）；
+    ``bound=True`` 时带出已绑音色的标识 —— ``file_name`` 给页面显示，
+    ``file_id`` 是内部标识，只允许落在默认收起的「技术详情」层。
+    """
+    if binding is None:
+        return {"bound": False, "file_id": "", "file_name": "", "url": ""}
+    return {
+        "bound": True,
+        "file_id": str(binding.file_id or ""),
+        "file_name": str(binding.file_name or ""),
+        "url": str(binding.url or ""),
+    }
+
+
+async def _load_voice_summaries(
+    db: AsyncSession, *, asset_ids_by_type: dict[str, list[str]]
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """**批量**取角色声音摘要：一次查询取回全部命中行（不逐项查，也不写库）。
+
+    只查 ``VOICE_ASSET_TYPES`` 里的类型；读的是 ``asset_voices`` 既有那一个只读口，
+    所以"唯一事实来源是人物资产、镜头级只读继承"这条不变式一个字都没有被改动。
+    """
+    wanted = {
+        asset_type: ids
+        for asset_type, ids in asset_ids_by_type.items()
+        if asset_type in VOICE_ASSET_TYPES and ids
+    }
+    if not wanted:
+        return {}
+    bindings = await read_asset_voices(db, asset_ids_by_type=wanted)
+    return {key: _voice_summary(binding) for key, binding in bindings.items()}
+
 
 
 def _clip(text: Any, limit: int = 240) -> str:
@@ -847,6 +897,19 @@ async def build_chapter_asset_workbench(db: AsyncSession, *, chapter_id: str) ->
         image_stats.update(await _load_image_stats(db, asset_type=asset_type, asset_ids=ids))
     task_stats = await _load_task_stats(db, asset_ids=list(asset_rows))
 
+    # ---- 角色声音（只读摘要，只有人物那一行有这一格；见 VOICE_ASSET_TYPES）----
+    voice_by_key = await _load_voice_summaries(
+        db,
+        asset_ids_by_type={
+            asset_type: [
+                entry["asset_id"]
+                for entry in entries.values()
+                if entry["asset_type"] == asset_type and entry["asset_id"]
+            ]
+            for asset_type in VOICE_ASSET_TYPES
+        },
+    )
+
     # ---- 提示词质量：**一次**跨资产重判（含"旧数据要重新生成"与跨资产重复）----
     audit_entries: list[dict[str, Any]] = []
     for entry in entries.values():
@@ -955,6 +1018,14 @@ async def build_chapter_asset_workbench(db: AsyncSession, *, chapter_id: str) ->
             if record is not None
             else plot_identity_for_fields(asset_type, fields)
         )
+        # 角色声音只挂在人物资产上：人物那一行**恒**带这一格（没绑 = bound False），
+        # 其它类型不带（None）—— 它们没有"自己的声音"这回事（见 VOICE_ASSET_TYPES）。
+        if asset_type in VOICE_ASSET_TYPES:
+            voice: dict[str, Any] | None = voice_by_key.get(
+                (asset_type, entry["asset_id"])
+            ) or _voice_summary(None)
+        else:
+            voice = None
         items.append(
             {
                 "asset_type": asset_type,
@@ -990,6 +1061,7 @@ async def build_chapter_asset_workbench(db: AsyncSession, *, chapter_id: str) ->
                     "quality": quality,
                 },
                 "image": image,
+                "voice": voice,
                 "status": decision,
                 "batch_eligible": bool(
                     decision["key"] in {STATUS_READY, STATUS_HAS_IMAGE, STATUS_PRIMARY}

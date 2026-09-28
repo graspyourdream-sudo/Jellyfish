@@ -101,6 +101,25 @@ export type AssetWorkbenchItemStatus = {
   reason: string
 }
 
+/**
+ * 人物资产的**角色声音**只读摘要。
+ *
+ * 为什么只有人物资产有这一格：角色声音（人物配音）的唯一事实来源是**人物资产**，
+ * 镜头级只做只读继承 —— 后端只在人物那一行给 `voice`，其它类型为 `null`。
+ *
+ * `bound === false` 才是"缺角色声音"的**充分**依据（卡面据此显示缺项）；
+ * 这一格整个拿不到（字段未落地）时一律**不判**缺失 —— 拿不到 ≠ 缺失。
+ */
+export type AssetWorkbenchVoice = {
+  bound: boolean
+  /** 已绑音色的显示名（未绑时为空串） */
+  file_name: string
+  /** 已绑音色的内部标识（只进默认收起的「技术详情」层，主区不出现） */
+  file_id: string
+  /** 已绑音色的地址（未绑时为空串） */
+  url: string
+}
+
 export type AssetWorkbenchItem = {
   asset_type: string
   asset_id: string
@@ -114,6 +133,8 @@ export type AssetWorkbenchItem = {
   script_relation?: AssetWorkbenchScriptRelation | null
   prompt?: AssetWorkbenchPrompt | null
   image?: AssetWorkbenchImage | null
+  /** 角色声音（只有人物资产有；见 `AssetWorkbenchVoice`） */
+  voice?: AssetWorkbenchVoice | null
   status?: AssetWorkbenchItemStatus | null
   batch_eligible: boolean
 }
@@ -263,6 +284,23 @@ function normalizeItemStatus(value: unknown): AssetWorkbenchItemStatus | null {
   return { key: toText(raw.key), label: toText(raw.label), reason: toText(raw.reason) }
 }
 
+/**
+ * 角色声音摘要的归一化（**只搬运**后端结论，不自己推）。
+ *
+ * 后端没给这一格（`undefined` / `null`）时返回 `null`：
+ * 页面据此**不判**缺失，而不是把"拿不到"当成"没绑"。
+ */
+function normalizeVoice(value: unknown): AssetWorkbenchVoice | null {
+  if (!value || typeof value !== 'object') return null
+  const raw = toRecord(value)
+  return {
+    bound: raw.bound === true,
+    file_name: toText(raw.file_name),
+    file_id: toText(raw.file_id),
+    url: toText(raw.url),
+  }
+}
+
 function normalizeItem(value: unknown): AssetWorkbenchItem {
   const raw = toRecord(value)
   return {
@@ -277,6 +315,7 @@ function normalizeItem(value: unknown): AssetWorkbenchItem {
     script_relation: normalizeScriptRelation(raw.script_relation),
     prompt: normalizePrompt(raw.prompt),
     image: normalizeImage(raw.image),
+    voice: normalizeVoice(raw.voice),
     status: normalizeItemStatus(raw.status),
     batch_eligible: raw.batch_eligible === true,
   }

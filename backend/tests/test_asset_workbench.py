@@ -849,3 +849,136 @@ def test_batch_build_targets_excludes_old_filler_prompt() -> None:
     assert len(good_targets) == 1, "可用提示词不许被误伤"
     assert good_targets[0].prompt == GOOD_PROMPT
     assert not any("排除" in warning for warning in good_warnings)
+
+
+# ---------------------------------------------------------------------------
+# 7) 角色声音：工作台只读摘要（**人物资产唯一事实来源**）
+# ---------------------------------------------------------------------------
+
+
+async def _seed_voice(db: Any, *, character_id: str, audio_name: str, storage_key: str) -> None:
+    """给一个人物绑定一条角色声音（走**既有**那个唯一写口，本用例不另造写路径）。"""
+    from app.models.studio import FileItem
+    from app.models.types import FileType
+    from app.services.studio.asset_voices import bind_asset_voice
+
+    file_id = f"file-{character_id}-voice"
+    db.add(FileItem(id=file_id, type=FileType.audio, name=audio_name, storage_key=storage_key))
+    await db.flush()
+    await bind_asset_voice(db, asset_type="character", asset_id=character_id, file_id=file_id)
+
+
+def test_items_carry_voice_summary_for_characters_only() -> None:
+    """人物那一行**恒**带 ``voice``：没绑 = ``bound=false``，绑了 = 带出音色标识。
+
+    同时钉住口径边界：其它类型（场景 / 道具 / 服装）**没有**这一格 ——
+    角色声音的唯一事实来源是人物资产，给别的类型也摆一格只会让人以为还有第二套绑定。
+    """
+    async def scenario(db: Any) -> None:
+        ids = await _seed_assets(
+            db,
+            characters=("苏晚棠", "叶老夫人"),
+            scene="南安侯府大堂",
+            props=("铁锤",),
+            costumes=("叶老夫人常服",),
+        )
+        # 资产要进工作台列表，得有候选组或本章资料行（既有口径，本用例不改）
+        await _seed_candidates(
+            db,
+            rows=[
+                (SHOT_1, "character", "苏晚棠", "linked", ids["苏晚棠"]),
+                (SHOT_1, "character", "叶老夫人", "linked", ids["叶老夫人"]),
+                (SHOT_1, "scene", "南安侯府大堂", "linked", ids["南安侯府大堂"]),
+                (SHOT_1, "prop", "铁锤", "linked", ids["铁锤"]),
+                (SHOT_1, "costume", "叶老夫人常服", "linked", ids["叶老夫人常服"]),
+            ],
+        )
+        await _seed_voice(
+            db, character_id=ids["苏晚棠"], audio_name="晚棠配音.mp3", storage_key="files/a1.mp3"
+        )
+
+    payload = _run(scenario)
+    items = payload["items"]
+    by_name = {item["name"]: item for item in items}
+
+    voiced = by_name["苏晚棠"]
+    assert voiced["asset_type"] == "character"
+    assert voiced["voice"]["bound"] is True
+    assert voiced["voice"]["file_name"] == "晚棠配音.mp3", "已绑音色的标识要如实带回来"
+    assert voiced["voice"]["file_id"], "内部标识照旧带出（只进默认收起的技术详情层）"
+    assert voiced["voice"]["url"] == "files/a1.mp3"
+
+    silent = by_name["叶老夫人"]
+    assert silent["voice"] == {"bound": False, "file_id": "", "file_name": "", "url": ""}, (
+        "没绑就是没绑：bound=false 且其余留空，不许编一个空文件名糊过去"
+    )
+
+    for name in ("南安侯府大堂", "铁锤", "叶老夫人常服"):
+        assert by_name[name]["voice"] is None, f"{name} 不该有角色声音这一格"
+
+
+def test_voice_summary_does_not_change_any_other_field_or_write() -> None:
+    """加这一格**不许**动到别的口径：状态机 / 计数 / 批量资格 / 未绑时仍是缺项而不是故障。
+
+    只读性由既有路由用例（第 5 节）钉住，这里再钉一次**服务层调用前后行数不变**
+    —— 声音摘要是纯读，不得顺带写入任何 ``asset_voice`` 行。
+    """
+    async def scenario(db: Any) -> None:
+        ids = await _seed_assets(db, characters=("苏晚棠",))
+        await _seed_candidates(
+            db, rows=[(SHOT_1, "character", "苏晚棠", "linked", ids["苏晚棠"])]
+        )
+        await _seed_voice(
+            db, character_id=ids["苏晚棠"], audio_name="晚棠配音.mp3", storage_key="files/a1.mp3"
+        )
+
+    payload = _run(scenario)
+    _assert_summary_matches_items(payload)
+    item = next(row for row in payload["items"] if row["name"] == "苏晚棠")
+    # 未绑 / 已绑都不影响这一项的业务状态与可批量资格（声音不是出图前置）
+    assert item["status"]["key"] == STATUS_NEEDS_PROFILE
+    assert item["batch_eligible"] is False
+
+
+def test_voice_summary_is_pure_read_over_asset_voice_rows() -> None:
+    """工作台**不写库**：跑完之后 ``asset_voice`` 行数与内容一模一样。"""
+
+    async def _main() -> tuple[int, int, dict[str, Any]]:
+        from sqlalchemy import select
+
+        from app.models.studio_file_usages import FileUsage
+        from app.models.types import FileUsageKind
+
+        db, engine = await build_session()
+        try:
+            await _seed_chapter(db)
+            ids = await _seed_assets(db, characters=("苏晚棠",))
+            await _seed_candidates(
+                db, rows=[(SHOT_1, "character", "苏晚棠", "linked", ids["苏晚棠"])]
+            )
+            await _seed_voice(
+                db, character_id=ids["苏晚棠"], audio_name="晚棠配音.mp3", storage_key="files/a1.mp3"
+            )
+            await db.commit()
+
+            async def _count() -> int:
+                rows = (
+                    await db.execute(
+                        select(FileUsage).where(
+                            FileUsage.usage_kind == FileUsageKind.asset_voice.value
+                        )
+                    )
+                ).scalars().all()
+                return len(rows)
+
+            before = await _count()
+            payload = await build_chapter_asset_workbench(db, chapter_id=CHAPTER_ID)
+            after = await _count()
+            return before, after, payload
+        finally:
+            await engine.dispose()
+
+    before, after, payload = asyncio.run(_main())
+    assert before == 1, f"种子应恰好绑一条声音，实际 {before}"
+    assert after == before, "工作台是只读接口：不许新增 / 删除任何声音绑定行"
+    assert next(row for row in payload["items"] if row["name"] == "苏晚棠")["voice"]["bound"] is True
