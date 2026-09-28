@@ -75,9 +75,16 @@ export type WorkbenchStatusKey =
   | 'failed'
   | 'has_image'
   | 'primary'
+  /**
+   * 商品专用状态（设计包 §9）：商品是第五类资产，也是**唯一不参与自动出图**的一类，
+   * 所以它不能沿用「可以生成 / 待生成提示词」这些出图链路上的词 —— 那样会把用户
+   * 指到一条对商品根本不存在的通道上。状态词统一为「待上传商品图」
+   * （**不使用**「待上传图片」）。
+   */
+  | 'needs_product_image'
 
 /**
- * 主界面**唯一**的状态词表（用户点名的那七个词）。
+ * 主界面**唯一**的状态词表（用户点名的那七个词 + 商品专用状态）。
  *
  * 后端 `status.label` 优先；这个表是后端没给 label 时的兜底，
  * 也用于顶部状态计数的标签与测试断言 —— 两处必须同源，否则会出现
@@ -91,8 +98,15 @@ export const WORKBENCH_STATUS_LABEL: Record<WorkbenchStatusKey, string> = {
   failed: '生成失败',
   has_image: '已有图片待选择',
   primary: '已定版',
+  needs_product_image: '待上传商品图',
 }
 
+/**
+ * 状态计数的展示顺序。
+ *
+ * 商品专用状态**排在最后**：前七个是出图链路上的业务状态，最后一个是商品专用的那一格
+ * （设计包 §12 的计数示例也是这个顺序 —— 待上传商品图在最后）。
+ */
 export const WORKBENCH_STATUS_ORDER: WorkbenchStatusKey[] = [
   'needs_profile',
   'needs_prompt',
@@ -101,6 +115,7 @@ export const WORKBENCH_STATUS_ORDER: WorkbenchStatusKey[] = [
   'failed',
   'has_image',
   'primary',
+  'needs_product_image',
 ]
 
 export type WorkbenchStatusTone = 'default' | 'blue' | 'green' | 'red' | 'gold' | 'purple'
@@ -113,6 +128,8 @@ export const WORKBENCH_STATUS_TONE: Record<WorkbenchStatusKey, WorkbenchStatusTo
   failed: 'red',
   has_image: 'purple',
   primary: 'green',
+  // 与「待补资料」同一族：都在等用户动手（商品等的是人工上传，不是等出图）
+  needs_product_image: 'gold',
 }
 
 /* ------------------------------------------------------------------ 契约形状 */
@@ -237,6 +254,20 @@ export function hasPrimary(item: WorkbenchItemLike): boolean {
 export function workbenchStatusKey(item: WorkbenchItemLike): WorkbenchStatusKey {
   const raw = String(item.status?.key ?? '')
   if ((WORKBENCH_STATUS_ORDER as string[]).includes(raw)) return raw as WorkbenchStatusKey
+  /**
+   * 商品单独一条推导链（设计包 §9）。
+   *
+   * 为什么不走下面那套通用兜底：通用兜底最后会得到「可以生成」或「待生成提示词」，
+   * 而商品**根本没有出图通道**（图由人工上传 + 手动定版），把它标成"可以生成"
+   * 就是把用户指到一条不存在的路上。商品没有图时的真实状态只有一个：待上传商品图。
+   *
+   * 「已有图片待选择 / 已定版」对商品同样成立（上传完要选一张、再定版），所以先判这两个。
+   */
+  if (workbenchItemType(item) === 'product') {
+    if (hasPrimary(item)) return 'primary'
+    if (hasImage(item)) return 'has_image'
+    return 'needs_product_image'
+  }
   if (needsPromptRegeneration(item)) return 'needs_prompt'
   if (hasPrimary(item)) return 'primary'
   if (hasImage(item)) return 'has_image'
@@ -314,10 +345,11 @@ export function emptyStatusCounts(): WorkbenchStatusCounts {
     failed: 0,
     has_image: 0,
     primary: 0,
+    needs_product_image: 0,
   }
 }
 
-/** 七个业务状态各多少项（顶部第二行数量）。 */
+/** 七个业务状态 + 商品专用状态各多少项（顶部第二行数量）。 */
 export function countByStatus(items: readonly WorkbenchItemLike[]): WorkbenchStatusCounts {
   const counts = emptyStatusCounts()
   items.forEach((item) => {
@@ -560,11 +592,16 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
     if (counts.unsupported === 0) return ''
     const reasons: string[] = []
     if (counts.products > 0) {
+      /* 设计包 §9 要求主区**逐字**出现这一句（N 为实际数量），所以这里不自由改写：
+         「本轮有 N 项选中资产不参与出图：N 项商品：商品图不参与自动出图，由人工上传并手动
+          「设为定版」 —— 请在商品卡片上点「上传商品图 / 设为定版」。」
+         （head + 本条 + 句号 恰好拼出上面这一整句。） */
       reasons.push(
-        `${counts.products} 项商品：商品的图片由人工上传并手动「设为定版」，不走出图通道 —— 请在商品卡片上点「上传图片 / 设为定版」`,
+        `${counts.products} 项商品：商品图不参与自动出图，由人工上传并手动「设为定版」 —— 请在商品卡片上点「上传商品图 / 设为定版」`,
       )
     }
     if (counts.unregistered > 0) {
+      // 未登记类型**另起一句**、不与商品合并：两种原因不同（设计包 §9 明确要求）
       reasons.push(`${counts.unregistered} 项类型当前版本还不认识：先不要在这里出图，可在「技术详情」里看它的原始类型`)
     }
     const head = `本轮有 ${counts.unsupported} 项选中资产不参与出图`
@@ -603,7 +640,7 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
     /* 只选了商品：商品图**不走这条出图通道**，所以这一屏的主按钮对它们没有意义 ——
        标题与禁用原因都直说"该去哪儿做"，而不是让用户对着禁用的按钮猜。 */
     if (counts.selected > 0 && counts.products === counts.selected) {
-      return '商品的图片由人工上传并手动「设为定版」'
+      return '商品图不参与自动出图：请在商品卡片上点「上传商品图 / 设为定版」'
     }
     if (counts.needsPrompt > 0) return `${counts.needsPrompt} 项还没有图片提示词`
     if (counts.generatable > 0) return `本轮将处理 ${counts.generatable} 项资产`
@@ -637,7 +674,7 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
     primaryDisabledReason = '先勾选要生成的资产，或点「只选未生成项」。'
   } else if (counts.products === counts.selected) {
     primaryDisabledReason =
-      '商品的图片由人工上传并手动「设为定版」：请在商品卡片上点「上传图片 / 设为定版」。'
+      '商品图不参与自动出图：请在商品卡片上点「上传商品图 / 设为定版」。'
   } else if (counts.generating > 0) {
     primaryLabel = `批量生成中（${counts.generating}）`
     primaryDisabledReason = '选中的资产正在生成，等这一轮跑完再点。'
@@ -660,7 +697,7 @@ export function deriveWorkbenchCommand(input: WorkbenchCommandInput): WorkbenchC
     if (busy) return '本轮还在进行中；要中断后续请点「停止后续」。'
     if (counts.selected === 0) return '先勾选要生成图片的资产，或点「全选本页签」/「只选未生成项」。'
     if (counts.products > 0 && counts.products === counts.selected) {
-      return '商品的图片由人工上传并手动「设为定版」：请在商品卡片上点「上传图片 / 设为定版」。'
+      return '商品图不参与自动出图：请在商品卡片上点「上传商品图 / 设为定版」。'
     }
     if (counts.needsPrompt > 0 && counts.generatable === 0) {
       return '选中的资产还没有图片提示词：先点「生成图片提示词」，或换选已经有提示词的项。'
@@ -757,6 +794,8 @@ export const WORKBENCH_STATUS_NOTICE: Record<WorkbenchStatusKey, string> = {
   failed: '上一次没有生成成功：可以重新生成图片',
   has_image: '已有图片待选择：采纳一张后再定版',
   primary: '这一项已经定版',
+  // 商品专用（设计包 §9）：不走出图通道，唯一的下一步是人工上传商品图并手动定版
+  needs_product_image: '商品图不参与自动出图：请上传商品图并「设为定版」',
 }
 
 /** 状态原因对应的主区中文结论（没有原因时返回空串 = 整行不显示）。 */

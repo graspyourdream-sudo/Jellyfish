@@ -52,7 +52,7 @@ export type AssetCardGridProps = {
   /**
    * 打开既有资产编辑页（工作台注入）。
    *
-   * 商品的图**不走出图通道**：它在这一屏的主操作是「上传图片 / 设为定版」，
+   * 商品的图**不参与自动出图**：它在这一屏的主操作是「上传商品图 / 设为定版」，
    * 落到商品资产编辑页（复用实体 CRUD 的上传与 `is_primary`），所以卡片上给的是这个入口。
    */
   onOpenAssetEditor?: (item: AssetWorkbenchItem) => void
@@ -102,7 +102,7 @@ export function AssetCardGrid(props: AssetCardGridProps) {
         /** 单项生成按钮的禁用原因（不撒谎：能点就点，不能点就说清楚为什么） */
         const generateBlockedReason = !submittable
           ? type === 'product'
-            ? '商品图不走出图通道：请在商品资产页上传图片并「设为定版」'
+            ? '商品图不参与自动出图：请上传商品图并「设为定版」'
             : type === null
               ? '这一项的类型当前版本还不认识，先不要在这里出图'
               : '服装暂不支持批量出图，可以先保存资料与提示词'
@@ -220,38 +220,47 @@ export function AssetCardGrid(props: AssetCardGridProps) {
                 详情
               </Button>
               {renderProfileEditor(item)}
-              {/* 商品：没有提示词可写（它不在出图链路上），主操作换成去资产页上传图片并定版 */}
-              {type === 'product' && onOpenAssetEditor ? (
-                <Button size="small" type="primary" ghost onClick={() => onOpenAssetEditor(item)}>
-                  上传图片 / 设为定版
-                </Button>
-              ) : (
-                <Button size="small" type="text" onClick={() => onEditPrompt(item)}>
-                  {requiresNewPrompt ? '重新生成提示词' : '修改提示词'}
-                </Button>
-              )}
-              {hasImg ? (
-                <Tooltip title={generateBlockedReason}>
-                  <Button
-                    size="small"
-                    type="text"
-                    disabled={busy || Boolean(generateBlockedReason)}
-                    onClick={() => onGenerateOne(item, 'regenerate')}
-                  >
-                    重新生成图片
+              {/*
+                商品 = 第五类资产，也是**唯一不参与自动出图**的一类（设计包 §9）。
+                所以它的卡片上**没有**「修改提示词」、也**没有**「生成图片 / 重新生成图片」：
+                商品图只有一条路 —— 上传商品图并手动「设为定版」。
+                把出图按钮留在卡片上（哪怕禁用）只会让用户以为存在一条能出商品图的通道。
+              */}
+              {type === 'product' ? (
+                onOpenAssetEditor ? (
+                  <Button size="small" type="primary" ghost onClick={() => onOpenAssetEditor(item)}>
+                    上传商品图 / 设为定版
                   </Button>
-                </Tooltip>
+                ) : null
               ) : (
-                <Tooltip title={generateBlockedReason}>
-                  <Button
-                    size="small"
-                    type="text"
-                    disabled={busy || Boolean(generateBlockedReason)}
-                    onClick={() => onGenerateOne(item, 'generate')}
-                  >
-                    生成图片
+                <>
+                  <Button size="small" type="text" onClick={() => onEditPrompt(item)}>
+                    {requiresNewPrompt ? '重新生成提示词' : '修改提示词'}
                   </Button>
-                </Tooltip>
+                  {hasImg ? (
+                    <Tooltip title={generateBlockedReason}>
+                      <Button
+                        size="small"
+                        type="text"
+                        disabled={busy || Boolean(generateBlockedReason)}
+                        onClick={() => onGenerateOne(item, 'regenerate')}
+                      >
+                        重新生成图片
+                      </Button>
+                    </Tooltip>
+                  ) : (
+                    <Tooltip title={generateBlockedReason}>
+                      <Button
+                        size="small"
+                        type="text"
+                        disabled={busy || Boolean(generateBlockedReason)}
+                        onClick={() => onGenerateOne(item, 'generate')}
+                      >
+                        生成图片
+                      </Button>
+                    </Tooltip>
+                  )}
+                </>
               )}
             </div>
           </article>

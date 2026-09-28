@@ -347,12 +347,14 @@ test('商品（第五类资产）：有自己的页签与计数，且不进"可�
   assert.equal(isWorkbenchSubmittable('product'), false)
 
   const command = deriveWorkbenchCommand({ items, selectedKeys: ['product:prod-1'] })
-  assert.match(command.title, /人工上传/)
+  /* 设计包 §9 把商品的口径统一成「商品图不参与自动出图 + 上传商品图 / 设为定版」，
+     所以这里跟着断言新措辞（旧断言钉的是「人工上传」那个说法）。 */
+  assert.match(command.title, /上传商品图/)
   assert.match(command.primaryDisabledReason, /设为定版/)
   assert.equal(command.counts.products, 1)
   // 只选商品时，"批量生成图" 也必须被禁用，并说清该去哪儿做
   assert.equal(command.generateImagesDisabled, true)
-  assert.match(command.generateImagesDisabledReason, /人工上传/)
+  assert.match(command.generateImagesDisabledReason, /上传商品图/)
 })
 
 test('未登记的资产类型：单独成桶（不许静默当成人物），并能被点名出来', () => {
@@ -409,7 +411,9 @@ test('后端没给 status.key 时按图片 / 提示词自己推（不落到未�
 
 /* --------------------------------------------------------- ⑤ 状态文案映射 */
 
-test('状态文案只用用户点名的那七个词，绝不出现内部枚举值', () => {
+test('状态文案只用用户点名的那七个词 + 商品专用状态，绝不出现内部枚举值', () => {
+  /* 前七个是用户点名的业务状态词；最后一个是商品专用状态（设计包 §9：
+     商品不参与自动出图，所以它不能沿用「可以生成」这类出图链路上的词）。 */
   assert.deepEqual(Object.values(WORKBENCH_STATUS_LABEL), [
     '待补资料',
     '待生成提示词',
@@ -418,6 +422,7 @@ test('状态文案只用用户点名的那七个词，绝不出现内部枚举�
     '生成失败',
     '已有图片待选择',
     '已定版',
+    '待上传商品图',
   ])
   Object.values(WORKBENCH_STATUS_LABEL).forEach((label) => {
     assert.deepEqual(findMainScreenForbiddenTerms(label), [])
@@ -757,7 +762,7 @@ test('只选商品：原因仍然在主区（与"混选"同一套说法，不是
   assert.equal(command.counts.unsupported, 1)
   assert.match(command.unsupportedNotice, /1 项商品/)
   // 除主按钮禁用原因之外，还额外给出"没参与本轮"的整句说明
-  assert.match(command.primaryDisabledReason, /人工上传/)
+  assert.match(command.primaryDisabledReason, /上传商品图/)
 })
 
 test('未登记类型：原因**区别于**商品（两种原因不许合成一句话说错）', () => {
