@@ -4,6 +4,7 @@
 /* eslint-disable */
 import type { AdoptImageRequest } from '../models/AdoptImageRequest';
 import type { ApiResponse_AdoptImageRead_ } from '../models/ApiResponse_AdoptImageRead_';
+import type { ApiResponse_AssetStrategiesRead_ } from '../models/ApiResponse_AssetStrategiesRead_';
 import type { ApiResponse_FrameSubmitPlanRead_ } from '../models/ApiResponse_FrameSubmitPlanRead_';
 import type { ApiResponse_FrameSubmitRead_ } from '../models/ApiResponse_FrameSubmitRead_';
 import type { ApiResponse_ImagePlanPreviewRead_ } from '../models/ApiResponse_ImagePlanPreviewRead_';
@@ -40,6 +41,35 @@ export class StudioImagePipelineService {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/api/v1/studio/image-pipeline/status',
+        });
+    }
+    /**
+     * 按资产类型下发的出图口径（画幅 / 模板 / 结果类型 / 通道；只读、不触网）
+     * **画幅按类型下发的唯一读口**（需求清单第 2 条第 3 项）。
+     *
+     * 为什么要有这个端点，而不是让页面自己写一张比例表：
+     * 「人物 16:9 / 场景 16:9 / 道具 1:1」的真实口径在
+     * :data:`asset_strategies.ASSET_TYPE_ASPECT_RATIOS`（以及人物的**写死**口径里），
+     * 提交出图时也由同一张表解析（:func:`asset_strategies.resolve_aspect_ratio`）。
+     * 页面如果自己再写一份，就会出现"卡片上写 1:1、实际请求发 16:9"这种无法察觉的漂移。
+     * 所以这里把**同一份口径**下发给页面：卡片、详情抽屉、工作室素材卡读的都是它。
+     *
+     * 内容与提交时的实际行为一一对应：
+     *
+     * * ``aspect_ratio``：不传画幅时这次会用什么（人物恒 16:9）；
+     * * ``aspect_ratio_fixed``：true = 连调用方显式传入也不采纳（人物专有）；
+     * * ``aspect_ratio_note``：为什么是这个比例（中文，可直接上屏）；
+     * * ``auto_generate``：是否参与自动出图（**商品是唯一 false 的类型**）；
+     * * ``channel`` / ``channel_label``：这一项会发给哪条通道。
+     *
+     * 纯读：不写库、不触网、不触发任何付费出口。
+     * @returns ApiResponse_AssetStrategiesRead_ Successful Response
+     * @throws ApiError
+     */
+    public static getAssetStrategiesApiV1StudioImagePipelineAssetStrategiesGet(): CancelablePromise<ApiResponse_AssetStrategiesRead_> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/v1/studio/image-pipeline/asset-strategies',
         });
     }
     /**
