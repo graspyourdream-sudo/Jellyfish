@@ -8,12 +8,12 @@
  * | 扫描面 | 覆盖内容 |
  * |---|---|
  * | `pages/aiStudio/chapter/**` | `ChapterStudio.tsx`、`chapterIndexing.ts`、`components/**`、`prep/**` 的**全部非测试源码** |
- * | `pages/aiStudio/shots/components/ShotAudioBindingSection.tsx` | 审计把这两个文件**登记在 §4.3**（虽然物理上在 `shots/components/`），所以属本批范围 |
- * | `pages/aiStudio/shots/components/audioAdmissionCore.ts` | 同上 |
+ * | `pages/aiStudio/shots/components/audioAdmissionCore.ts` | 审计把这个文件**登记在 §4.3**（虽然物理上在 `shots/components/`），所以属本批范围 |
  *
  * ⚠️ **本测试不覆盖 `shots/**` 的其它文件**（那是审计 §4.6 / 第 6 批的范围）。
  * `shots/components/` 下还有 `ChapterShotAssetBindingSection.tsx`、`audioAdmissionCore.test.ts`、
  * `bindingRecommendationRules*.ts` 等 —— 它们**不在**本测试的扫描面里，本测试不为它们背书。
+ * （原先登记的 `ShotAudioBindingSection.tsx` 已作为死代码删除。）
  *
  * 覆盖的扫描面形态沿用共享扫描器（`components/mainScreenCopyGuard.ts`，审计 §8.1 硬要求）：
  * JSX 文本节点、**JSX 属性值**（`title` / `placeholder` / `description` / `message` / `label` …，
@@ -83,11 +83,13 @@ const SRC_ROOT = resolve(HERE, '../../..')
 const AISTUDIO_ROOT = resolve(SRC_ROOT, 'pages/aiStudio')
 const CHAPTER_ROOT = resolve(AISTUDIO_ROOT, 'chapter')
 
-/** 审计把这两个 `shots/components/` 文件登记在 §4.3（本批范围）。 */
-const SHOTS_IN_BATCH_FILES: readonly string[] = [
-  'shots/components/ShotAudioBindingSection.tsx',
-  'shots/components/audioAdmissionCore.ts',
-]
+/**
+ * 审计把 `shots/components/audioAdmissionCore.ts` 登记在 §4.3（本批范围）。
+ *
+ * （另一个登记文件 `shots/components/ShotAudioBindingSection.tsx` 已作为**死代码删除**，
+ *   它的用户可见文案断言按任务书要求迁到替代组件上，见下方用例。）
+ */
+const SHOTS_IN_BATCH_FILES: readonly string[] = ['shots/components/audioAdmissionCore.ts']
 
 /**
  * 本批明确纳入扫描面的文件登记表（防止扫描范围被悄悄缩小）。
@@ -731,16 +733,14 @@ test('ShotBoundFilesPanel：资产名 / 声音名 / 槽位都不许用内部编�
   assert.ok(!/err instanceof Error \? err\.message/.test(source), '仍然直传 `err.message`（模式 6）')
 })
 
-test('声音绑定区块：长段落与状态文案都不含禁词，后端原文出口接了管道（§4.3 模式 4/5/6 + R11/R12）', () => {
-  const section = stripComments(readScan('shots/components/ShotAudioBindingSection.tsx'))
+test('音频准入文案：不含禁词，后端原文出口接了管道（§4.3 模式 4/5/6 + R11/R12）', () => {
+  /*
+    旧「声音绑定」区块（`shots/components/ShotAudioBindingSection.tsx`，本批已作为死代码删除）
+    里的那几条断言随之失效 —— 其中**仍须成立的**两条已迁到替代组件
+    `ShotAudioOptOutSwitch.tsx`（见 `shots/shotsCopy.test.ts` 与 `shots/components/shotAudioOptOut.test.ts`：
+    错误出口必须走统一 message 包装层）。这里只保留音频准入模块自身的口径。
+  */
   const core = stripComments(readScan('shots/components/audioAdmissionCore.ts'))
-  assert.ok(!section.includes('seedance'), '主区长段落还在写模型名 `seedance`')
-  assert.ok(!section.includes('audio_urls'), '主区长段落还在写接口字段 `audio_urls`')
-  assert.ok(!section.includes('SIX_STEP_ACCEPTANCE'), '主区长段落还在写仓库文件名')
-  assert.ok(!section.includes('asset://'), '主区长段落还在写存储形态 `asset://`')
-  assert.ok(!section.includes('/files/'), '主区长段落还在写存储路径 `/files/...`')
-  assert.ok(!section.includes('type=audio'), '素材库弹窗还在写后端字段形态 `type=audio`')
-  assert.ok(!section.includes('files.type=audio'), '空态文案还在写后端字段 `files.type=audio`')
 
   // R12：纯文本渲染的常量里不许留 markdown 星号（会字面显示成星号）
   assert.ok(!core.includes('**'), '`audioAdmissionCore.ts` 的用户可见常量里还有 markdown `**`（R12 字面显示星号）')
@@ -776,10 +776,13 @@ test('声音绑定区块：长段落与状态文案都不含禁词，后端原�
     `audioAdmissionCore.ts 的用户可见文案里出现了地址 / 存储形态：\n${coreAddressOffenders.join('\n')}`,
   )
   assert.ok(
-    /showUserError\(/.test(section),
-    '`ShotAudioBindingSection.tsx` 的错误出口必须走统一 message 包装层',
+    /showUserError\(/.test(stripComments(readScan('shots/components/ShotAudioOptOutSwitch.tsx'))),
+    '替代组件（分镜准备页的「本镜无需声音」开关）的错误出口必须走统一 message 包装层',
   )
-  assert.ok(!/\(e as Error\)\?\.message/.test(section), '仍然直传 `(e as Error)?.message`（模式 6）')
+  assert.ok(
+    !/\(e as Error\)\?\.message/.test(stripComments(readScan('shots/components/ShotAudioOptOutSwitch.tsx'))),
+    '替代组件仍然直传 `(e as Error)?.message`（模式 6）',
+  )
 })
 
 /* --------------------------------- 第 3 批收尾（任务 A / B / C）：地址与成对文案 */
@@ -896,12 +899,40 @@ test('任务B(b)：⑥ 生成视频的 plan.warnings 原文只在默认收起的
   )
 })
 
-test('任务B(c)：绑定区地址的屏幕出口就是那个折叠块（主区无地址 + 折叠层有地址）', () => {
-  const source = stripComments(readScan('shots/components/ShotAudioBindingSection.tsx'))
-  assertRenderedOnlyInsideTechnicalDetail(
-    source,
-    /admission\.technicalDetail/,
-    'audio-admission-technical-detail',
+/**
+ * 音频准入地址的**屏幕出口**（本批迁移）。
+ *
+ * 原用例钉的是已删除的旧「声音绑定」区块（`shots/components/ShotAudioBindingSection.tsx`）。
+ * 那个组件消失后，`describeAudioAdmission(...).technicalDetail` 在全仓**只剩一处**渲染点：
+ * `ChapterStudio.tsx` ⑥ 请求预检里的 `request-audit-detail` 折叠块。本用例把同一条不变式
+ * （主区无地址 + 折叠层有地址）迁到那一处 —— 不是删掉断言。
+ *
+ * 折叠块前面那个"两个原文有一个非空就渲染"的条件表达式本身不会把内容渲出来，
+ * 所以它算第三层的一部分（与 `assertRenderedOnlyInsideTechnicalDetail` 同一口径）。
+ */
+function audioAdmissionBox(source: string): { inside: string; outside: string; boxEnd: number } {
+  const openTag = '<TechnicalDetailSection testId="request-audit-detail"'
+  const tagStart = source.indexOf(openTag)
+  assert.ok(tagStart !== -1, '⑥ 请求预检里那个技术详情折叠块（音频准入原文的唯一出口）不见了')
+  const boxEnd = source.indexOf('</TechnicalDetailSection>', tagStart)
+  assert.ok(boxEnd > tagStart, 'request-audit-detail 折叠块没有闭合')
+  const brace = source.lastIndexOf('{', tagStart)
+  const boxStart = brace === -1 ? tagStart : brace
+  return {
+    inside: source.slice(boxStart, boxEnd),
+    outside: source.slice(0, boxStart) + source.slice(boxEnd),
+    boxEnd,
+  }
+}
+
+test('任务B(c)：音频准入地址的屏幕出口就是 ⑥ 请求预检里的那个折叠块（主区无地址 + 折叠层有地址）', () => {
+  const source = stripComments(readScan('chapter/ChapterStudio.tsx'))
+  const { inside, outside } = audioAdmissionBox(source)
+  assert.match(inside, /planAudioAdmission\.technicalDetail/, '折叠块里必须渲染准入原文（含地址）')
+  assert.deepEqual(
+    outside.match(/planAudioAdmission\.technicalDetail/g) ?? [],
+    [],
+    '主区还有地方在渲染 planAudioAdmission.technicalDetail（地址会直接铺在主区）',
   )
   // 反向：纯函数级确认「有地址时折叠层真的有地址」（防「什么都没渲染」的假绿）
   const view = describeAudioAdmission({
@@ -931,35 +962,32 @@ test('任务B(d)：`ShotReadiness.missing` / `technicalDetails` 的「无渲染�
   )
 })
 
-test('任务A：音频地址在绑定区有渲染点，且只落在默认收起的「技术详情」折叠壳里（§4.3 模式 4）', () => {
-  const section = stripComments(readScan('shots/components/ShotAudioBindingSection.tsx'))
-  // 主区两处只用 `describeAudioAdmission` 的产品结论（detail / fix / tag / title）
-  assert.ok(/\{admission\.detail\}/.test(section), '主区必须显示中文结论（admission.detail）')
-  assert.ok(/admission\.fix/.test(section), '主区必须显示「怎么修」（admission.fix）')
-  /* 具体地址必须有落点，且**所有**引用都落在统一折叠壳里。
-     判定方式：从「折叠壳的条件表达式」到「盒尾」这一段之外，不许再出现任何
-     `admission.technicalDetail` —— 那才是"地址被铺在主区"。 */
-  const boxStart = section.indexOf('<TechnicalDetailSection')
-  const boxEnd = section.indexOf('</TechnicalDetailSection>')
-  assert.ok(boxStart !== -1 && boxEnd > boxStart, '绑定区没有用统一的技术详情折叠壳')
-  const condStart = section.lastIndexOf('{admission.technicalDetail', boxStart)
-  assert.ok(condStart !== -1, '地址折叠块必须由 admission.technicalDetail 控制显隐')
-  const outsideBox = section.slice(0, condStart) + section.slice(boxEnd + '</TechnicalDetailSection>'.length)
+test('任务A：音频地址在 ⑥ 请求预检里有渲染点，且只落在默认收起的「技术详情」折叠壳里（§4.3 模式 4）', () => {
+  /*
+    本用例原钉在已删除的旧「声音绑定」区块上（同一条不变式，迁到唯一存活的渲染点），
+    断言逐条保留：主区只用产品结论、地址只在统一折叠壳里、折叠壳来自全仓唯一实现。
+  */
+  const source = stripComments(readScan('chapter/ChapterStudio.tsx'))
+  // 主区只用 `describeAudioAdmission` 的产品结论（detail / fix / tag）
+  assert.ok(/\{planAudioAdmission\.detail\}/.test(source), '主区必须显示中文结论（planAudioAdmission.detail）')
+  assert.ok(/planAudioAdmission\.fix/.test(source), '主区必须显示「怎么修」（planAudioAdmission.fix）')
+
+  const { inside, outside } = audioAdmissionBox(source)
   assert.deepEqual(
-    outsideBox.match(/admission\.technicalDetail/g) ?? [],
+    outside.match(/planAudioAdmission\.technicalDetail/g) ?? [],
     [],
     '主区还有地方在渲染 admission.technicalDetail（地址会直接铺在主区）',
   )
   assert.ok(
-    /import \{ TechnicalDetailSection \} from '\.\.\/\.\.\/project\/ProjectWorkbench\/components\/workbench\/TechnicalDetailCollapse'/.test(section),
+    /import \{ TechnicalDetailSection \} from '\.\.\/project\/ProjectWorkbench\/components\/workbench\/TechnicalDetailCollapse'/.test(source),
     '必须从全仓唯一的 TechnicalDetailCollapse 导入折叠壳（不许自建第二套）',
   )
   assert.ok(
-    /testId="audio-admission-technical-detail"/.test(section),
+    /testId="request-audit-detail"/.test(source),
     '地址折叠块要有可定位的 testId（便于验收与排障）',
   )
   // 折叠块的 hint（收起态可见）必须干净：不给地址、不给存储形态、不给禁词
-  const hint = /hint="([^"]+)"/.exec(section)
+  const hint = /hint="([^"]+)"/.exec(inside)
   assert.ok(hint, '地址折叠块必须有收起态可见的说明')
   MAIN_SCREEN_ADDRESS_PATTERNS.forEach((pattern) => {
     assert.ok(!pattern.test(hint[1]), `折叠块 hint 里出现了地址 / 存储形态：${hint[1]}`)
@@ -1092,7 +1120,7 @@ test('阶段B③扫描范围守卫：每个目录都有文件（遍历被人为�
   )
 })
 
-test('阶段B③扫描范围守卫：`shots/**` 里只有审计 §4.3 登记的两个文件被纳入（不冒充覆盖整个 shots）', () => {
+test('阶段B③扫描范围守卫：`shots/**` 里只有审计 §4.3 登记的文件被纳入（不冒充覆盖整个 shots）', () => {
   const shotsOnDisk = listSourceFiles(resolve(AISTUDIO_ROOT, 'shots')).filter((file) => !/\.test\.tsx?$/.test(file))
   const shotsScanned = scanFiles()
     .map(relAiStudio)
@@ -1100,7 +1128,7 @@ test('阶段B③扫描范围守卫：`shots/**` 里只有审计 §4.3 登记的�
   assert.deepEqual(
     shotsScanned.map((file) => resolve(AISTUDIO_ROOT, file)).sort(),
     SHOTS_IN_BATCH_FILES.map((relPath) => resolve(AISTUDIO_ROOT, relPath)).sort(),
-    '扫描面里的 `shots/**` 文件必须**恰好**是 §4.3 登记的那两个 —— 多扫会让本测试替别人的批次背书，少扫会漏掉 §4.3 的点名条目',
+    '扫描面里的 `shots/**` 文件必须**恰好**是 §4.3 登记的那几个 —— 多扫会让本测试替别人的批次背书，少扫会漏掉 §4.3 的点名条目（`ShotAudioBindingSection.tsx` 已删除，登记表同步收敛）',
   )
   assert.ok(
     shotsOnDisk.length > SHOTS_IN_BATCH_FILES.length,

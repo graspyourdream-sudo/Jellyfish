@@ -53,10 +53,13 @@ const MAIN_SCREEN_BANNED: readonly string[] = [
 /**
  * ⚠️ 「（内部 ID 见「技术详情」）」**不在**禁词表里。
  *
- * 它是 `maskInternalIds` 设计出来的**指路文案**，审计文档把
- * `ShotAudioBindingSection.tsx:344` 的「已绑定（内部 ID 见工作区「技术详情」）」
- * 明确列为**正向参考 / 目标口径**（§4.6 合规对照）。所以主区出现这一句是对的，
+ * 它是 `maskInternalIds` 设计出来的**指路文案**，审计文档把这一句明确列为
+ * **正向参考 / 目标口径**（§4.6 合规对照）。所以主区出现这一句是对的，
  * 不该被当成泄漏 —— 但必须**逐字**是这个形态，不许是别的说法。
+ *
+ * 引用落点（原引用点 `shots/components/ShotAudioBindingSection.tsx` 已作为死代码删除，
+ * 文案口径本身不变）：`chapter/components/ShotBoundFilesPanel.tsx` 与
+ * `chapter/ChapterStudio.tsx` 仍在用这一句。
  */
 
 /** 英文枚举原值 / UUID 形态残留扫描。 */

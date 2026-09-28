@@ -10,7 +10,7 @@
  * | `pages/aiStudio/shots/**` | 本目录全部非测试源码：`ChapterShotEditPage.tsx`、`ChapterShotsPage.tsx`、
  * `shotStudioCopy.ts`、`components/{ChapterShotAssetBindingSection,ChapterShotAssetConfirmation,`
  * `ChapterShotBasicInfoSection,ChapterShotDialogueConfirmation,ChapterShotPreparationGuide,`
- * `ShotAudioBindingSection,ShotAudioOptOutSwitch}.tsx`、`components/{audioAdmissionCore,`
+ * `ShotAudioOptOutSwitch}.tsx`、`components/{audioAdmissionCore,`
  * `bindingRecommendationRules,shotAudioOptOut}.ts` |
  *
  * ⚠️ **本区域没有任何行级豁免**：`shots/**` 里出现基准禁词表里的任何一个词就是失败。
@@ -54,13 +54,18 @@ const SHOTS_ROOT = HERE
 
 /** 全仓唯一的「技术详情」实现（审计 §8.1.1：组件级豁免只能给一个文件）。 */
 const TECHNICAL_DETAIL_WAIVER = 'project/ProjectWorkbench/components/workbench/TechnicalDetailCollapse.tsx'
-/** 本区域应当 import 的折叠壳（相对 `shots/components/`）。 */
-const TECHNICAL_DETAIL_IMPORT = '../../project/ProjectWorkbench/components/workbench/TechnicalDetailCollapse'
+/*
+  原先这里还有一条「本区域 import 的折叠壳路径」常量，钉的是旧「声音绑定」区块里的那个
+  地址折叠块。那个文件已作为死代码删除，`shots/**` 里**不再有任何文件**渲染第三层内容
+  （替代组件只写本镜标记，不含内部标识），所以这条常量随断言一并去掉 —— 留下它会变成
+  一条永远没人读的"假护栏"。
+*/
 
 const ASSET_BINDING = 'components/ChapterShotAssetBindingSection.tsx'
 const SHOTS_PAGE = 'ChapterShotsPage.tsx'
 const SHOT_EDIT_PAGE = 'ChapterShotEditPage.tsx'
-const AUDIO_SECTION = 'components/ShotAudioBindingSection.tsx'
+/** 替代组件：分镜准备页的「本镜无需声音」开关（旧「声音绑定」区块已删除） */
+const AUDIO_OPT_OUT_SWITCH = 'components/ShotAudioOptOutSwitch.tsx'
 
 /**
  * 本批纳入扫描面的文件登记表（防止扫描范围被悄悄缩小）。
@@ -77,7 +82,6 @@ const REGISTERED_FILES: readonly string[] = [
   'components/ChapterShotBasicInfoSection.tsx',
   'components/ChapterShotDialogueConfirmation.tsx',
   'components/ChapterShotPreparationGuide.tsx',
-  'components/ShotAudioBindingSection.tsx',
   'components/ShotAudioOptOutSwitch.tsx',
   'components/audioAdmissionCore.ts',
   'components/bindingRecommendationRules.ts',
@@ -526,20 +530,24 @@ test('区域6 渲染点专项：接口名与后端原文不再直接进 toast（
     false,
     '`message.error(getErrorMessage(error))` 又回来了（后端原文直上主区）',
   )
-  // 音频绑定区：两侧（toast 与 Alert）都已在批 3 接上管道 —— 钉住不许回退
-  const audio = stripComments(readScan(AUDIO_SECTION))
+  /*
+    音频相关的错误出口：旧的「声音绑定」区块已删除（死代码，本批清理），
+    它那条"不许直出后端原文"的断言**迁到替代组件**上 —— 分镜准备页的
+    「本镜无需声音」开关（`ShotAudioOptOutSwitch.tsx`），它同样必须走统一 message 包装层。
+  */
+  const audioOptOut = stripComments(readScan(AUDIO_OPT_OUT_SWITCH))
   assert.equal(
-    /\(e as Error\)\?\.message/.test(audio),
+    /\(e as Error\)\?\.message/.test(audioOptOut),
     false,
-    '音频区又用 `(e as Error)?.message` 直出后端原文了（批 3 已改成 showUserError）',
+    '声音开关又用 `(e as Error)?.message` 直出后端原文了（应走 showUserError）',
   )
   assert.ok(
-    /setError\(toUserFacingText\(e, '音频素材加载失败'\)\)/.test(audio),
-    '音频素材加载失败必须过 `toUserFacingText`（原文经脱敏后才进 Alert）',
+    /showUserError\(error, SHOT_AUDIO_OPT_OUT_SAVE_FAILED\)/.test(audioOptOut),
+    '「本镜无需声音」保存失败必须过统一出口（主区中文结论 + 原文进技术详情）',
   )
 })
 
-test('区域6 渲染点专项：音频准入的地址与「供应商」口径（批 3 成果，钉住不许回退）', () => {
+test('区域6 渲染点专项：音频准入文案的「供应商」口径（批 3 成果，钉住不许回退）', () => {
   /* 「供应商」是主区禁词：**用户可见面**（字符串字面量 / JSX 属性）一个都不许有；
      注释里出现（记录「旧文案是『已绑定，但供应商无法访问』」）不算泄漏。 */
   const coreSurfaces = extractScanSurfaces(readScan('components/audioAdmissionCore.ts'))
@@ -547,13 +555,14 @@ test('区域6 渲染点专项：音频准入的地址与「供应商」口径（
     .filter((surface) => surface.text.includes('供应商'))
     .map((surface) => `:${surface.line} ｜ ${surface.text.trim()}`)
   assert.deepEqual(coreOffenders, [], `音频准入的用户可见文案里又出现了「供应商」：\n${coreOffenders.join('\n')}`)
-  const audio = stripComments(readScan(AUDIO_SECTION))
+  /*
+    旧「声音绑定」区块（里面有那一处 `admission.technicalDetail` 的折叠块）已删除，
+    所以"地址只在默认收起的折叠层里"这条不变量的屏幕出口现在**只剩** ChapterStudio 的
+    ⑥ 请求预检那一处 —— 那边的断言在 `chapterStudioCopy.test.ts`（任务B(c)，本批已迁移过去）。
+    这里只保留音频准入模块自身的文案口径。
+  */
   assert.ok(
-    audio.includes(`'${TECHNICAL_DETAIL_IMPORT}'`),
-    '音频区的地址出口必须用全仓唯一的折叠壳 `TechnicalDetailSection`',
-  )
-  assert.ok(
-    /admission\.technicalDetail/.test(audio),
+    /admission\.technicalDetail|technicalDetail:/.test(stripComments(readScan('components/audioAdmissionCore.ts'))),
     '音频准入的完整地址必须由 `technicalDetail` 承载（主区只说形态）',
   )
 })
@@ -642,7 +651,7 @@ test('区域6 手工核对登记：`shots/**` 里**已知未处理**的动态插
    * | 落点 | 现状 | 为什么本批不改 |
    * |---|---|---|
    * | `ChapterShotAssetBindingSection` 的 `unmatchedRows[].evidence` 直接拼在「依据：」后面 | 后端自由文本 | 它是**只读展示的证据说明**（中文为主），不在 §4.6 条目里；套 `maskInternalIds` 会改变证据原文，登记为后续建议 |
-   * | `admission.detail`（`ShotAudioBindingSection`） | 已由 `audioAdmissionCore` 产出中文形态说明 | 批 3 已收口（地址进 `technicalDetail`）；此处钉住它不许回退 |
+   * | `admission.detail`（原 `ShotAudioBindingSection`，**该文件已删除**） | 已由 `audioAdmissionCore` 产出中文形态说明 | 批 3 已收口（地址进 `technicalDetail`）；本批删掉死代码后，这一行的**替代组件**是 `ShotAudioOptOutSwitch.tsx`（它不渲染准入原文，只写本镜标记） |
    */
   const { bindings, editPage, shotsPage } = {
     bindings: stripComments(readScan(ASSET_BINDING)),
