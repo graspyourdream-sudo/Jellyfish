@@ -66,14 +66,14 @@ DEALLOCATE PREPARE stmt_add_shot_details_voice_inherited_from;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- ② 回填：把可归属的唯一历史逐镜声音提升为角色资产声音
---    · 只处理「这一镜只有一个角色」（lt.cnt = 1）的历史声音：双人镜头里的音频归谁都不对；
+--    · 只处理「这一镜只有一个角色」的历史声音（判定写在 attributable 子查询里）：双人镜头里的音频归谁都不对；
 --    · 该角色在**可归属**的历史镜头里只有一个不同音频（分叉就不猜）；
 --    · 该角色已经有资产声音（任何来源）时跳过，绝不覆盖用户后来的显式绑定；
 --    · 重复执行为空操作（NOT EXISTS 命中后没有行可插）。
 -- ─────────────────────────────────────────────────────────────────────────────
 SET @promote_legacy_shot_voice_to_character = "
 INSERT INTO file_usages (file_id, project_id, chapter_id, shot_id, usage_kind, source_ref)
-SELECT legacy.audio_file_id,
+SELECT attributable.audio_file_id,
        c.project_id,
        NULL,
        NULL,
@@ -87,12 +87,12 @@ FROM (
     AND sd.audio_file_id <> ''
     AND COALESCE(sd.audio_opt_out, 0) = 0
     AND (SELECT COUNT(*) FROM shot_character_links lx WHERE lx.shot_id = sd.id) = 1
-) AS legacy
-JOIN characters c ON c.id = legacy.character_id
+) AS attributable
+JOIN characters c ON c.id = attributable.character_id
 WHERE NOT EXISTS (
         SELECT 1
-        FROM (SELECT source_ref FROM file_usages WHERE usage_kind = 'asset_voice') AS existing
-        WHERE existing.source_ref = CONCAT('character:', c.id)
+        FROM (SELECT source_ref FROM file_usages WHERE usage_kind = 'asset_voice') AS already_bound
+        WHERE already_bound.source_ref = CONCAT('character:', c.id)
       )
   AND (
         SELECT COUNT(DISTINCT sd2.audio_file_id)
