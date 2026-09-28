@@ -20,7 +20,20 @@ export type StudioPhaseKey = 'video_prompt' | 'binding' | 'deliver'
 
 export type StudioPhaseMeta = {
   key: StudioPhaseKey
-  /** 项目里的内部步骤 key（`projectSteps.ts` 的六步口径） */
+  /**
+   * 项目里的内部步骤 key。
+   *
+   * **口径澄清（别被"六步"误导）**：项目内部步骤模型是**六步**
+   * （`script` / `extract_assets` / `image_prep` / `video_prompt` / `binding` /
+   * `generate_deliver`，见 `projectSteps.ts` 的 `PROJECT_STEPS`），
+   * 而**展示给用户的是全局五步**（`GLOBAL_STEPS`）：
+   * 第 2 步「资产准备」合并了 `extract_assets` + `image_prep`，
+   * 第 3–5 步分别对应 `video_prompt` / `binding` / `generate_deliver`
+   * 并由**同一个分镜工作室容器**的三个阶段承载。
+   *
+   * 两个模型的映射**只在这里**（`STUDIO_PHASES`）与 `projectSteps.ts` 的 `DISPLAY_STEPS` 各定一次，
+   * 页面不许再自己写第三份；用户可见文案里不出现内部 key。
+   */
   projectStepKey: 'video_prompt' | 'binding' | 'generate_deliver'
   /** 全局五步里的序号（3/4/5） */
   displayIndex: number

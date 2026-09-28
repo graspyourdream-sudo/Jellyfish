@@ -219,7 +219,20 @@ export function ChaptersTab() {
       setRenamingChapter(null)
       void refresh()
     } catch (error) {
-      showUserError(error, '剧集名称没保存成功：请稍后重试。')
+      /*
+       * 失败提示必须回答三件事（任务书第八部分）：
+       *  ① 发生了什么 —— 名字没保存成功；
+       *  ② 原数据是否保留 —— **原名称没有被改动**（这次只发了一个 title 字段，
+       *     请求失败就什么都没写；页面上也没做乐观更新，所以列表里仍是原来的名字）；
+       *  ③ 下一步怎么做 —— 弹窗保持打开，可以直接改完再点一次「保存名称」。
+       *
+       * 后端原文仍然只过统一管道（`showUserError`），不进主区；这里给的是产品自己的句子。
+       */
+      showUserError(
+        error,
+        '剧集名称没保存成功：这次只提交了名称一个字段，服务没有接受，所以**原名称没有受任何影响、仍然保留**；' +
+          '窗口还开着，你可以直接改一下再点一次「保存名称」，或点「取消」保持原样。',
+      )
     } finally {
       setRenaming(false)
     }
@@ -372,8 +385,15 @@ export function ChaptersTab() {
       return
     }
     if (state.key === 'prepare_shots' || state.key === 'shoot') {
-      // 有分镜之后不再从章节行直接跳进分镜工作室：按六步顺序先做资产提取。
-      // （工作室仍可从步骤条第 5/6 步或分镜页的次按钮进入，用于单镜查看与补漏。）
+      // 有分镜之后不再从章节行直接跳进分镜工作室：按内部步骤顺序先做资产提取。
+      //
+      // 口径澄清（别被"六步"误导）：**内部步骤模型是六步**
+      // （script / extract_assets / image_prep / video_prompt / binding / generate_deliver），
+      // 其中 extract_assets 与 image_prep 合成「资产准备」、video_prompt / binding /
+      // generate_deliver 由分镜工作室的三个阶段承载；**展示给用户的是全局五步**。
+      // 映射关系见 `pages/aiStudio/components/studio/studioPhase.ts` 与
+      // `projectSteps.ts` 的 `DISPLAY_STEPS`（那里是唯一事实来源）。
+      // （工作室仍可从顶部五步条或分镜页的次按钮进入，用于单镜查看与补漏。）
       navigate(`/projects/${projectId}?step=extract_assets`)
       return
     }
