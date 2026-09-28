@@ -2088,6 +2088,13 @@ const ChapterStudio: React.FC = () => {
 
   const toolbarSettingsItems = [
     {
+      key: 'advanced',
+      icon: <SettingOutlined />,
+      label: '高级设置（维护）',
+      onClick: () => setAdvancedSettingsOpen(true),
+    },
+    { type: 'divider' as const },
+    {
       key: 'autoOpen',
       icon: <SettingOutlined />,
       label: (
@@ -2123,6 +2130,8 @@ const ChapterStudio: React.FC = () => {
   }, [selectedShot, subtitleLines, videoTime])
 
   const navigate = useNavigate()
+  /** 「高级设置（维护）」弹窗：入口在容器右上角的设置菜单里 */
+  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false)
 
   /*
    * ---------------- 工作室阶段（第 3–5 步共用容器）的状态 ----------------
@@ -2289,20 +2298,32 @@ const ChapterStudio: React.FC = () => {
    * 项目与章节来自路由段，阶段与镜头来自查询参数，三者合起来就是全部要恢复的业务状态。
    */
   useEffect(() => {
-    const fromUrl = readStudioUrlState(window.location.search).shotId
+    const fromUrl = readStudioUrlState(location.search).shotId
     if (!fromUrl) return
     if (!shots.some((shot) => shot.id === fromUrl)) return
     setSelectedShotId((current) => (current === fromUrl ? current : fromUrl))
-  }, [shots])
+  }, [shots, location.search])
 
   useEffect(() => {
     if (!selectedShotId) return
-    const current = readStudioUrlState(window.location.search).shotId
+    const current = readStudioUrlState(location.search).shotId
     if (current === selectedShotId) return
-    const search = buildStudioSearch(window.location.search, { shotId: selectedShotId })
+    const search = buildStudioSearch(location.search, { shotId: selectedShotId })
     // replace：切换镜头不该把浏览器的返回栈塞满（阶段切换才用 push）
-    navigate({ pathname: window.location.pathname, search }, { replace: true })
-  }, [selectedShotId, navigate])
+    navigate({ pathname: location.pathname, search }, { replace: true })
+  }, [selectedShotId, location.search, location.pathname, navigate])
+
+  /**
+   * **阶段跟着 URL 走**（这一条是「浏览器前进 / 后退行为正确」的关键）。
+   *
+   * 只把初始值读一次是不够的：用户点后退时 URL 变了、React 状态没变，
+   * 表现就是"后退按钮按了没反应"。所以这里订阅 `location.search`，
+   * 让阶段与镜头始终是 URL 的函数 —— 深链、刷新、前进后退三种入口共用同一条恢复路径。
+   */
+  useEffect(() => {
+    const fromUrl = readStudioUrlState(location.search).phase
+    setStudioStepKey((current) => (current === fromUrl ? current : fromUrl))
+  }, [location.search])
 
   /*
    * ---------------- 分镜工作室（第 3–5 步共用容器） ----------------
@@ -2394,8 +2415,14 @@ const ChapterStudio: React.FC = () => {
    */
   const studioPhaseExtras: StudioPhaseExtras = useMemo(() => {
     const goAssetPrep = (tab: string) => goAssetPrepWithTab(tab)
-    const linkedShotCount = railShots.filter((shot) => shot.hasDeliverableVideo || shot.statusTone !== 'neutral')
-      .length
+    /*
+     * 「本集已关联资产的镜头数」按**交付清单的绑定结果**统计（与第 2 步同一份数据），
+     * 不用成片状态凑数 —— 否则会出现"核对表逐行说没关联、汇总却说全都关联了"的自相矛盾。
+     */
+    const linkedShotCount = episodeRows.filter(
+      (row) =>
+        Object.values(row.bound_assets ?? {}).reduce((sum, list) => sum + (list?.length ?? 0), 0) > 0,
+    ).length
     return {
       checklist: (
         <ShotAssetChecklist
@@ -2450,6 +2477,7 @@ const ChapterStudio: React.FC = () => {
     }
   }, [
     railShots,
+    episodeRows,
     shotAssetsOverview,
     selectedShot,
     projectId,
@@ -2633,12 +2661,13 @@ const ChapterStudio: React.FC = () => {
                 scopeRows={scopeRows}
                 episodeRows={episodeRows}
                 readinessRows={readinessRows}
-                onClose={() => setPrefs((p) => ({ ...p, inspectorOpen: false }))}
                 studioPhaseExtras={studioPhaseExtras}
                 studioStepKey={studioStepKey}
                 onStudioStepChange={handleStudioStepChange}
                 shotAssetsOverview={shotAssetsOverview}
                 onRefreshShotAssetsOverview={loadShotAssetsOverview}
+                advancedSettingsOpen={advancedSettingsOpen}
+                onCloseAdvancedSettings={() => setAdvancedSettingsOpen(false)}
               />
           </>
         }
@@ -2679,7 +2708,7 @@ const ChapterStudio: React.FC = () => {
               </Space>
             }
             className="cs-preview-card flex-1 min-h-0"
-            bodyStyle={{ height: '100%', minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: 12 }}
+            styles={{ body: { height: '100%', minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: 12 } }}
           >
             <div className="flex items-center justify-between gap-2">
               {showPreviewFrameSegmented ? (
@@ -2994,7 +3023,6 @@ function Inspector(props: {
   onUpdateShotTitle: (shotId: string, title: string) => Promise<void>
   onUpdateShotScriptExcerpt: (shotId: string, script_excerpt: string) => Promise<void>
   onDeleteShotOps: (shotId: string) => Promise<void>
-  onClose: () => void
   onPatchShotDetail: (patch: Partial<ShotDetailRead>) => void
   onPatchShotDetailImmediate: (patch: Partial<ShotDetailRead>) => Promise<void>
   onSelectPreviewVideo: (fileId: string) => void
@@ -3034,6 +3062,10 @@ function Inspector(props: {
   shotAssetsOverview: ShotAssetsOverviewRead | null
   /** 重新读一次本镜资产总览（关联/解绑之后刷新用；实现只在外层一处） */
   onRefreshShotAssetsOverview: (shotId: string) => Promise<void>
+  /** 「高级设置（维护）」弹窗是否打开（开合状态在外层，内容在本层 —— 内容要读本层的镜头数据） */
+  advancedSettingsOpen: boolean
+  /** 关闭「高级设置（维护）」 */
+  onCloseAdvancedSettings: () => void
 }) {
   const {
     projectId,
@@ -3068,7 +3100,6 @@ function Inspector(props: {
     onUpdateShotTitle,
     onUpdateShotScriptExcerpt,
     onDeleteShotOps,
-    onClose,
     onPatchShotDetail,
     onPatchShotDetailImmediate,
     onSelectPreviewVideo,
@@ -3085,6 +3116,8 @@ function Inspector(props: {
     onStudioStepChange,
     shotAssetsOverview,
     onRefreshShotAssetsOverview,
+    advancedSettingsOpen,
+    onCloseAdvancedSettings,
   } = props
   const currentChapterId = chapterId ?? null
   const [imageVersion, setImageVersion] = useState('v1')
@@ -3094,7 +3127,6 @@ function Inspector(props: {
   const [audioMode, setAudioMode] = useState<'none' | 'prompt' | 'upload'>('none')
   const [hideShot, setHideShot] = useState(false)
   /** 「维护设置」移出日常页签后，从这里进入（高级设置） */
-  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false)
   const [sceneNameMap, setSceneNameMap] = useState<Record<string, string>>({})
   const [characterNameMap, setCharacterNameMap] = useState<Record<string, string>>({})
   const [linkRoleOpen, setLinkRoleOpen] = useState(false)
@@ -5409,19 +5441,6 @@ function Inspector(props: {
 
   return (
     <div className="w-full h-full flex flex-col min-h-0">
-      <div className="cs-inspector-header flex items-center justify-between">
-        <div className="min-w-0">
-          <div className="font-medium truncate">分镜生成面板</div>
-          <div className="text-xs text-gray-500 truncate">
-            {selectedShot ? `${String(selectedShot.index).padStart(2, '0')} · ${selectedShot.title}` : '未选择分镜'}
-          </div>
-        </div>
-        <Space size="small">
-          <Tooltip title="收起">
-            <Button size="small" type="text" icon={<DoubleRightOutlined />} onClick={onClose} />
-          </Tooltip>
-        </Space>
-      </div>
 
       {/* 步骤切换 / 范围统计 / 头部都在「本镜生产」工作区里统一提供（这里不再重复一套）。 */}
       <ExportScopeModal
@@ -5448,7 +5467,7 @@ function Inspector(props: {
         selectedShotIds={selectedShotIds}
       />
 
-      <div className="cs-inspector flex-1 min-h-0 overflow-auto">
+      <div className="studio-mid__scroll flex-1 min-h-0 overflow-auto">
         {(() => {
           const items = [
               {
@@ -6218,7 +6237,7 @@ function Inspector(props: {
                             open={linkRoleOpen}
                             onCancel={() => setLinkRoleOpen(false)}
                             footer={null}
-                            destroyOnClose
+                            destroyOnHidden
                             width={560}
                           >
                             <div className="space-y-2">
@@ -6255,7 +6274,7 @@ function Inspector(props: {
                             open={linkSceneOpen}
                             onCancel={() => setLinkSceneOpen(false)}
                             footer={null}
-                            destroyOnClose
+                            destroyOnHidden
                             width={560}
                           >
                             <div className="space-y-2">
@@ -6287,7 +6306,7 @@ function Inspector(props: {
                             open={linkPropOpen}
                             onCancel={() => setLinkPropOpen(false)}
                             footer={null}
-                            destroyOnClose
+                            destroyOnHidden
                             width={560}
                           >
                             <div className="space-y-2">
@@ -6324,7 +6343,7 @@ function Inspector(props: {
                             open={linkCostumeOpen}
                             onCancel={() => setLinkCostumeOpen(false)}
                             footer={null}
-                            destroyOnClose
+                            destroyOnHidden
                             width={560}
                           >
                             <div className="space-y-2">
@@ -6447,7 +6466,7 @@ function Inspector(props: {
                       onChange={(v) => setRefImageType(v === undefined || v === null ? undefined : String(v))}
                       options={refFrameTypeOptions}
                       loading={refFrameTypeSelectLoading}
-                      onDropdownVisibleChange={handleRefFrameTypeDropdownVisibleChange}
+                      onOpenChange={handleRefFrameTypeDropdownVisibleChange}
                     />
                   </div>
 
@@ -6573,7 +6592,7 @@ function Inspector(props: {
               batchTools: (
                 <Collapse
                   size="small"
-                  destroyInactivePanel
+                  destroyOnHidden
                   items={[
                     {
                       key: 'episode_batch',
@@ -6965,19 +6984,12 @@ function Inspector(props: {
                 }
               />
 
-              {/* 「维护设置」从日常页签移到高级设置：日常生产面不再出现删除/隐藏/改标题这些结构性操作 */}
-              <div className="mt-3 flex items-center justify-between">
-                <Typography.Text type="secondary" className="text-[11px]">
-                  维护设置已移到高级设置（不再占据日常页签）。
-                </Typography.Text>
-                <Button size="small" type="link" onClick={() => setAdvancedSettingsOpen(true)}>
-                  高级设置
-                </Button>
-              </div>
+              {/* 维护类的结构性操作（改标题 / 隐藏 / 删除）放在默认关闭的高级设置里，
+                  日常生产面不再出现它们；入口在容器右上角的「设置」菜单。 */}
               <Modal
                 title="高级设置（维护）"
                 open={advancedSettingsOpen}
-                onCancel={() => setAdvancedSettingsOpen(false)}
+                onCancel={onCloseAdvancedSettings}
                 footer={null}
                 width={620}
               >
@@ -7014,7 +7026,7 @@ function Inspector(props: {
               </Space>
             </div>
           )}
-          destroyOnClose
+          destroyOnHidden
           width={900}
         >
           {(() => {
@@ -7777,7 +7789,7 @@ function Inspector(props: {
             </Button>,
           ]}
           width={900}
-          destroyOnClose
+          destroyOnHidden
         >
           {videoPromptPreviewLoading ? (
             <div className="py-8 text-center">

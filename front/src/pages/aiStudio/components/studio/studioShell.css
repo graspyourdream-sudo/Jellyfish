@@ -51,9 +51,11 @@
   --st-r-lg: 12px;
   --st-context-h: 56px;
   --st-stepper-h: 52px;
-  --st-rail-h: 200px;
+  --st-rail-h: 208px;
   --st-side-w: 296px;
   --st-preview-w: 336px;
+  /* 阶段主卡片（提示词 / 生成任务）的高度：内容少时撑满中栏，内容多时卡内滚动 */
+  --st-primary-card-h: 260px;
 
   width: 100%;
   height: 100%;
@@ -313,7 +315,7 @@
   min-height: 0;
 }
 .studio-side__scroll {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   padding: 11px;
@@ -329,12 +331,18 @@
   min-height: 0;
   padding: 11px;
   gap: 10px;
+  /* 中栏是**本容器唯一允许纵向滚动的区域**：提示词正文与生成设置都可能很长，
+     让它们在中栏内部滚动，而不是把底部胶片条顶出视口。 */
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .studio-mid__phases {
-  flex: 1;
+  /* `flex: 1 0 auto`：内容少时撑满中栏（提示词占满高度），内容多时按自然高度并交给中栏滚动。 */
+  flex: 1 0 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 10px;
 }
 .studio-preview {
   width: var(--st-preview-w);
@@ -356,11 +364,15 @@
 }
 .studio-rail {
   flex: none;
+  /* 固定高度：胶片条**不许**长高去挤占主工作区（卡片本身就是横向滑动的一行）。 */
+  height: var(--st-rail-h);
   background: var(--st-surface);
   border-top: 1px solid var(--st-border);
   padding: 9px var(--st-s3) 11px;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
+  overflow: hidden;
 }
 .studio-rail__head {
   display: flex;
@@ -387,6 +399,8 @@
   accent-color: var(--st-accent);
 }
 .studio-rail__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   gap: 9px;
   overflow-x: auto;
@@ -526,10 +540,21 @@
   padding: 10px var(--st-s3);
 }
 .st-card--grow {
-  flex: 1;
-  min-height: 0;
+  /* 阶段主卡片：**固定高度 + 卡内滚动**。
+     为什么不让它按内容长高：提示词正文与预检详情都可能很长，
+     一旦按内容长高就会把「生成视频」与底部胶片条顶出视口（实测 2650px）。
+     固定高度保证「一个屏内三块都在」，长内容在卡内滚动。 */
+  flex: none;
+  height: var(--st-primary-card-h);
+  min-height: 160px;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+}
+.st-card--grow > .st-card__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 .st-tag {
   display: inline-flex;

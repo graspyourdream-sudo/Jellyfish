@@ -289,7 +289,7 @@ export function StudioShotRail({
         okButtonProps={{ disabled: !(plan ? plan.has_content : selection.canDownload) }}
         confirmLoading={downloading}
         width={520}
-        destroyOnClose
+        destroyOnHidden
       >
         <div className="space-y-2 text-sm">
           <div>

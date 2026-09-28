@@ -174,6 +174,16 @@ export function StudioPhasePanel({
           </div>
         </article>
 
+        <article className="st-card" data-testid="studio-generate-card">
+          <div className="st-card__head">
+            <span className="st-card__title">生成视频</span>
+            <div className="st-card__right">
+              <span className="st-hint">失败不计费 · 结果保留在右侧预览与底部分镜列表</span>
+            </div>
+          </div>
+          <div className="st-card__body">{parts?.generate ?? generate}</div>
+        </article>
+
         {parts?.batchTools ? (
           <article className="st-card" data-testid="studio-batch-tools">
             <div className="st-card__head">
@@ -185,16 +195,6 @@ export function StudioPhasePanel({
             <div className="st-card__body">{parts.batchTools}</div>
           </article>
         ) : null}
-
-        <article className="st-card" data-testid="studio-generate-card">
-          <div className="st-card__head">
-            <span className="st-card__title">生成视频</span>
-            <div className="st-card__right">
-              <span className="st-hint">失败不计费 · 结果保留在右侧预览与底部分镜列表</span>
-            </div>
-          </div>
-          <div className="st-card__body">{parts?.generate ?? generate}</div>
-        </article>
 
         {parts?.dialogue ?? dialogue ? <div className="mt-2">{parts?.dialogue ?? dialogue}</div> : null}
       </div>
