@@ -28,7 +28,7 @@
  * **全仓唯一的折叠壳** `TechnicalDetailSection` 里（本文件不自建 `<details>`）。
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Button,
@@ -85,6 +85,7 @@ import {
 } from '../../../services/dramaPlanApi'
 import { technicalTextOf, toUserFacingApiErrorText } from '../../../services/llmPipelineApi'
 import { TechnicalDetailSection } from '../project/ProjectWorkbench/components/workbench/TechnicalDetailCollapse'
+import StepShell from '../components/studio/StepShell'
 /* 资料字段的中文标签：全仓既有实现（未登记键给中文兜底，**不回显英文键**），
    资产预览卡片直接用她，不在这里另抄一张表（审计 §4.5 模式 2）。 */
 import { profileFieldLabel } from '../project/ProjectWorkbench/components/workbench/workbenchState'
@@ -108,7 +109,7 @@ import {
 } from '../components/enumLabels'
 import type { EnumSpec } from '../components/enumLabels'
 
-const { Title, Paragraph, Text } = Typography
+const { Paragraph, Text } = Typography
 
 type Busy =
   | 'idle'
@@ -414,6 +415,22 @@ const DramaPlanPage: React.FC = () => {
     },
     [applyCard, applyRead, setSearchParams],
   )
+
+  /**
+   * 深链自动落位：URL 里只有 `?projectId=` 时**自动取一集可用的空章节**。
+   *
+   * 为什么必须有：从项目工作台 / 收藏夹直接打开 `?projectId=…` 时，页面原来一直停在
+   * "先选一个项目"的空状态 —— 明明已经选了项目，用户却被要求再选一次。
+   * 这里复用与"下拉选项目"**同一个** `openChapter`（同一个章节选择口径），不另写一套。
+   */
+  const autoOpenedRef = useRef(false)
+  useEffect(() => {
+    if (autoOpenedRef.current) return
+    if (!projectId || chapterId) return
+    autoOpenedRef.current = true
+    void openChapter(projectId, cardDraft.name)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, chapterId])
 
   useEffect(() => {
     if (!chapterId) return
@@ -859,10 +876,37 @@ const DramaPlanPage: React.FC = () => {
   )
 
   return (
-    <div className="p-6" style={{ maxWidth: 1240, margin: '0 auto' }}>
-      <Title level={3} style={{ marginBottom: 4 }}>
-        剧情策划
-      </Title>
+    <StepShell
+      context={{
+        projectId,
+        chapterLabel: chapterTitle || '未选择章节',
+        stepText: '第 1 步 · 剧本与分镜（剧情广告策划）',
+        // 有没有未保存的改动是用户最需要一眼看到的：有脏标记就是"保存中"，否则"已保存"
+        saving: dirty,
+        callCount: null,
+        actions: (
+          <Button
+            size="small"
+            onClick={() => navigate(projectId ? `/projects/${projectId}` : '/projects')}
+            data-testid="drama-plan-back"
+          >
+            返回项目工作台
+          </Button>
+        ),
+      }}
+      currentStepIndex={0}
+      onStepClick={(index: number, label: string) => {
+        /* 原型口径：点非当前步骤不移动高亮、不切换内容，只说明它在哪完成。 */
+        void antdMessage.info(
+          index === 1
+            ? `第 2 步「${label}」在项目工作台的资产准备里完成；本页确认策划后底部按钮即可进入。`
+            : `第 ${index + 1} 步「${label}」在项目工作台 / 分镜工作室里完成；这里只显示进度，不切换页面。`,
+        )
+      }}
+      stepNote={(index: number) =>
+        index === 0 ? '第 1 步 · 当前步骤（剧情广告策划）' : `第 ${index + 1} 步 · 未解锁（先确认策划）`
+      }
+    >
       <Paragraph type="secondary" style={{ marginBottom: 16 }}>
         商品信息卡 → 一句话核心创意 → 完整剧情 → 分镜 → 确认策划（落库后进入第 2 步资产准备）。
         <Text strong> 确认之前不会改动章节、分镜与任何资产。</Text>
@@ -1106,7 +1150,8 @@ const DramaPlanPage: React.FC = () => {
                   保存商品卡
                 </Button>
                 <Button
-                  type="primary"
+                  /* 次级按钮：本页的**唯一主操作**是底部的「确认策划」（设计包 §5.4：一个操作区只允许一个主色按钮，
+                     而任务书第七部分明确「确认策划是策划阶段唯一主要操作」） */
                   disabled={busy !== 'idle' || !cardDraft.name.trim() || (card?.confirmed === true && !cardDirty)}
                   onClick={() => void run('card-save', async () => {
                     const ok = await saveCardOnly(true)
@@ -1313,7 +1358,7 @@ const DramaPlanPage: React.FC = () => {
                 <Button onClick={() => onGenerateStage('storyboard')} disabled={busy !== 'idle' || generating}>
                   生成分镜（将调用 1 次模型）
                 </Button>
-                <Button type="primary" ghost onClick={() => onGenerateStage('all')} disabled={busy !== 'idle' || generating}>
+                <Button ghost onClick={() => onGenerateStage('all')} disabled={busy !== 'idle' || generating}>
                   一次生成全部（将调用 1 次模型）
                 </Button>
                 <Button
@@ -1888,7 +1933,7 @@ const DramaPlanPage: React.FC = () => {
           />
         </Space>
       </Modal>
-    </div>
+    </StepShell>
   )
 }
 

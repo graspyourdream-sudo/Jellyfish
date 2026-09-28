@@ -135,3 +135,38 @@ test('缺项显示「待补充」且文案取自共享常量（不自造第二�
   assert.ok(/computeProductCardMissingFields/.test(PAGE_CODE), '缺项没有用共享推导（实时标缺项靠它）')
   assert.ok(!/待完善|未填写完整/.test(PAGE_CODE), '出现了第二种"缺项"说法')
 })
+
+/* ------------------------------------------------------------------ */
+/* 公共五步外壳 + 唯一主操作（任务书第六、七部分）                       */
+/* ------------------------------------------------------------------ */
+
+test('公共五步外壳：本页读的是共享实现，不自己拼一套步骤条/上下文条', () => {
+  assert.ok(
+    /import StepShell from '\.\.\/components\/studio\/StepShell'/.test(PAGE_CODE),
+    '必须复用共享的 StepShell（公共五步外壳）',
+  )
+  assert.ok(/<StepShell/.test(PAGE_CODE), '没有渲染 StepShell')
+  assert.ok(/currentStepIndex=\{0\}/.test(PAGE_CODE), '剧情策划对应全局第 1 步')
+  assert.ok(!/className="stepper"/.test(PAGE_CODE), '自建了第二套步骤条')
+})
+
+test('唯一主操作：全页只剩「确认策划 / 继续准备资产」一个主色按钮', () => {
+  /*
+   * 设计包 §5.4「一个操作区只允许一个主色按钮」+ 任务书第七部分
+   *「确认策划是策划阶段唯一主要操作」。
+   * 正文区的「确认商品卡」与「一次生成全部」都必须是次级按钮。
+   */
+  const primaryCount = (PAGE_CODE.match(/type="primary"/g) ?? []).length
+  assert.equal(primaryCount, 2, `主色按钮应只有底部那两个（确认策划 / 继续准备资产），实际 ${primaryCount} 个`)
+  assert.ok(!/type="primary" ghost/.test(PAGE_CODE), '「一次生成全部」不该是主色按钮')
+  /* 付费动作仍然要写明会调用模型（原有口径不回退） */
+  assert.ok(PAGE_CODE.includes('一次生成全部（将调用 1 次模型）'))
+})
+
+test('深链自动落位：只有 projectId 时自动取一集可用的空章节', () => {
+  assert.ok(/autoOpenedRef/.test(PAGE_CODE), '缺少"只打开过一次"的守卫，会在每次渲染重复取章节')
+  assert.ok(
+    /void openChapter\(projectId, cardDraft\.name\)/.test(PAGE_CODE),
+    '没有复用与下拉选项目同一个 openChapter（会变成第二套章节选择口径）',
+  )
+})

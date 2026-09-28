@@ -299,6 +299,18 @@
   box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
 }
 
+/* ---------------- 轻版外壳（非工作室页面：单页流程） ---------------- */
+.studio-shell__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+}
+.studio-shell__inner {
+  margin: 0 auto;
+  width: 100%;
+}
+
 /* ---------------- 三栏 + 底部胶片条 ---------------- */
 .studio-body {
   flex: 1;
