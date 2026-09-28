@@ -35,12 +35,11 @@ export type StudioDeliveryPanelsProps = {
   /** 批量下载已选（与底部胶片条**同一份实现**） */
   onDownloadSelected: () => void
   /**
-   * 打包**整集全部**成片（不看勾选，按镜头顺序）。
+   * **整集打包下载**（不看勾选，按镜头顺序）—— 这是整集交付的**正式形态**。
    *
-   * 为什么不是"导出一个合并好的成片文件"：本环境没有 ffmpeg / 媒体拼接服务，
-   * 也没有允许引入新依赖。假装给出一个"整集成片"是**假的**（用户下载到的其实还是逐个文件）。
-   * 因此这里做的是**真实可做的那件事**：把整集所有已生成的成片按镜头顺序打成一个包，
-   * 包内文件名自带镜号（S001_…），交给剪辑环节即可按序使用；按钮文案与提示都如实说明这一点。
+   * 交付物就是一个 ZIP：包内是每个镜头**生成成功并已落库**的那份成片文件，
+   * 文件名自带镜号（`S001_…`），按镜头顺序排列，交给剪辑环节即可直接按序使用；
+   * 包里另附「交付清单.txt」逐行写明包内文件名与排除原因。
    */
   onDownloadWholeEpisode?: () => void
   wholeEpisodeCount?: number
@@ -250,14 +249,14 @@ export function DeliveryDownloadCard({
             下载所选成片（打包 ZIP）
           </Button>
           {onDownloadWholeEpisode ? (
-            <Tooltip title="不看勾选，把本集所有已生成的成片按镜头顺序打成一个包（包内文件名自带镜号）">
+            <Tooltip title="整集交付的正式形态：把本集所有已生成的成片按镜头顺序打成一个 ZIP（包内文件名自带镜号）">
               <Button
                 size="small"
                 disabled={(wholeEpisodeCount ?? deliverable) === 0}
                 onClick={onDownloadWholeEpisode}
                 data-testid="delivery-whole-episode"
               >
-                {`打包整集全部成片（${wholeEpisodeCount ?? deliverable} 条）`}
+                {`打包下载整集全部成片（ZIP · ${wholeEpisodeCount ?? deliverable} 条）`}
               </Button>
             </Tooltip>
           ) : null}
@@ -274,10 +273,10 @@ export function DeliveryDownloadCard({
           ) : null}
         </div>
         <div className="st-hint" style={{ marginTop: 8 }}>
-          在底部「分镜列表」勾选镜头即可加入下载；打包走的是真实 ZIP 接口，包里只有每个镜头
-          <b>生成成功并已落库</b>的那份成片，另附一份「交付清单.txt」写明包内文件与排除原因。
-          包内是<b>按镜号命名的逐个成片</b>（不是拼接好的单个视频文件）—— 自动拼接成整片需要服务端的
-          媒体合成流水线，当前环境没有提供。
+          整集打包与勾选打包走的是**同一条**下载链路（真实 ZIP 接口），包里只含每个镜头
+          <b>生成成功并已落库、且已被采用 / 定版</b>的那份成片，另附一份「交付清单.txt」逐行写明
+          包内文件名与排除原因。包内是<b>按镜号命名的逐个镜头成片文件</b>，按镜头顺序排列。
+          失败、未生成、以及只在本机不可用的镜头会被排除，<b>下载前会先显示排除数量</b>。
         </div>
         {manifestHint ? <div className="st-hint" style={{ marginTop: 6 }}>{manifestHint}</div> : null}
       </div>

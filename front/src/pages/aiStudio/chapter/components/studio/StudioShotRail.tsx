@@ -11,14 +11,9 @@
 
 import { useState } from 'react'
 
-import { Button, Checkbox, Dropdown, Modal, message } from 'antd'
+import { Button, Checkbox, Dropdown } from 'antd'
 import type { MenuProps } from 'antd'
 
-import {
-  downloadVideoBundleZip,
-  previewVideoBundle,
-  type VideoBundlePlan,
-} from '../../../../../services/videoDeliveryApi'
 import {
   blockedReasonFor,
   countRailStates,
@@ -28,8 +23,6 @@ import {
   toggleShotPick,
   type RailShotView,
 } from './shotRailModel'
-import type { StudioPhaseKey } from '../../../components/studio/studioPhase'
-import { toUserFacingText } from '../../../components/userFacingMessage'
 
 const TONE_CLASS: Record<RailShotView['statusTone'], string> = {
   neutral: '',
@@ -66,10 +59,11 @@ export type StudioShotRailProps = {
    * 返回 antd `MenuProps['items']`；返回空数组就不挂菜单。
    */
   onShotContextMenu?: (shotId: string) => MenuProps['items']
-  projectId?: string | null
-  chapterId?: string | null
-  /** 当前阶段（下载确认窗口里说明范围时用） */
-  phase: StudioPhaseKey
+  /**
+   * 批量下载已选：**实现放在外层**（`ChapterStudio`），
+   * 与阶段 5 的「打包下载整集全部成片」共用同一个确认窗口与同一条出口B ZIP 链路。
+   */
+  onDownloadSelected: () => void
 }
 
 export function StudioShotRail({
@@ -80,75 +74,14 @@ export function StudioShotRail({
   onSelectShot,
   onReorder,
   onShotContextMenu,
-  projectId,
-  chapterId,
-  phase,
+  onDownloadSelected,
 }: StudioShotRailProps) {
-  const [downloading, setDownloading] = useState(false)
-  const [confirmOpen, setConfirmOpen] = useState(false)
-  /**
-   * 后端预检结论（**权威**的"包含几条 / 排除几条"）。
-   *
-   * 本地那份 `summarizeRailSelection` 是即时反馈（勾选时立刻更新按钮与文案），
-   * 打开确认窗口时再读一次后端预检：真正会不会进包由后端按"镜头是否已有成片"判定，
-   * 页面不替它下结论。
-   */
-  const [plan, setPlan] = useState<VideoBundlePlan | null>(null)
-  const [planLoading, setPlanLoading] = useState(false)
   /** 拖拽排序的即时状态（只影响视觉反馈；真正的重排由 `onReorder` 负责） */
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const counts = countRailStates(shots)
   const selection = summarizeRailSelection(shots, selectedShotIds)
   const allSelected = isAllDeliverableSelected(shots, selectedShotIds)
-
-  /** 打开下载确认：先读一次预检（**不读字节**），把"包含几条 / 排除几条"摆在用户面前。 */
-  const openConfirm = () => {
-    if (!projectId) {
-      void message.warning('还没有读到项目信息，暂时不能打包下载')
-      return
-    }
-    if (!selection.canDownload) {
-      void message.warning(selection.message)
-      return
-    }
-    setPlan(null)
-    setConfirmOpen(true)
-    setPlanLoading(true)
-    void previewVideoBundle({
-      projectId,
-      scope: 'episode',
-      chapterId,
-      shotIds: selectedShotIds,
-    })
-      .then((value) => setPlan(value))
-      .catch((error) => void message.error(toUserFacingText(error, '读取可下载数量失败，请稍后重试')))
-      .finally(() => setPlanLoading(false))
-  }
-
-  const doDownload = async () => {
-    if (!projectId) return
-    setDownloading(true)
-    try {
-      const result = await downloadVideoBundleZip({
-        projectId,
-        scope: 'episode',
-        chapterId,
-        shotIds: selectedShotIds,
-      })
-      void message.success(
-        result.excluded > 0
-          ? `已打包下载 ${result.included} 条成片（另有 ${result.excluded} 个镜头没有可交付成片，未包含）：${result.filename}`
-          : `已打包下载 ${result.included} 条成片：${result.filename}`,
-      )
-      setConfirmOpen(false)
-    } catch (error) {
-      // 错误文案是产品自己的中文句子（404 的业务结论由后端给），这里原样透出
-      void message.error(toUserFacingText(error, '打包下载失败，请稍后重试'))
-    } finally {
-      setDownloading(false)
-    }
-  }
 
   return (
     <>
@@ -176,8 +109,7 @@ export function StudioShotRail({
           size="small"
           style={{ marginLeft: 'auto' }}
           disabled={!selection.canDownload}
-          loading={downloading}
-          onClick={openConfirm}
+          onClick={onDownloadSelected}
           data-testid="rail-bulk-download"
         >
           {selection.selected > 0 ? `批量下载已选（${selection.deliverable}）` : '批量下载已选'}
@@ -279,52 +211,6 @@ export function StudioShotRail({
         )}
       </div>
 
-      <Modal
-        title="确认批量下载"
-        open={confirmOpen}
-        onCancel={() => setConfirmOpen(false)}
-        onOk={() => void doDownload()}
-        okText={`下载已选（${plan?.included_count ?? selection.deliverable} 条）`}
-        cancelText="取消"
-        okButtonProps={{ disabled: !(plan ? plan.has_content : selection.canDownload) }}
-        confirmLoading={downloading}
-        width={520}
-        destroyOnHidden
-      >
-        <div className="space-y-2 text-sm">
-          <div>
-            {plan
-              ? `本次会打包 ${plan.included_count} 条成片${plan.excluded_count > 0 ? `；另有 ${plan.excluded_count} 个镜头没有可交付成片，未包含。` : '。'}`
-              : selection.message}
-          </div>
-          {planLoading ? <div className="text-xs text-gray-400">正在核对可交付数量…</div> : null}
-          {plan && plan.excluded.length > 0 ? (
-            <div className="rounded border border-solid border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
-              <div className="font-medium">被排除的镜头</div>
-              <ul className="mt-1 list-disc pl-4">
-                {plan.excluded.map((item) => (
-                  <li key={item.shot_id}>{`${item.shot_code} · ${item.shot_title}：${item.reason}`}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-          {!plan && !planLoading && selection.blockedShots.length > 0 ? (
-            <div className="rounded border border-solid border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
-              <div className="font-medium">被排除的镜头</div>
-              <ul className="mt-1 list-disc pl-4">
-                {selection.blockedShots.map((shot) => (
-                  <li key={shot.id}>{`${shot.code} · ${shot.title}：${blockedReasonFor(shot)}`}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-          <div className="text-xs leading-5 text-gray-500">
-            包里是每个镜头**生成成功并已落库**的那份成片（失败与半成品不会进包），
-            另外附一份「交付清单.txt」写明每个镜头对应的文件名与排除原因。本操作只读，不产生任何生成费用。
-          </div>
-          <div className="text-xs text-gray-400">{`当前阶段：${phase === 'deliver' ? '5 生成与交付' : phase === 'binding' ? '4 资产与声音检查' : '3 整集视频提示词'}`}</div>
-        </div>
-      </Modal>
     </>
   )
 }

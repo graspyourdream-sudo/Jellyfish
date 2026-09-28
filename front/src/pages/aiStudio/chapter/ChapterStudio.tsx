@@ -123,13 +123,19 @@ import { VideoPromptLlmPanel } from './components/VideoPromptLlmPanel'
 import { ShotBoundFilesPanel } from './components/ShotBoundFilesPanel'
 import { StudioPhasePanel, type StudioPhaseExtras } from './components/studio/StudioPhasePanel'
 import { StudioGenerateSettings } from './components/studio/StudioGenerateSettings'
+import { BundleDownloadConfirm, type BundleDownloadScope } from './components/studio/BundleDownloadConfirm'
 import { EpisodeVideoPromptBoard } from '../project/ProjectWorkbench/components/EpisodeVideoPromptBoard'
 import { StudioShotRail } from './components/studio/StudioShotRail'
 import { AssetCheckSummaryCard, DeliveryDownloadCard, DeliveryReadinessCard, DeliveryTasksCard } from './components/studio/StudioDeliveryPanels'
 import { ShotAssetChecklist } from './components/studio/ShotAssetChecklist'
 import { ASSET_TYPE_LABEL } from '../project/ProjectWorkbench/components/assetProduction'
 import { ratioFor, useAssetStrategies } from '../hooks/useAssetStrategies'
-import { railShotCode, type RailShotView } from './components/studio/shotRailModel'
+import {
+  blockedReasonFor,
+  railShotCode,
+  summarizeRailSelection,
+  type RailShotView,
+} from './components/studio/shotRailModel'
 import { StudioShell } from '../components/studio/StudioShell'
 import {
   buildStudioContinueLabel,
@@ -140,7 +146,11 @@ import {
   readStudioUrlState,
   type StudioPhaseKey,
 } from '../components/studio/studioPhase'
-import { downloadVideoBundleZip } from '../../../services/videoDeliveryApi'
+import {
+  downloadVideoBundleZip,
+  previewVideoBundle,
+  type VideoBundlePlan,
+} from '../../../services/videoDeliveryApi'
 import { useShotRequestPlan, REFERENCE_MODE_OPTIONS, referenceModeLabel, videoModelBusinessName } from './components/useShotRequestPlan'
 import { frameTypeLabel, resolveShotStatus, type ShotStatusText } from './components/shotStatusText'
 import { ExportScopeModal } from './components/ExportScopeModal'
@@ -2253,61 +2263,64 @@ const ChapterStudio: React.FC = () => {
   )
 
   /**
-   * 批量下载（**唯一实现**）：底部胶片条与阶段 5 的「下载所选成片」都调它。
+   * 打包下载的**唯一流程**：预检（读数量，不读字节）→ 确认窗口 → 真实 ZIP 下载。
    *
-   * 真正打包在后端（流式 ZIP，只含生成成功的成片 + 一份交付清单）；
-   * 前端不做"逐个打开下载窗口"那种假批量。
+   * 两个入口（底部胶片条的「批量下载已选」、阶段 5 的「打包下载整集全部成片（ZIP）」）
+   * 都走这里，差别只有范围：`selected` 传勾选的镜头，`episode` 不传（整集）。
+   * 交付形态已拍板：ZIP（逐个镜头成片文件 + 交付清单）就是**正式交付形态**。
    */
-  const downloadSelectedBundle = useCallback(async () => {
-    if (!projectId) {
-      await message.warning('还没有读到项目信息，暂时不能打包下载')
-      return
-    }
-    if (selectedShotIds.length === 0) {
-      await message.warning('还没有勾选镜头。请在底部分镜列表里勾选，或用「全选」一键勾上所有已有成片的镜头。')
-      return
-    }
+  const [bundleScope, setBundleScope] = useState<BundleDownloadScope | null>(null)
+  const [bundlePlan, setBundlePlan] = useState<VideoBundlePlan | null>(null)
+  const [bundlePlanLoading, setBundlePlanLoading] = useState(false)
+  const [bundleDownloading, setBundleDownloading] = useState(false)
+
+  const bundleShotIds = (scope: BundleDownloadScope) =>
+    scope === 'selected' ? selectedShotIds.filter(Boolean) : []
+
+  const openBundleDownload = useCallback(
+    (scope: BundleDownloadScope) => {
+      if (!projectId) {
+        void message.warning('还没有读到项目信息，暂时不能打包下载')
+        return
+      }
+      const shotIds = scope === 'selected' ? selectedShotIds.filter(Boolean) : []
+      if (scope === 'selected' && shotIds.length === 0) {
+        void message.warning('还没有勾选镜头。请在底部分镜列表里勾选，或用「全选」一键勾上所有已有成片的镜头。')
+        return
+      }
+      setBundleScope(scope)
+      setBundlePlan(null)
+      setBundlePlanLoading(true)
+      void previewVideoBundle({ projectId, scope: 'episode', chapterId, shotIds })
+        .then((value) => setBundlePlan(value))
+        .catch((error) => void message.error(toUserFacingText(error, '读取可下载数量失败，请稍后重试')))
+        .finally(() => setBundlePlanLoading(false))
+    },
+    [projectId, chapterId, selectedShotIds],
+  )
+
+  const confirmBundleDownload = useCallback(async () => {
+    if (!projectId || !bundleScope) return
+    setBundleDownloading(true)
     try {
       const result = await downloadVideoBundleZip({
         projectId,
         scope: 'episode',
         chapterId,
-        shotIds: selectedShotIds,
+        shotIds: bundleShotIds(bundleScope),
       })
       await message.success(
         result.excluded > 0
           ? `已打包下载 ${result.included} 条成片（另有 ${result.excluded} 个镜头没有可交付成片，未包含）：${result.filename}`
           : `已打包下载 ${result.included} 条成片：${result.filename}`,
       )
+      setBundleScope(null)
     } catch (error) {
       await message.error(toUserFacingText(error, '打包下载失败，请稍后重试'))
+    } finally {
+      setBundleDownloading(false)
     }
-  }, [projectId, chapterId, selectedShotIds])
-
-  /**
-   * 打包**整集全部**成片（不看勾选，按镜头顺序）。
-   *
-   * 与「下载所选」**同一份实现**（同一个 ZIP 接口、同一份实现），差别只在范围：
-   * 不传 `shot_ids` 就是整集。这是"导出整集成片"在本环境**真实可做**的那一半 ——
-   * 拼接成单个视频文件需要服务端的媒体合成流水线，本环境没有（也没允许引入新依赖），
-   * 因此按钮与提示都如实说明"包内是按镜号命名的逐个成片"。
-   */
-  const downloadWholeEpisodeBundle = useCallback(async () => {
-    if (!projectId) {
-      await message.warning('还没有读到项目信息，暂时不能打包下载')
-      return
-    }
-    try {
-      const result = await downloadVideoBundleZip({ projectId, scope: 'episode', chapterId })
-      await message.success(
-        result.excluded > 0
-          ? `已打包整集 ${result.included} 条成片（另有 ${result.excluded} 个镜头没有可交付成片，未包含）：${result.filename}`
-          : `已打包整集 ${result.included} 条成片：${result.filename}`,
-      )
-    } catch (error) {
-      await message.error(toUserFacingText(error, '打包下载失败，请稍后重试'))
-    }
-  }, [projectId, chapterId])
+  }, [projectId, chapterId, bundleScope, selectedShotIds])
 
   /** 交付清单 TXT（与「实际使用的文件」同一份数据；后端既有出口，纯读不花钱）。 */
   const downloadDeliveryManifest = useCallback(() => {
@@ -2418,6 +2431,16 @@ const ChapterStudio: React.FC = () => {
     resolveAssetUrl,
   ])
 
+  /**
+   * 预检读不到时的**本地兜底**口径（与胶片条用的是同一份 `summarizeRailSelection`）。
+   *
+   * 它只用于"后端预检还没回来"的瞬间：确认窗口一旦拿到后端结论就以**后端结论为准**。
+   */
+  const bundleSelection = useMemo(
+    () => summarizeRailSelection(railShots, selectedShotIds),
+    [railShots, selectedShotIds],
+  )
+
   /** 左栏「引用素材」：只读展示本镜实际关联到的资产（首/关键/尾帧是用途，不单独成条）。 */
   const studioMaterialItems = useMemo(() => {
     const items = shotAssetsOverview?.items ?? []
@@ -2495,8 +2518,8 @@ const ChapterStudio: React.FC = () => {
         <DeliveryDownloadCard
           shots={railShots}
           selectedCount={selectedShotIds.length}
-          onDownloadSelected={() => void downloadSelectedBundle()}
-          onDownloadWholeEpisode={() => void downloadWholeEpisodeBundle()}
+          onDownloadSelected={() => openBundleDownload('selected')}
+          onDownloadWholeEpisode={() => openBundleDownload('episode')}
           wholeEpisodeCount={railShots.filter((shot) => shot.hasDeliverableVideo).length}
           onDownloadManifest={() => downloadDeliveryManifest()}
           manifestDisabled={!projectId || railShots.length === 0}
@@ -2512,8 +2535,7 @@ const ChapterStudio: React.FC = () => {
     chapterId,
     selectedShotId,
     selectedShotIds,
-    downloadSelectedBundle,
-    downloadWholeEpisodeBundle,
+    openBundleDownload,
     downloadSingleShotVideo,
     downloadDeliveryManifest,
     goAssetPrepWithTab,
@@ -3001,16 +3023,32 @@ const ChapterStudio: React.FC = () => {
               onSelectedShotIdsChange={setSelectedShotIds}
               onSelectShot={handleSelectShot}
               onReorder={reorderWithinFilter}
+              onDownloadSelected={() => openBundleDownload('selected')}
               onShotContextMenu={(shotId) => {
                 const target = shots.find((item) => item.id === shotId)
                 return target ? shotContextMenu(target) : []
               }}
-              projectId={projectId}
-              chapterId={chapterId}
-              phase={studioStepKey}
             />
           </>
         }
+      />
+
+      {/* 打包下载确认：预检给出"包含几条 / 排除几条"，确认后才真正下载 */}
+      <BundleDownloadConfirm
+        open={bundleScope !== null}
+        scope={bundleScope ?? 'selected'}
+        plan={bundlePlan}
+        loading={bundlePlanLoading}
+        downloading={bundleDownloading}
+        fallbackIncluded={bundleSelection.deliverable}
+        fallbackMessage={bundleSelection.message}
+        fallbackExcluded={bundleSelection.blockedShots.map((shot: RailShotView) => ({
+          code: shot.code,
+          title: shot.title,
+          reason: blockedReasonFor(shot),
+        }))}
+        onCancel={() => setBundleScope(null)}
+        onConfirm={() => void confirmBundleDownload()}
       />
     </div>
   )
