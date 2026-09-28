@@ -37,7 +37,7 @@ export type ShotDetailUpdate = {
     video_prompt?: (string | null);
     video_prompt_source?: (string | null);
     /**
-     * 本镜**明确标记**无需声音（镜头级唯一的合法声明）。置 true 时服务端同时清掉迁移前留下的逐镜声音快照：本镜的生效结论就是没有声音，覆盖角色声音继承。
+     * 本镜的**无需声音**声明（镜头级唯一的合法声音字段）。true = 本镜明确无需声音，**覆盖**角色声音继承（本镜不带声音）；false = **未表态**，照常继承人物声音。置 true **只更新这个开关**，不会清空 ``audio_file_id``（迁移 009 之前留下的历史兼容快照属于用户既有数据）；开关关回去后，生效声音重新按「人物资产声音 → 历史兼容快照」的顺序解析。
      */
     audio_opt_out?: (boolean | null);
 };
