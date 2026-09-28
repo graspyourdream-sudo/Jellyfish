@@ -179,6 +179,16 @@ class ShotDetail(Base,TimestampMixin):
         server_default=text("0"),
         comment="本镜**明确标记**无需声音（用户授权新增）：与 audio_file_id 互斥，默认 false=未表态",
     )
+    voice_inherited_from: Mapped[str | None] = mapped_column(
+        String(96),
+        nullable=True,
+        default=None,
+        comment=(
+            "镜头声音的继承来源（<资产类型>:<资产ID>，如 character:char-1）；"
+            "角色声音的唯一事实来源是人物资产，这一列只是**只读快照**："
+            "由迁移 009 回填，接口层没有写入口（ShotDetailUpdate 里没有它）"
+        ),
+    )
     scene_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey("scenes.id", ondelete="SET NULL"),
