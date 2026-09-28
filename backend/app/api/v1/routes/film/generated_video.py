@@ -98,7 +98,7 @@ async def preview_video_generation_prompt(
 ) -> ApiResponse[VideoPromptPreviewResponse]:
     """预览视频生成的提示词与自动关联参考图。
 
-    同时给出**参考音频审计**：这条镜头绑定的声音会不会进请求、带的是哪个地址、没带是为什么。
+    同时给出**参考音频审计**：这条镜头使用的角色声音会不会进请求、带的是哪个地址、没带是为什么。
     术语澄清：这里说的永远是"**参考音频**"（作为输入），与"最终成片的音轨"是两件事。
     """
     prompt, images, pack = await preview_prompt_and_images(
@@ -165,7 +165,7 @@ async def create_video_generation_task(
         for item in option_warnings:
             logger.warning("视频生成入参已自动修正：%s", item)
 
-        # 断点④的声音侧：把镜头绑定的声音解析进生成入参。
+        # 断点④的声音侧：把本镜使用的角色声音解析进生成入参。
         # 供应商支持音频输入时适配器会真的发出去；不支持时字段仍留在入参里（可追溯）
         # 并附一条明确提示，不做静默丢弃。
         try:

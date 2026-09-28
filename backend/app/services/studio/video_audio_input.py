@@ -326,7 +326,7 @@ def classify_audio_input(  # pylint: disable=too-many-return-statements
                 STATE_INCLUDED_DATA_URL_INLINE,
                 ref=clean_url,
                 note=(
-                    f"已把镜头绑定的声音「{label_text}」作为参考音频（audio_urls，内嵌 base64）"
+                    f"已把本镜使用的角色声音「{label_text}」作为参考音频（audio_urls，内嵌 base64）"
                     f"加入本次生成请求：当前供应商按内嵌解析，不需要外网抓取。"
                 ),
             )
@@ -359,7 +359,7 @@ def classify_audio_input(  # pylint: disable=too-many-return-statements
             True,
             STATE_INCLUDED_PUBLIC,
             ref=clean_url,
-            note=f"已把镜头绑定的声音「{label_text}」作为参考音频（audio_urls）加入本次生成请求：{clean_url}",
+            note=f"已把本镜使用的角色声音「{label_text}」作为参考音频（audio_urls）加入本次生成请求：{clean_url}",
         )
 
     if lowered.startswith("asset://"):
@@ -368,7 +368,7 @@ def classify_audio_input(  # pylint: disable=too-many-return-statements
             STATE_INCLUDED_ASSET,
             ref=clean_url,
             note=(
-                f"已把镜头绑定的声音「{label_text}」作为参考音频（audio_urls，供应商私有素材通道 "
+                f"已把本镜使用的角色声音「{label_text}」作为参考音频（audio_urls，供应商私有素材通道 "
                 f"asset://）加入本次生成请求：{clean_url}"
             ),
         )
@@ -652,7 +652,7 @@ async def attach_shot_audio_to_video_input(
     provider: str,
     model: str | None,
 ) -> list[str]:
-    """把该镜头绑定的声音接进 ``input_payload``（``audio_urls``），返回给用户看的提示列表。
+    """把该镜使用的角色声音接进 ``input_payload``（``audio_urls``），返回给用户看的提示列表。
 
     没有任何绑定声音时返回空列表（不制造噪音）；绑定了但不可携带时返回**明确原因**
     （来源就是 :func:`classify_audio_input` 的结论，不在这里另写判断）。

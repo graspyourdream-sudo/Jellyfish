@@ -672,7 +672,7 @@ async def _submit_video_once(
     if body.generate_audio is not None:
         input_payload["generate_audio"] = bool(body.generate_audio)
 
-    # 断点④的声音侧：镜头绑定的声音接进入参（供应商支持音频输入时才会真的发出）
+    # 断点④的声音侧：本镜使用的角色声音接进入参（供应商支持音频输入时才会真的发出）
     from app.services.studio.video_audio_input import attach_shot_audio_to_video_input
 
     try:
