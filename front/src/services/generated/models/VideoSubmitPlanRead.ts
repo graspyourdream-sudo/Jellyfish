@@ -73,6 +73,26 @@ export type VideoSubmitPlanRead = {
      */
     model_pinned?: boolean;
     /**
+     * 该模型允许的画幅（来自供应商能力表）
+     */
+    ratio_options?: Array<string>;
+    /**
+     * 可选的视频模型名（模型表里 category=video 的全部模型）
+     */
+    model_options?: Array<string>;
+    /**
+     * 该模型允许的分辨率档位（来自供应商能力表）
+     */
+    resolution_options?: Array<string>;
+    /**
+     * 该模型允许的时长秒数（能力表的上下限 ∩ 业务白名单）
+     */
+    duration_options?: Array<number>;
+    /**
+     * 四项设置的**中文结论**：哪一项被采纳、哪一项因为不在能力表内没有被采纳；页面直接展示它，不展示能力表原值
+     */
+    settings_notes?: Array<string>;
+    /**
      * provider 是否在既有的 openai/volcengine/apimart 白名单内
      */
     provider_supported?: boolean;

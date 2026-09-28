@@ -29,6 +29,14 @@ export type VideoSubmitRequest = {
      */
     generate_audio?: (boolean | null);
     /**
+     * **模型档位**（页面可选）。空串 = 沿用固定策略的默认视频模型。非空时必须命中模型表里 category=video 的模型，否则**不采纳**并在 warnings 里如实说明（不静默改成别的模型）
+     */
+    model?: string;
+    /**
+     * **分辨率档位**（页面可选）。空串 = 用该模型的默认档。非空但不在该模型能力表内时**不采纳**并如实回报（不静默换成贵的档位）
+     */
+    resolution?: string;
+    /**
      * 同步等待的墙钟上限
      */
     timeout_seconds?: number;

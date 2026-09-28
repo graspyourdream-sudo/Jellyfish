@@ -31513,6 +31513,46 @@
             "description": "是否命中固定模型策略（seedance-2.0-mini）",
             "default": true
           },
+          "ratio_options": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Ratio Options",
+            "description": "该模型允许的画幅（来自供应商能力表）"
+          },
+          "model_options": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Model Options",
+            "description": "可选的视频模型名（模型表里 category=video 的全部模型）"
+          },
+          "resolution_options": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Resolution Options",
+            "description": "该模型允许的分辨率档位（来自供应商能力表）"
+          },
+          "duration_options": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Duration Options",
+            "description": "该模型允许的时长秒数（能力表的上下限 ∩ 业务白名单）"
+          },
+          "settings_notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Settings Notes",
+            "description": "四项设置的**中文结论**：哪一项被采纳、哪一项因为不在能力表内没有被采纳；页面直接展示它，不展示能力表原值"
+          },
           "provider_supported": {
             "type": "boolean",
             "title": "Provider Supported",
@@ -31601,6 +31641,18 @@
             ],
             "title": "Generate Audio",
             "description": "是否让模型自带音频（供应商开关，seedance 默认 true）。设为 false 时模型不会自己生成音频，便于验证参考音频是否被采用。"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "**模型档位**（页面可选）。空串 = 沿用固定策略的默认视频模型。非空时必须命中模型表里 category=video 的模型，否则**不采纳**并在 warnings 里如实说明（不静默改成别的模型）",
+            "default": ""
+          },
+          "resolution": {
+            "type": "string",
+            "title": "Resolution",
+            "description": "**分辨率档位**（页面可选）。空串 = 用该模型的默认档。非空但不在该模型能力表内时**不采纳**并如实回报（不静默换成贵的档位）",
+            "default": ""
           }
         },
         "type": "object",
@@ -31759,6 +31811,18 @@
             ],
             "title": "Generate Audio",
             "description": "是否让模型自带音频（供应商开关，seedance 默认 true）。设为 false 时模型不会自己生成音频，便于验证参考音频是否被采用。"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "**模型档位**（页面可选）。空串 = 沿用固定策略的默认视频模型。非空时必须命中模型表里 category=video 的模型，否则**不采纳**并在 warnings 里如实说明（不静默改成别的模型）",
+            "default": ""
+          },
+          "resolution": {
+            "type": "string",
+            "title": "Resolution",
+            "description": "**分辨率档位**（页面可选）。空串 = 用该模型的默认档。非空但不在该模型能力表内时**不采纳**并如实回报（不静默换成贵的档位）",
+            "default": ""
           },
           "timeout_seconds": {
             "type": "number",
