@@ -68,6 +68,8 @@ import { AssetDetailDrawer } from './AssetDetailDrawer.tsx'
 import { PendingReviewDrawer } from './PendingReviewDrawer.tsx'
 import { ScriptTextPanel, type ScriptShotRef } from './ScriptTextPanel.tsx'
 import { TechnicalDetailCollapse } from './TechnicalDetailCollapse.tsx'
+import { StickyActionBar } from './StickyActionBar.tsx'
+import { resolveStickyActionBarCounts } from './stickyActionBarState.ts'
 
 
 export type AssetWorkbenchProps = {
@@ -106,6 +108,18 @@ export type AssetWorkbenchProps = {
    * 以及「待处理 N 项」抽屉里当前清单找不到对应资产时的兜底。
    */
   onOpenLegacyExtractConfirm?: () => void
+  /**
+   * 步骤主按钮：文案 / 禁用理由 / 点击动作**全部**由外层（`ProjectWorkbench/index.tsx`）
+   * 按同一份进度判定给出，这里只负责渲染。
+   *
+   * 为什么必须从外面给：底部固定条上的主按钮与顶部主按钮、步骤摘要条上的主按钮
+   * 是同**一个**动作。由本组件自己再算一次，就会出现"一个说继续、一个说已在本步"
+   * 这种同屏自相矛盾（历史缺陷），所以文案与动作一律不外传第二份。
+   */
+  continueLabel: string
+  continueDisabledReason?: string
+  continueLoading?: boolean
+  onContinue: () => void
 }
 
 export function AssetWorkbench(props: AssetWorkbenchProps) {
@@ -119,6 +133,10 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
     onTabChange,
     onOpenAssetEditor,
     onOpenLegacyExtractConfirm,
+    continueLabel,
+    continueDisabledReason,
+    continueLoading,
+    onContinue,
   } = props
 
   const [contractData, setContractData] = useState<AssetWorkbenchResponse | null>(null)
@@ -225,6 +243,24 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
     [data?.analysis, itemLike, runBusy, selectedKeys],
   )
   const analysisAction = useMemo(() => deriveAnalysisAction(data?.analysis ?? null), [data?.analysis])
+
+  /**
+   * 底部固定条（设计包 §6）要显示的四个数字：**全部来自真实数据源**，一个都不估算。
+   *
+   *  - 就绪度 / 待补资料：由 `stickyActionBarState` 在**这一份契约清单**上现算
+   *    （就绪判定复用 `assetPrepStatus` 的同一份口径，与结果区完全一致）；
+   *  - 生成失败：本轮任务进度（就是结果区那张进度卡上的同一个数字）；
+   *  - 待处理：待处理清单的长度。
+   */
+  const actionBarCounts = useMemo(
+    () =>
+      resolveStickyActionBarCounts({
+        items: items as WorkbenchItemLike[],
+        failed: progress.failed,
+        pendingReview: pendingReview.length,
+      }),
+    [items, pendingReview.length, progress.failed],
+  )
 
   /** 页签过滤：同一项资产只在这一处出现。 */
   const tabItems = useMemo(() => itemsForTab(items, tab), [items, tab])
@@ -625,6 +661,21 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
         </div>
         </div>
       </div>
+
+      {/*
+        底部固定操作条（设计包 §6）：**在**结果区那一段（上面那个 dock）**之下**，
+        是这一屏唯一固定不动的操作区。
+        高度固定 56px，作为 flex 列里的固定项参与布局 —— 它挤的是卡片网格的可用高度，
+        不会盖在结果区面板上（结果区展开态自身局部滚动，位置与高度都不受影响）。
+      */}
+      <StickyActionBar
+        counts={actionBarCounts}
+        onOpenPendingReview={() => setPendingOpen(true)}
+        continueLabel={continueLabel}
+        continueDisabledReason={continueDisabledReason}
+        continueLoading={continueLoading}
+        onContinue={onContinue}
+      />
 
       <AssetDetailDrawer
         open={Boolean(detailItem)}

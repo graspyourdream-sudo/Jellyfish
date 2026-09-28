@@ -498,6 +498,12 @@ const ProjectWorkbench: React.FC = () => {
               next.set(PANEL_PARAM, LEGACY_EXTRACT_PANEL)
             })
           }
+          /* 底部固定条上的步骤主按钮：与顶部主按钮、步骤摘要条用**同一份**判定
+             （同样的文案 / 禁用理由 / 点击动作），不在这里另立第二套"下一步"口径。 */
+          continueLabel={continueLabel}
+          continueDisabledReason={continueDisabledReason}
+          continueLoading={signalsLoading}
+          onContinue={handleContinue}
         />
       )
     }
