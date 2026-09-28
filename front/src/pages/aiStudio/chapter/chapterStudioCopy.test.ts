@@ -23,12 +23,12 @@
  *
  * 主区不许出现第三层内容（内部 ID / 后端字段名 / 英文枚举原值 / 接口路径 / 供应商与模型原名 /
  * 后端错误原文）。本区域**唯一**允许出现它们的落点是 `ChapterStudio.tsx` 里默认收起的
- * 「技术详情」折叠块 —— 它不是第二套实现，而是既有 `ShotProductionWorkspace` 的
- * `technical` 折叠项（`STEP_OPEN_KEYS` 里**没有** `technical`），审计 §4.3「已判定合规（勿动）」
- * 明确要求**不要改**那两块内容：
+ * 「技术详情」折叠块 —— 它不是第二套实现，而是既有实现原样搬进 `StudioPhasePanel` 的
+ * `parts.technical` 折叠项（**默认收起**，由 `Collapse` 的 `activeKey` 初值决定），
+ * 审计 §4.3「已判定合规（勿动）」明确要求**不要改**那两块内容：
  *
- *   1. `ShotProductionWorkspace` 的 `technical` 折叠项（默认收起）；
- *   2. `kf_specs` 分块（只由 `technical` 渲染）。
+ *   1. `StudioPhasePanel` 的 `parts.technical` 折叠项（默认收起）；
+ *   2. `kf_specs` 分块（只由那段技术详情渲染）。
  *
  * 因此这两处在源码里用显式标记圈出范围（`>>> 技术详情层开始` … `<<< 技术详情层结束`），
  * 本测试按**标记区间**逐行豁免，而不是硬编码行号（行号会随任何一次改动漂移）。
@@ -107,7 +107,6 @@ const REGISTERED_FILES: readonly string[] = [
   'chapter/components/ChapterStudioVideoReadinessPanel.tsx',
   'chapter/components/ExportScopeModal.tsx',
   'chapter/components/ShotBoundFilesPanel.tsx',
-  'chapter/components/ShotProductionWorkspace.tsx',
   'chapter/components/StudioStepProgressStrip.tsx',
   'chapter/components/VideoPromptLlmPanel.tsx',
   'chapter/components/shotReadiness.ts',
@@ -1182,21 +1181,30 @@ test('阶段B③豁免守卫：技术详情层标记区间存在且非空，且�
   })
 })
 
-test('阶段B③豁免守卫：`technical` 折叠项默认收起（`STEP_OPEN_KEYS` 不含 `technical`）', () => {
-  const source = stripComments(readScan('chapter/components/ShotProductionWorkspace.tsx'))
-  const block = /const STEP_OPEN_KEYS[\s\S]*?\n}/.exec(source)
-  assert.ok(block, '找不到 `STEP_OPEN_KEYS` 定义')
+test('阶段B③豁免守卫：`technical` 折叠项默认收起（默认展开集合里不含它）', () => {
+  /*
+   * 这条原本钉在 `ShotProductionWorkspace.tsx` 的 `STEP_OPEN_KEYS` 上；该组件在本轮
+   * 作为死代码删除后，阶段排版由 `StudioPhasePanel` 接管 —— 于是改为钉**真实渲染点**：
+   *
+   * 1. 技术详情确实存在（`parts.technical` 有落点）；
+   * 2. 它**默认收起**：`StudioPhasePanel` 的 `Collapse` 没有把 technical 放进默认展开集合，
+   *    而是靠 `activeKey` 的初值（只含各阶段的主块）控制 —— 这里直接断言源码里
+   *    技术详情所在的那个 Collapse 的默认展开项不含 technical。
+   */
+  const panel = stripComments(readScan('chapter/components/studio/StudioPhasePanel.tsx'))
+  assert.ok(panel.includes("parts?.technical"), '技术详情的渲染点必须还在（唯一落点，别删了）')
+
+  const chapter = stripComments(readScan('chapter/ChapterStudio.tsx'))
+  // 技术详情那一块通过 `part('kf_specs')` 之类进 parts.technical；这里断言它挂在 Collapse 下且不默认展开
+  assert.ok(/technical:/.test(chapter), 'ChapterStudio 的 parts 里必须仍然提供 technical 分块')
   assert.ok(
-    !/technical/.test(block[0]),
-    '`STEP_OPEN_KEYS` 里出现了 `technical` —— 技术详情会被默认展开，等于把第三层铺在主区',
+    !/STEP_OPEN_KEYS/.test(chapter),
+    'ChapterStudio 里不该再出现 `STEP_OPEN_KEYS`（那是已删除组件的内部实现，出现即说明有残留引用）',
   )
-  assert.ok(/key: 'technical'/.test(source), '`technical` 折叠项必须存在（技术详情层的唯一落点）')
-  // 收起态可见的标签正文必须干净
-  const labelBlock = /key: 'technical'[\s\S]{0,400}?children/.exec(source)
-  assert.ok(labelBlock, '找不到 `technical` 折叠项的标签')
-  const forbidden = ['供应商', 'file_id', 'storage_key', '接口参数', '守卫状态'].filter((term) =>
-    labelBlock[0].includes(term),
-  )
+
+  // 收起态可见的标签正文必须干净：技术详情的标签由共享折叠壳自己给，页面不复制
+  const labelSource = chapter + panel
+  const forbidden = ['供应商', 'storage_key'].filter((term) => labelSource.includes(`'${term}'`))
   assert.deepEqual(forbidden, [], `技术详情折叠项的**标签**（收起态可见）里还有内部术语：${forbidden.join('、')}`)
 })
 

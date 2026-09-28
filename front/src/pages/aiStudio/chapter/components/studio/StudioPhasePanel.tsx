@@ -17,6 +17,8 @@
 
 import type { ReactNode } from 'react'
 
+import { TechnicalDetailSection } from '../../../project/ProjectWorkbench/components/workbench/TechnicalDetailCollapse'
+
 import type { StudioPhaseKey } from '../../../components/studio/studioPhase'
 import { getStudioPhase } from '../../../components/studio/studioPhase'
 
@@ -234,7 +236,24 @@ export function StudioPhasePanel({
         </article>
       )}
       {extras?.deliveryDownload ?? deliveryDownload}
-      {technical}
+      {/*
+        技术详情：**必须走 `parts.technical` 并用全仓唯一的折叠壳包住**。
+
+        两个坑都在这里踩过，所以写清楚：
+        1. 曾经写成裸的 `{technical}`（一个没人传的独立 prop）→ 技术详情被静默丢掉；
+        2. 修好后如果直接渲染，内部标识 / 模型名 / 后端原文就会**默认摊在主区**
+           （原来是 `ShotProductionWorkspace` 的 Collapse 在负责"默认收起"，那个组件删掉后
+           这层包装没了）。
+        因此现在显式用 `TechnicalDetailSection`（全仓唯一的「技术详情」折叠壳，
+        原生 `<details>`，**默认收起**）包住，标题文案由共享壳自己给、页面不复制。
+      */}
+      {parts?.technical ? (
+        <TechnicalDetailSection hint="这里放的是内部标识与调用参数，排查问题时才需要看。">
+          {parts.technical}
+        </TechnicalDetailSection>
+      ) : technical ? (
+        <TechnicalDetailSection>{technical}</TechnicalDetailSection>
+      ) : null}
     </div>
   )
 }
