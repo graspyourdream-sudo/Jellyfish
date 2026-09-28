@@ -66,6 +66,10 @@ import { getProjectSignalAssetTypeLabel } from '../hooks/useProjectStepSignals'
 import { assetPrepInputFromReadiness, resolveAssetPrepStatus } from '../assetPrepStatus'
 // 阶段 B ①：技术详情折叠壳全仓唯一实现（三处自建折叠区已合并到它）
 import { TechnicalDetailSection } from './workbench/TechnicalDetailCollapse'
+// 设计包 §7：「结果区」= 主区底部可折叠 sticky 面板，是**唯一**放生成结果的地方。
+// 折叠状态机与摘要文案在 resultAreaState.ts（含单测）；本文件只负责把真实任务数据喂给它。
+import { ResultArea } from './workbench/ResultArea'
+import { snapshotFromProgress } from './workbench/resultAreaState.ts'
 import {
   ASSET_TYPE_LABEL,
   ASSET_TYPE_ORDER,
@@ -503,6 +507,18 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
   const tabAssets = useMemo(() => productionAssets.filter((asset) => asset.type === tab), [productionAssets, tab])
   const scope = useMemo(() => summarizeSelection(productionAssets, selectedKeys), [productionAssets, selectedKeys])
   const progress = useMemo(() => summarizeTaskProgress(tasks), [tasks])
+
+  /* ------------------------------------------------------------ 结果区（§7） */
+
+  /** 结果区读的摘要：**只搬运** `progress` 的数字，不另算一套（否则两个地方会对不上）。 */
+  const resultSnapshot = useMemo(() => snapshotFromProgress(progress), [progress])
+  /**
+   * 新一轮信号：每次用户**主动**发起一轮（提交生成 / 读取已有出图任务）就 +1。
+   *
+   * 为什么要单独一个信号：任务状态自己更新（轮询回来）时不应该把用户手动收起的面板弹开，
+   * 但"用户点了生成"是他自己的动作，这时候展开才符合预期（设计包 §7 第 2/3 行）。
+   */
+  const [resultRoundSignal, setResultRoundSignal] = useState(0)
   /**
    * 「已就绪」的资产数：判定口径与外层步骤摘要**完全一致**
    * （`resolveAssetPrepStatus`：有提示词 + 有图片 + 已定版），
@@ -882,6 +898,9 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
       return
     }
     setReadingTask(true)
+    // 「读取已有出图结果」也是用户主动发起的一轮：结果区据此展开（设计包 §7 第 3 行）。
+    // 注意：读取是**只读查询**，不计费、不产生新出图。
+    setResultRoundSignal((prev) => prev + 1)
     try {
       const query = await queryAssetImageTask(taskId)
       const patch = resolveTaskQueryPatch(query)
@@ -942,6 +961,8 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
       stopRef.current = false
       roundRef.current += 1
       const round = roundRef.current
+      // 新一轮是用户的明确动作：结果区据此清掉"手动收起"并展开（设计包 §7 第 2 行）
+      setResultRoundSignal((prev) => prev + 1)
       setRunning(true)
       // 先把整轮排进队列：进度里的「排队中」是真实状态，不是装饰
       const queued: ProductionTask[] = targets.map((asset, index) => ({
@@ -2272,9 +2293,14 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
       />
       ) : null}
 
+      {/*
+        生成设置 / 选择工具条 / 批量按钮：**只属于非嵌入模式的旧页面**。
+        嵌进资产工作台时，唯一批量操作区是 `WorkbenchCommandBar`、资产只出现在卡片网格里
+        （设计包 §6；用户点名的"重复展示"问题）。整块不渲染，也就不会在工作台里
+        留下一个空的边框盒子。
+      */}
+      {!embedded ? (
       <div className="space-y-3 rounded-lg border border-slate-200 p-3">
-        {!embedded ? (
-          <>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Space size={4} wrap>
             <Button
@@ -2429,41 +2455,8 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
             刷新资产清单
           </Button>
         </Space>
-
-          </>
-        ) : null}
-
-        {/* 进度：数字全部来自真实任务状态 */}
-        {tasks.length > 0 ? (
-          <div className="space-y-1">
-            <Progress percent={progress.percent} size="small" status={progress.hasFailure ? 'exception' : undefined} />
-            <Space size={6} wrap>
-              {describeProgressLines(progress).map((line) => (
-                <Tag key={line.label} bordered={false} color={line.tone === 'default' ? undefined : line.tone}>
-                  {`${line.label} ${line.value}`}
-                </Tag>
-              ))}
-            </Space>
-            {progress.hasFailure ? (
-              <Alert
-                type="error"
-                showIcon
-                message={
-                  <span className="text-xs">{`有 ${progress.failed} 项生成失败，可以在结果卡片上「重试这一项」或「重新生成」`}</span>
-                }
-                description={
-                  <ul className="list-disc pl-5 text-[11px]">
-                    {/* 模式 6：每条原因都先过三级管道（去 ID → 去内部术语 → 业务化改写 + 中文兜底） */}
-                    {progress.failureReasons.map((reason, index) => (
-                      <li key={`${index}-${reason}`}>{toUserFacingText(reason, '这一项没有生成成功')}</li>
-                    ))}
-                  </ul>
-                }
-              />
-            ) : null}
-          </div>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
 
       {/*
         刷新后恢复的说明（缺陷 D5）：说白了是"只读恢复"——
@@ -2492,93 +2485,141 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
       ) : null}
 
       {/*
-        读取已有出图任务（适配缺口修复）。
-        出图提交不写库、任务号只存在浏览器内存 / localStorage，而 localStorage 按 origin
-        隔离：换端口 / 换会话后就再也找不到那条任务。这里给一个**只读**入口把结果找回来，
-        命中后掉进下面同一套结果卡片，采纳 / 设为定版完全复用既有逻辑。
-      */}
-      <div className="rounded border border-slate-200 bg-slate-50/60 p-2" data-testid="read-existing-task">
-        <div className="mb-1 text-xs text-slate-600">
-          {OUTPUT_MODE_STATEMENT}
-          {' '}
-          读取已有出图任务：把**之前**某次出图的结果找回来。只读取结果，不会重新出图、不产生费用。
-        </div>
-        <Space wrap size="small">
-          <Select
-            size="small"
-            style={{ minWidth: 200 }}
-            placeholder="这条结果属于哪个资产"
-            value={readAssetKey || undefined}
-            onChange={(value) => setReadAssetKey(String(value))}
-            options={productionAssets.map((asset) => ({
-              value: asset.key,
-              label: `${asset.name}（${asset.type}）`,
-            }))}
-          />
-          <Input
-            size="small"
-            style={{ width: 340 }}
-            placeholder="出图结果编号"
-            value={readTaskId}
-            onChange={(event) => setReadTaskId(event.target.value)}
-            onPressEnter={() => void readExistingTask()}
-          />
-          <Button size="small" icon={<ReloadOutlined />} loading={readingTask} onClick={() => void readExistingTask()}>
-            读取结果
-          </Button>
-        </Space>
-      </div>
+        结果区（设计包 §7）：主区底部**可折叠 sticky** 面板，是全页**唯一**放生成结果的地方。
+        - 收起态：一行摘要（本轮数量 + 已完成 / 生成中 / 失败 + 未读标记）；
+        - 展开态：任务进度 + 只读的「读取已有出图任务」入口 + 结果卡片
+          （采纳 / 设为定版 / 重新生成 / 重试）；面板自身局部滚动（内容最高 172），
+          **不挤压卡片网格与固定操作区**。
 
-      {/* 结果卡片 */}
-      {tasks.length > 0 ? (
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-medium text-slate-900">
-              {`生成结果（${tasks.length} 张${
-                tasks.filter((task) => task.status === 'stopped').length > 0
-                  ? `，其中已停止 ${tasks.filter((task) => task.status === 'stopped').length} 张`
-                  : ''
-              }）`}
-            </span>
-            {tasks.length > visibleCards.length ? (
-              <Button size="small" type="link" onClick={() => setShowAllCards((prev) => !prev)}>
-                {showAllCards ? '只看最近的结果' : `查看全部 ${tasks.length} 张结果`}
+        下面的卡片与动作仍然全部来自本文件既有那套出图机制：本组件不新建第二套提交或轮询，
+        也不新写第二份进度算法（数字仍来自 `summarizeTaskProgress(tasks)`）。
+      */}
+      <ResultArea
+        snapshot={resultSnapshot}
+        busy={busyNow}
+        roundSignal={resultRoundSignal}
+        readEntry={
+          /*
+            读取已有出图任务（适配缺口修复）。
+            出图提交不写库、任务号只存在浏览器内存 / localStorage，而 localStorage 按 origin
+            隔离：换端口 / 换会话后就再也找不到那条任务。这里给一个**只读**入口把结果找回来，
+            命中后掉进下面同一套结果卡片，采纳 / 设为定版完全复用既有逻辑。
+          */
+          <div className="rounded border border-slate-200 bg-slate-50/60 p-2" data-testid="read-existing-task">
+            <div className="mb-1 text-xs text-slate-600">
+              {OUTPUT_MODE_STATEMENT}
+              {' '}
+              读取已有出图任务：把**之前**某次出图的结果找回来。只读取结果，不会重新出图、不产生费用。
+            </div>
+            <Space wrap size="small">
+              <Select
+                size="small"
+                style={{ minWidth: 200 }}
+                placeholder="这条结果属于哪个资产"
+                value={readAssetKey || undefined}
+                onChange={(value) => setReadAssetKey(String(value))}
+                options={productionAssets.map((asset) => ({
+                  value: asset.key,
+                  label: `${asset.name}（${asset.type}）`,
+                }))}
+              />
+              <Input
+                size="small"
+                style={{ width: 340 }}
+                placeholder="出图结果编号"
+                value={readTaskId}
+                onChange={(event) => setReadTaskId(event.target.value)}
+                onPressEnter={() => void readExistingTask()}
+              />
+              <Button size="small" icon={<ReloadOutlined />} loading={readingTask} onClick={() => void readExistingTask()}>
+                读取结果
               </Button>
+            </Space>
+          </div>
+        }
+      >
+        {/* 任务进度：数字全部来自真实任务状态（与顶部条读的是同一份 progress） */}
+        {tasks.length > 0 ? (
+          <div className="space-y-1 pb-2">
+            <Progress percent={progress.percent} size="small" status={progress.hasFailure ? 'exception' : undefined} />
+            <Space size={6} wrap>
+              {describeProgressLines(progress).map((line) => (
+                <Tag key={line.label} bordered={false} color={line.tone === 'default' ? undefined : line.tone}>
+                  {`${line.label} ${line.value}`}
+                </Tag>
+              ))}
+            </Space>
+            {progress.hasFailure ? (
+              <Alert
+                type="error"
+                showIcon
+                message={
+                  <span className="text-xs">{`有 ${progress.failed} 项生成失败，可以在结果卡片上「重试这一项」或「重新生成」`}</span>
+                }
+                description={
+                  <ul className="list-disc pl-5 text-[11px]">
+                    {/* 模式 6：每条原因都先过三级管道（去 ID → 去内部术语 → 业务化改写 + 中文兜底） */}
+                    {progress.failureReasons.map((reason, index) => (
+                      <li key={`${index}-${reason}`}>{toUserFacingText(reason, '这一项没有生成成功')}</li>
+                    ))}
+                  </ul>
+                }
+              />
             ) : null}
           </div>
-          {/* 结果卡片网格：嵌入时按参考项目的 auto-fill 260px 口径（一屏能看更多张） */}
-          <div className={resultGridClassName ?? 'grid grid-cols-1 gap-2 lg:grid-cols-2'}>
-            {visibleCards.map((task) => (
-              <AssetResultCard
-                key={task.key}
-                task={task}
-                asset={assetByKey.get(task.assetKey)}
-                busy={busyKeys.includes(task.key)}
-                onViewDetail={setDetailTask}
-                onEditPrompt={(item) => {
-                  const asset = assetByKey.get(item.assetKey)
-                  if (asset) void openPromptEditor(asset)
-                }}
-                onRegenerate={(item) => {
-                  const asset = assetByKey.get(item.assetKey)
-                  if (asset) void regenerateOne(asset)
-                }}
-                onRegenerateWithExistingReference={(item) => {
-                  const asset = assetByKey.get(item.assetKey)
-                  if (asset) void regenerateWithExistingReference(asset)
-                }}
-                canUseExistingReference={canRegenerateWithExistingReference(assetByKey.get(task.assetKey))}
-                reworkAvailable={reworkAvailability.available}
-                reworkUnavailableHint={reworkHintFor(task.assetType)}
-                onRetry={(item) => void retryTask(item)}
-                onAdopt={(item) => void adoptTask(item)}
-                onSetPrimary={(item) => void setPrimary(item)}
-                onRefresh={(item) => void refreshTask(item)}
-              />
-            ))}
+        ) : null}
+
+        {/* 结果卡片 */}
+        {tasks.length > 0 ? (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-slate-900">
+                {`生成结果（${tasks.length} 张${
+                  tasks.filter((task) => task.status === 'stopped').length > 0
+                    ? `，其中已停止 ${tasks.filter((task) => task.status === 'stopped').length} 张`
+                    : ''
+                }）`}
+              </span>
+              {tasks.length > visibleCards.length ? (
+                <Button size="small" type="link" onClick={() => setShowAllCards((prev) => !prev)}>
+                  {showAllCards ? '只看最近的结果' : `查看全部 ${tasks.length} 张结果`}
+                </Button>
+              ) : null}
+            </div>
+            {/* 结果卡片网格：嵌入时按参考项目的 auto-fill 260px 口径（一屏能看更多张） */}
+            <div className={resultGridClassName ?? 'grid grid-cols-1 gap-2 lg:grid-cols-2'}>
+              {visibleCards.map((task) => (
+                <AssetResultCard
+                  key={task.key}
+                  task={task}
+                  asset={assetByKey.get(task.assetKey)}
+                  busy={busyKeys.includes(task.key)}
+                  onViewDetail={setDetailTask}
+                  onEditPrompt={(item) => {
+                    const asset = assetByKey.get(item.assetKey)
+                    if (asset) void openPromptEditor(asset)
+                  }}
+                  onRegenerate={(item) => {
+                    const asset = assetByKey.get(item.assetKey)
+                    if (asset) void regenerateOne(asset)
+                  }}
+                  onRegenerateWithExistingReference={(item) => {
+                    const asset = assetByKey.get(item.assetKey)
+                    if (asset) void regenerateWithExistingReference(asset)
+                  }}
+                  canUseExistingReference={canRegenerateWithExistingReference(assetByKey.get(task.assetKey))}
+                  reworkAvailable={reworkAvailability.available}
+                  reworkUnavailableHint={reworkHintFor(task.assetType)}
+                  onRetry={(item) => void retryTask(item)}
+                  onAdopt={(item) => void adoptTask(item)}
+                  onSetPrimary={(item) => void setPrimary(item)}
+                  onRefresh={(item) => void refreshTask(item)}
+                />
+              ))}
+            </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
+      </ResultArea>
 
       {/*
         资产清单表 / 生成依据面板 / 大模型批量提示词面板：

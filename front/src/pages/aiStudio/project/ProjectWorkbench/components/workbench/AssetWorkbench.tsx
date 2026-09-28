@@ -22,7 +22,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Modal, Spin, Tag, message } from 'antd'
+import { Alert, Button, Modal, Spin, message } from 'antd'
 
 import type { ProjectSignalAsset, ProjectStepSignalDetail } from '../../hooks/useProjectStepSignals'
 import { useGenerationGate } from '../../../../components/generationGate'
@@ -30,7 +30,7 @@ import { GenerationGateBanner } from '../../../../components/GenerationGateBanne
 import { AssetProductionArea, type AssetProductionAreaHandle } from '../AssetProductionArea'
 import { AssetImagePromptLlmPanel } from '../AssetImagePromptLlmPanel'
 import { AssetProfileEditEntry } from '../AssetProfileEditEntry'
-import { taskProgressLines, emptyTaskProgress, type TaskProgressSummary } from './taskProgress.ts'
+import { emptyTaskProgress, type TaskProgressSummary } from './taskProgress.ts'
 import { DEFAULT_ASPECT_RATIO } from '../assetProduction.ts'
 
 import {
@@ -520,6 +520,13 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
           />
         </div>
 
+        {/*
+          主区 = 上下两段（设计包 §6「一屏一个工作台」）：
+            中段：卡片网格在剩余高度里**局部滚动**；
+            底段：结果区（可折叠，设计包 §7）固定在主区底部。
+          不做整页长滚动，结果面板也不能把卡片网格长期挤走。
+        */}
+        <div className="flex min-h-0 flex-1 flex-col">
         <div className="min-h-0 flex-1 overflow-auto px-3 py-2">
           <Spin spinning={loading || reloading}>
             <div className="space-y-3">
@@ -536,80 +543,6 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
                 renderProfileEditor={renderProfileEditor}
               />
 
-              {/* 结果区：既有出图机制（进度、结果卡片、采纳、定版、重新生成都在它里面） */}
-              <div className="border-t border-slate-200 pt-3">
-                <div className="mb-1 flex flex-wrap items-center gap-2">
-                  <span className="text-sm font-medium text-slate-900">生成结果</span>
-                  <Tag bordered={false}>{`本轮 ${progress.total} 项`}</Tag>
-                  {taskProgressLines(progress).map((line) => (
-                    <Tag key={line.label} bordered={false}>{`${line.label} ${line.value}`}</Tag>
-                  ))}
-                  <span className="text-[11px] text-gray-500">
-                    生成的图会先出现在这里：点「采纳」落到资产图片，点「设为定版」定下对外使用的那一张。
-                  </span>
-                </div>
-                {/*
-                  「生成图片提示词」：行集**只**来自用户勾选的那些资产（键与工作台选择键同口径），
-                  面板自己不会再按项目/章节拉一份全部资产；勾选的项里暂时生成不了的（本章只有资料记录、
-                  还没建出资产）如实列出来，不让"按钮说 N 项、实际只发出更少请求"。
-                */}
-                <Modal
-                  open={promptPanelOpen}
-                  title={promptPanelTitle}
-                  onCancel={() => setPromptPanelOpen(false)}
-                  footer={null}
-                  width={1040}
-                  destroyOnClose={false}
-                >
-                  <div className="space-y-2">
-                    <Alert
-                      type="info"
-                      showIcon
-                      message="每项会调用一次文本模型（按次计费，会花钱）"
-                      description="生成后请逐项检查再保存；任何一次失败都会立即停止、不自动重试。保存的位置就是生图实际读取的那份资产提示词。"
-                    />
-                    {promptPanelAssets.skipped.length > 0 ? (
-                      <Alert
-                        type="warning"
-                        showIcon
-                        message={`有 ${promptPanelAssets.skipped.length} 项勾选的资产本次无法生成提示词`}
-                        description={
-                          <span className="text-xs">
-                            {describeSkippedPromptPanelAssets(promptPanelAssets.skipped)}
-                          </span>
-                        }
-                      />
-                    ) : null}
-                    <AssetImagePromptLlmPanel
-                      projectId={projectId ?? ''}
-                      chapterId={chapterId}
-                      preselectAllMissing
-                      assets={promptPanelAssets.assets}
-                      onSaved={() => {
-                        setPromptPanelOpen(false)
-                        void loadWorkbench()
-                        onReload()
-                      }}
-                    />
-                  </div>
-                </Modal>
-
-                <AssetProductionArea
-                  ref={productionRef}
-                  projectId={projectId ?? ''}
-                  assets={toSignalAssets(data)}
-                  gate={gate}
-                  embedded
-                  resultGridClassName="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(260px,1fr))]"
-                  onProgress={handleProgress}
-                  onReload={() => {
-                    void loadWorkbench()
-                    onReload()
-                  }}
-                  onOpenAssetEditor={onOpenAssetEditor}
-                />
-              </div>
-
               {/* 技术详情（默认收起）：内部信息唯一的落点 */}
               <TechnicalDetailCollapse
                 input={{ data, source, chapterId, loadError }}
@@ -618,6 +551,79 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
               />
             </div>
           </Spin>
+        </div>
+
+        {/*
+          底段：结果区（设计包 §7）—— **放在滚动区之外**，是主区底部那个固定的落点。
+          展开时也不改变卡片网格的位置（硬约束「结果面板不得长期挤压 1440×900 下的
+          资产卡主工作区」）。
+
+          面板自己的标题 / 摘要 / 「N 项新结果待处理」/ 折叠开关全部由
+          `AssetProductionArea` 里的 `ResultArea` 渲染：这里**不重复**渲染「生成结果」
+          标题与数字，同一份数字只在一个地方说。
+        */}
+        <div className="shrink-0 border-t border-slate-200 px-3 pt-2" data-testid="workbench-result-dock">
+          {/*
+            「生成图片提示词」：行集**只**来自用户勾选的那些资产（键与工作台选择键同口径），
+            面板自己不会再按项目/章节拉一份全部资产；勾选的项里暂时生成不了的（本章只有资料记录、
+            还没建出资产）如实列出来，不让"按钮说 N 项、实际只发出更少请求"。
+          */}
+          <Modal
+            open={promptPanelOpen}
+            title={promptPanelTitle}
+            onCancel={() => setPromptPanelOpen(false)}
+            footer={null}
+            width={1040}
+            destroyOnClose={false}
+          >
+            <div className="space-y-2">
+              <Alert
+                type="info"
+                showIcon
+                message="每项会调用一次文本模型（按次计费，会花钱）"
+                description="生成后请逐项检查再保存；任何一次失败都会立即停止、不自动重试。保存的位置就是生图实际读取的那份资产提示词。"
+              />
+              {promptPanelAssets.skipped.length > 0 ? (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message={`有 ${promptPanelAssets.skipped.length} 项勾选的资产本次无法生成提示词`}
+                  description={
+                    <span className="text-xs">
+                      {describeSkippedPromptPanelAssets(promptPanelAssets.skipped)}
+                    </span>
+                  }
+                />
+              ) : null}
+              <AssetImagePromptLlmPanel
+                projectId={projectId ?? ''}
+                chapterId={chapterId}
+                preselectAllMissing
+                assets={promptPanelAssets.assets}
+                onSaved={() => {
+                  setPromptPanelOpen(false)
+                  void loadWorkbench()
+                  onReload()
+                }}
+              />
+            </div>
+          </Modal>
+
+          <AssetProductionArea
+            ref={productionRef}
+            projectId={projectId ?? ''}
+            assets={toSignalAssets(data)}
+            gate={gate}
+            embedded
+            resultGridClassName="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(260px,1fr))]"
+            onProgress={handleProgress}
+            onReload={() => {
+              void loadWorkbench()
+              onReload()
+            }}
+            onOpenAssetEditor={onOpenAssetEditor}
+          />
+        </div>
         </div>
       </div>
 
