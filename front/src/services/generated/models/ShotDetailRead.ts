@@ -76,11 +76,11 @@ export type ShotDetailRead = {
      */
     key_frame_prompt?: string;
     /**
-     * 该镜头使用的音频文件 ID（files.type=audio）；声音绑定落在这里
+     * **只读兼容快照**（迁移 009 之前的逐镜声音）：仅出现在读取契约里，供历史数据展示与迁移对账。角色声音的唯一事实来源是人物资产（PUT /studio/asset-voices/character/{id}，第 2 步人物资产详情）；生成侧只在人物资产没有音色时用它兜底，**永不覆盖**人物资产的音色。写入契约（ShotDetailCreate / ShotDetailUpdate）里没有这个字段。
      */
     audio_file_id?: (string | null);
     /**
-     * 本镜明确标记无需声音（与 audio_file_id 互斥，默认 false=未表态）
+     * 本镜明确标记无需声音（镜头级唯一的合法声明；默认 false=未表态，覆盖角色声音继承）
      */
     audio_opt_out?: boolean;
     /**

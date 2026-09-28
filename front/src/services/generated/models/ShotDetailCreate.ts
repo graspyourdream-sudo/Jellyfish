@@ -6,9 +6,17 @@ import type { CameraAngle } from './CameraAngle';
 import type { CameraMovement } from './CameraMovement';
 import type { CameraShotType } from './CameraShotType';
 import type { VFXType } from './VFXType';
+/**
+ * 创建镜头细节的**写入**契约。
+ *
+ * 刻意**不**从 ``ShotDetailBase`` 继承：那会连带把只读兼容快照
+ * ``audio_file_id`` 变成创建时的可写字段 —— 那等于留下第二套"逐镜声音绑定"入口
+ * （口径：角色声音只绑在**人物资产**上，第 2 步「人物资产详情」是全站唯一入口）。
+ * 这里逐字段列出可写字段，行为与 ``ShotDetailUpdate`` 的可写集合保持一致。
+ */
 export type ShotDetailCreate = {
     /**
-     * 镜头 ID（与 shots.id 共享主键）
+     * 镜头细节 ID（与镜头 1:1 共享主键）
      */
     id: string;
     /**
@@ -76,11 +84,7 @@ export type ShotDetailCreate = {
      */
     key_frame_prompt?: string;
     /**
-     * 该镜头使用的音频文件 ID（files.type=audio）；声音绑定落在这里
-     */
-    audio_file_id?: (string | null);
-    /**
-     * 本镜明确标记无需声音（与 audio_file_id 互斥，默认 false=未表态）
+     * 本镜明确标记无需声音（镜头级唯一的合法声明；默认 false=未表态，覆盖角色声音继承）
      */
     audio_opt_out?: boolean;
     /**

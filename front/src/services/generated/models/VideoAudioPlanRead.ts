@@ -53,6 +53,10 @@ export type VideoAudioPlanRead = {
      */
     vendor_supports_reference_audio?: boolean;
     /**
+     * 这条参考音频的来源：character_asset（人物资产当前绑定的角色声音 = 唯一事实来源）/ legacy_shot_snapshot（迁移前的逐镜声音，仅兼容兜底，永远不覆盖人物资产的音色）/ none
+     */
+    voice_source?: string;
+    /**
      * 术语澄清：参考音频（输入）≠ 最终成片音轨（输出侧 generate_audio）
      */
     note?: string;
