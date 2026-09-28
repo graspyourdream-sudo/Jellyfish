@@ -630,12 +630,17 @@ export function AssetWorkbench(props: AssetWorkbenchProps) {
         open={Boolean(detailItem)}
         item={detailItem}
         focusShotIndex={detailShotIndex}
+        projectId={projectId ?? null}
         onClose={() => {
           setDetailItem(null)
           setDetailShotIndex(null)
         }}
         onEditPrompt={handleEditPrompt}
         renderProfileEditor={renderProfileEditor}
+        onVoiceSaved={() => {
+          // 角色声音属于人物资产：绑定 / 更换后卡片上的缺项要跟着刷新（读一次，零费用）
+          void loadWorkbench()
+        }}
       />
 
       <PendingReviewDrawer

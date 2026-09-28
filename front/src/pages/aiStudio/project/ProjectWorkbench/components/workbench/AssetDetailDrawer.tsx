@@ -3,7 +3,8 @@
  *
  * 内容顺序（参考项目 `detailModal` 的信息层级，按 Jellyfish 的数据口径重排）：
  *   ① 规范化资产资料（按类型的中文标签）；② 相关剧本片段；
- *   ③ 出场分镜（点某镜看那一段原文）；④ 本次图片提示词；⑤ 用户补充。
+ *   ③ 出场分镜（点某镜看那一段原文）；④ 本次图片提示词；
+ *   ⑤ **角色声音（人物资产：全站唯一的绑定入口）**；⑥ 用户补充 + 技术详情（默认收起）。
  *
  * 用户点名：内部字段名 / 编号 / 资料行 ID 不上主界面；这里只显示中文标签与内容。
  */
@@ -22,6 +23,8 @@ import {
   WORKBENCH_TAB_LABEL,
 } from './workbenchState.ts'
 import { TechnicalDetailSection } from './TechnicalDetailCollapse.tsx'
+import { VoiceBindingSection } from './VoiceBindingSection.tsx'
+import { voiceSectionAppliesTo } from './voiceBindingState.ts'
 import { buildUserFacingMessage } from '../../../../components/userFacingMessage.ts'
 import type { AssetWorkbenchItem } from './assetWorkbenchContract.ts'
 
@@ -30,9 +33,13 @@ export type AssetDetailDrawerProps = {
   item: AssetWorkbenchItem | null
   /** 从卡片上的某个分镜点进来：抽屉打开后高亮这一镜 */
   focusShotIndex?: number | null
+  /** 项目 ID：角色声音按项目筛音频素材（拿不到就不筛） */
+  projectId?: string | null
   onClose: () => void
   onEditPrompt: (item: AssetWorkbenchItem) => void
   renderProfileEditor: (item: AssetWorkbenchItem) => ReactNode
+  /** 角色声音绑定 / 更换成功后的通知（工作台据此刷新卡片上的缺项） */
+  onVoiceSaved?: () => void
 }
 
 /** 资料区块：优先显示人工改过的（用户最关心自己填的那部分）。 */
@@ -51,7 +58,7 @@ function profileRows(item: AssetWorkbenchItem): { label: string; value: string }
 }
 
 export function AssetDetailDrawer(props: AssetDetailDrawerProps) {
-  const { open, item, focusShotIndex, onClose, onEditPrompt, renderProfileEditor } = props
+  const { open, item, focusShotIndex, projectId, onClose, onEditPrompt, renderProfileEditor, onVoiceSaved } = props
   const rows = item ? profileRows(item) : []
   const shotRefs = item?.script_relation?.shot_refs ?? []
   const evidence = item?.script_relation?.evidence ?? []
@@ -160,6 +167,19 @@ export function AssetDetailDrawer(props: AssetDetailDrawerProps) {
               {promptText || '还没有保存过提示词'}
             </div>
           </section>
+
+          {/* ⑤ 角色声音：**人物资产**才有，而且是全站唯一的绑定入口（设计包 §10）。
+              顺序固定在「④ 本次图片提示词」与「⑥ 用户补充」之间。 */}
+          {item && voiceSectionAppliesTo(workbenchItemType(item)) ? (
+            <VoiceBindingSection
+              assetType={workbenchItemType(item)}
+              assetId={item.asset_id}
+              assetName={workbenchItemName(item)}
+              inheritedShotCount={shotRefs.length}
+              projectId={projectId ?? null}
+              onSaved={onVoiceSaved}
+            />
+          ) : null}
 
           <section>
             <div className="mb-1 text-xs font-medium text-slate-700">用户补充</div>
