@@ -97,6 +97,34 @@ export type UseShotRequestPlanResult = {
   /** 计划里缺失的帧类型（供状态文案复用，不重复计算） */
   missingFrameTypes: string[]
   unusableFrameTypes: string[]
+  /**
+   * 四项生成设置（画幅 / 模型档位 / 分辨率 / 时长）。
+   *
+   * `settings` 是用户当前选的值（默认对齐后端计划），`generationOptions` 是后端下发的
+   * **可选范围 + 中文结论**。页面只做展示与回传，不自己造取值范围 —— 取值范围最终来自
+   * 供应商能力表与模型表，前端写一份必然漂移。
+   */
+  settings: {
+    ratio: string
+    model: string
+    resolution: string
+    durationSeconds: number | null
+  }
+  setSettings: (
+    next: {
+      ratio: string
+      model: string
+      resolution: string
+      durationSeconds: number | null
+    } | null,
+  ) => void
+  generationOptions: {
+    ratioOptions: string[]
+    modelOptions: string[]
+    resolutionOptions: string[]
+    durationOptions: number[]
+    notes: string[]
+  }
 }
 
 export function useShotRequestPlan(args: {
@@ -163,6 +191,43 @@ export function useShotRequestPlan(args: {
   useEffect(() => {
     void loadPlan()
   }, [loadPlan])
+
+  /**
+   * 四项生成设置（画幅 / 模型档位 / 分辨率 / 时长）的**用户选择**。
+   *
+   * 初始值跟随计划里"这次实际会用什么"，用户改过之后以用户为准，
+   * 并随请求一起提交（后端会再按能力表校验一次）。
+   * 取值范围来自计划的 `*_options`，不在这里写任何常量表。
+   */
+  const [settings, setSettings] = useState<{
+    ratio: string
+    model: string
+    resolution: string
+    durationSeconds: number | null
+  } | null>(null)
+
+  // 计划（重新）载入时把默认值对齐到后端结论；用户已经改过的项不覆盖。
+  useEffect(() => {
+    if (!plan) return
+    setSettings((current) => ({
+      ratio: current?.ratio || String(plan.ratio ?? ''),
+      model: current?.model || String(plan.model_name ?? ''),
+      resolution: current?.resolution || String(plan.resolution ?? ''),
+      durationSeconds: current?.durationSeconds ?? (plan.seconds ?? null),
+    }))
+  }, [plan])
+
+  /** 后端下发的可选范围与中文结论（页面只做展示，不自己造取值范围）。 */
+  const generationOptions = useMemo(
+    () => ({
+      ratioOptions: (plan?.ratio_options ?? []).map(String),
+      modelOptions: (plan?.model_options ?? []).map(String),
+      resolutionOptions: (plan?.resolution_options ?? []).map(String),
+      durationOptions: (plan?.duration_options ?? []).map(Number),
+      notes: (plan?.settings_notes ?? []).map(String),
+    }),
+    [plan],
+  )
 
   const files = row?.bound_files ?? []
   const imageFiles = useMemo(() => files.filter((item) => String(item.slot ?? '') !== 'audio'), [files])
@@ -239,8 +304,11 @@ export function useShotRequestPlan(args: {
         reference_mode: plan.reference_mode || referenceMode,
         prompt: savedPrompt.trim(),
         images: [],
-        ratio: plan.ratio || '16:9',
-        duration_seconds: plan.seconds ?? undefined,
+        // 四项设置以**用户选的值**为准（没改过时就是计划里那些值）
+        ratio: settings?.ratio || plan.ratio || '16:9',
+        duration_seconds: settings?.durationSeconds ?? plan.seconds ?? undefined,
+        model: settings?.model || '',
+        resolution: settings?.resolution || '',
         timeout_seconds: 900,
         attempt: attemptRef.current,
       })
@@ -280,7 +348,7 @@ export function useShotRequestPlan(args: {
     } finally {
       setGenerating(false)
     }
-  }, [generateBlockedReason, onGenerated, plan, referenceMode, reloadRow, savedPrompt, shotId])
+  }, [generateBlockedReason, onGenerated, plan, referenceMode, reloadRow, savedPrompt, settings, shotId])
 
   /** 明确「重新生成」：把轮次 +1，才会真的再产生一次费用。 */
   const doRegenerate = useCallback(async () => {
@@ -308,5 +376,9 @@ export function useShotRequestPlan(args: {
     doRegenerate,
     missingFrameTypes: plan?.missing_frame_types ?? [],
     unusableFrameTypes: plan?.unusable_frame_types ?? [],
+    /* 四项生成设置：当前值 + 可选范围 + 后端的中文结论 */
+    settings: settings ?? { ratio: '', model: '', resolution: '', durationSeconds: null },
+    setSettings,
+    generationOptions,
   }
 }

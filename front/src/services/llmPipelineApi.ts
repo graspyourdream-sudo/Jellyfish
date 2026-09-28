@@ -970,6 +970,15 @@ export function submitVideo(body: {
   images?: string[]
   ratio: string
   duration_seconds?: number
+  /**
+   * 模型档位（页面可选）。空串 = 用后端固定策略的默认视频模型。
+   *
+   * 这两个字段**不是纯前端控件**：后端会拿它们去查模型表 / 供应商能力表，
+   * 不在允许范围内的取值一律**不采纳**并在计划里如实回报（见 `settings_notes`）。
+   */
+  model?: string
+  /** 分辨率档位（页面可选）。空串 = 用该模型的默认档。 */
+  resolution?: string
   timeout_seconds?: number
   attempt?: number
 }): Promise<SubmitVideoResult> {

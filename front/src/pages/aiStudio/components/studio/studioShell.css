@@ -55,7 +55,7 @@
   --st-side-w: 296px;
   --st-preview-w: 336px;
   /* 阶段主卡片（提示词 / 生成任务）的高度：内容少时撑满中栏，内容多时卡内滚动 */
-  --st-primary-card-h: 260px;
+  --st-primary-card-h: 232px;
 
   width: 100%;
   height: 100%;

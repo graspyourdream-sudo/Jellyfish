@@ -122,6 +122,7 @@ import { useRelationTaskNotification } from '../components/taskNotificationHelpe
 import { VideoPromptLlmPanel } from './components/VideoPromptLlmPanel'
 import { ShotBoundFilesPanel } from './components/ShotBoundFilesPanel'
 import { StudioPhasePanel, type StudioPhaseExtras } from './components/studio/StudioPhasePanel'
+import { StudioGenerateSettings } from './components/studio/StudioGenerateSettings'
 import { EpisodeVideoPromptBoard } from '../project/ProjectWorkbench/components/EpisodeVideoPromptBoard'
 import { StudioShotRail } from './components/studio/StudioShotRail'
 import { AssetCheckSummaryCard, DeliveryDownloadCard, DeliveryReadinessCard, DeliveryTasksCard } from './components/studio/StudioDeliveryPanels'
@@ -6785,41 +6786,24 @@ function Inspector(props: {
                   // ⑥ 生成视频（唯一生成入口：复用同一份预检 / 供应商帧可用性 / 付费守卫）
                   generate: (
                     <div className="space-y-3">
-                      <Space size={8} wrap>
-                        <Tooltip title="先看最终请求摘要（提示词 / 参考帧 / 声音 / 模型方案 / 时长 / 画幅）">
-                          <Button size="small" loading={requestPlan.planLoading} onClick={() => void requestPlan.loadPlan()}>
-                            刷新预检
-                          </Button>
-                        </Tooltip>
-                        <Button
-                          size="small"
-                          type="primary"
-                          icon={<PlayCircleOutlined />}
-                          loading={requestPlan.generating}
-                          disabled={requestPlan.generateDisabled}
-                          onClick={() => void requestPlan.doGenerate()}
-                        >
-                          生成视频
-                        </Button>
-                        <Tooltip title="同一轮重复点「生成视频」只会复用已完成的任务、不会重复计费；要真的再生成一次用这个（会再产生一次费用）">
-                          <Button
-                            size="small"
-                            danger
-                            loading={requestPlan.generating}
-                            disabled={requestPlan.generateDisabled}
-                            onClick={() => void requestPlan.doRegenerate()}
-                          >
-                            重新生成（下一轮）
-                          </Button>
-                        </Tooltip>
-                        <Button size="small" onClick={() => void openVideoPromptPreview()}>
-                          查看完整请求（可保存提示词）
-                        </Button>
-                        {requestPlan.plan?.guard_status ? (
-                          // 审计 §4.3 模式 3：`guard_status` 是自由文本，主区只给中文结论
-                          <Tag color="gold">{`是否允许真实付费：${describeGuardStatus(requestPlan.plan.guard_status)}`}</Tag>
-                        ) : null}
-                      </Space>
+                      {/*
+                        四项生成设置（画幅 / 模型档位 / 分辨率 / 时长）+ 全页唯一主操作「生成视频」。
+                        取值范围全部来自后端计划（供应商能力表 / 模型表），不在页面里写死；
+                        选中的值随请求提交，后端会再校验一次并如实回报有没有被采纳。
+                      */}
+                      <StudioGenerateSettings
+                        value={requestPlan.settings}
+                        options={requestPlan.generationOptions}
+                        onChange={requestPlan.setSettings}
+                        onGenerate={() => void requestPlan.doGenerate()}
+                        onRefreshPlan={() => void requestPlan.loadPlan()}
+                        onRegenerate={() => void requestPlan.doRegenerate()}
+                        onInspectRequest={() => void openVideoPromptPreview()}
+                        generating={requestPlan.generating}
+                        planLoading={requestPlan.planLoading}
+                        blockedReason={requestPlan.generateBlockedReason}
+                        guardLabel={requestPlan.plan?.guard_status ? describeGuardStatus(requestPlan.plan.guard_status) : ''}
+                      />
                       {requestPlan.generateBlockedReason ? (
                         <Alert
                           type="warning"
