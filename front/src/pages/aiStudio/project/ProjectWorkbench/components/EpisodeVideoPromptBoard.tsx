@@ -182,6 +182,14 @@ type EpisodeVideoPromptBoardProps = {
   onContinueAssets?: () => void
   /** 已有资产，直接去第 4 步「资产与声音检查」 */
   onGoBinding?: () => void
+  /**
+   * 关掉「看板」这个次级入口，回到第 3 步的正式入口（分镜工作室）。
+   *
+   * 为什么有它：第 3 步的主入口已经收敛进分镜工作室（第 3–5 步共用一个容器），
+   * 本页只在 `?panel=prompt_board` 时作为**次级工具**打开；
+   * 用户从这里能一键回到主流程，不会以为"看板就是第 3 步"。
+   */
+  onClosePanel?: () => void
 }
 
 export function EpisodeVideoPromptBoard({
@@ -191,6 +199,7 @@ export function EpisodeVideoPromptBoard({
   onEnterStudio,
   onContinueAssets,
   onGoBinding,
+  onClosePanel,
 }: EpisodeVideoPromptBoardProps) {
   /**
    * **目标章节**（2026-09-20 升级要求：选完脚本组后可以选本项目已有章节，或直接新建章节）。
@@ -1505,6 +1514,11 @@ export function EpisodeVideoPromptBoard({
       title={`集级视频提示词 · ${chapterLabel}`}
       extra={
         <Space>
+          {onClosePanel ? (
+            <Button size="small" type="link" onClick={onClosePanel} data-testid="prompt-board-close">
+              返回分镜工作室入口
+            </Button>
+          ) : null}
           <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadBoard()}>
             刷新镜头
           </Button>

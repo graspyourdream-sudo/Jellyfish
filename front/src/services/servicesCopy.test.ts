@@ -98,6 +98,8 @@ const REGION_FILES: readonly string[] = [
   'orchestrationStatusApi.ts',
   'projectAssetReadiness.ts',
   'studioEntities.ts',
+  // 出口 B「视频交付 · 批量下载」：新增文件必须在这里登记，否则范围守卫会红
+  'videoDeliveryApi.ts',
 ]
 
 /**
@@ -646,7 +648,8 @@ test('阶段B⑦服务层扫描范围守卫：遍历结果与登记表逐项相�
     [...REGION_FILES].sort(),
     '扫描面与登记表不一致 —— 新增 / 删除 services 文件必须在本测试里同步登记并复核',
   )
-  assert.equal(scanned.length, 10, `扫描面必须恰好是 10 个文件，实际 ${scanned.length} 个`)
+  // 登记时 10 个；`videoDeliveryApi.ts`（出口 B 视频批量下载）加入后为 11 个。
+  assert.equal(scanned.length, 11, `扫描面必须恰好是 11 个文件，实际 ${scanned.length} 个`)
   REGION_FILES.forEach((relPath) => {
     assert.ok(countScanSurfaces(readScan(relPath)) >= 0)
   })

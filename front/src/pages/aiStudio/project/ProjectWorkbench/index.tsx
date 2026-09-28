@@ -63,6 +63,15 @@ const EDIT_PARAM = 'edit'
 /** 第 2 步的显式面板开关：`legacy_extract` = 改版前的提取确认页（见下方注释） */
 const PANEL_PARAM = 'panel'
 const LEGACY_EXTRACT_PANEL = 'legacy_extract'
+/**
+ * 「整集提示词看板」的次级入口参数。
+ *
+ * 任务书（UI/UX v2 第三、十一部分）把第 3–5 步收敛进**分镜工作室**这一个容器，
+ * 第 3 步的主入口因此不再是独立的提示词中转页。但那个页面的能力
+ * （整集批量生成 / 批量导入 / 服务端草稿恢复 / 来源识别 / 停止后续任务 / 失败重试）
+ * **一个都不许删**：它现在是`?panel=prompt_board` 的次级工具，同时也在工作室阶段 3 里可用。
+ */
+const PROMPT_BOARD_PANEL = 'prompt_board'
 
 /**
  * 旧 `?tab=` 深链 → 六步映射。其它页面（MainLayout / ChapterStudio /
@@ -521,16 +530,59 @@ const ProjectWorkbench: React.FC = () => {
       )
     }
     if (activeStep === 'video_prompt') {
-      // 第 4 步的**主入口**：集级批量生成/导入 + 统一确认保存（进入分镜工作台之前的必经页面）。
+      /*
+       * 第 3 步（整集视频提示词）的**主入口现在是分镜工作室**（第 3–5 步共用一个容器）：
+       * 与第 4/5 步一样，这里只给"进入工作室 + 本步进度"，不再把独立提示词中转页当作必经页面。
+       *
+       * 原中转页的能力全部保留：
+       *   - 工作室阶段 3 里可以直接展开「整集批量生成 / 批量导入 / 服务端草稿」；
+       *   - 需要单独用整页看板时走 `?panel=prompt_board`（次级工具，不再是主流程入口）。
+       */
+      if (searchParams.get(PANEL_PARAM) === PROMPT_BOARD_PANEL) {
+        return (
+          <EpisodeVideoPromptBoard
+            projectId={projectId ?? ''}
+            chapterId={focusChapter?.id ?? null}
+            chapterLabel={chapterLabel ?? '未选择章节'}
+            onEnterStudio={() => openChapterStudio('video_prompt')}
+            onContinueAssets={() => openStep('extract_assets')}
+            onGoBinding={() => openChapterStudio('binding')}
+            onClosePanel={() =>
+              updateSearchParams((next) => {
+                next.delete(PANEL_PARAM)
+              })
+            }
+          />
+        )
+      }
       return (
-        <EpisodeVideoPromptBoard
-          projectId={projectId ?? ''}
-          chapterId={focusChapter?.id ?? null}
-          chapterLabel={chapterLabel ?? '未选择章节'}
-          onEnterStudio={() => openChapterStudio('video_prompt')}
-          onContinueAssets={() => openStep('extract_assets')}
-          onGoBinding={() => openChapterStudio('binding')}
-        />
+        <div className="space-y-3">
+          <ProjectStudioStepPanel
+            step={activeStep}
+            chapterLabel={chapterLabel}
+            hasChapter={Boolean(focusChapter)}
+            projectId={projectId}
+            chapterId={focusChapter?.id ?? null}
+            onEnterStudio={(step) => openChapterStudio(step)}
+            onGoStep={openStep}
+          />
+          <Card size="small" title="整集提示词看板（次级工具）">
+            <div className="mb-2 text-xs text-gray-500">
+              整集批量生成 / 批量导入 / 服务端草稿 已经可以在分镜工作室的第 3 阶段里直接操作；
+              需要单独用整页看板时从这里打开，它不再是第 3 步的必经页面。
+            </div>
+            <Button
+              size="small"
+              onClick={() =>
+                updateSearchParams((next) => {
+                  next.set(PANEL_PARAM, PROMPT_BOARD_PANEL)
+                })
+              }
+            >
+              打开整集提示词看板
+            </Button>
+          </Card>
+        </div>
       )
     }
     return (
