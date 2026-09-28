@@ -48,7 +48,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.studio import Character, Costume, FileItem, Prop, Scene
+from app.models.studio import Character, Costume, FileItem, Prop, Scene, ShotDetail
 from app.models.studio_file_usages import FileUsage
 from app.models.types import FileType, FileUsageKind
 from app.services.studio.asset_profiles import normalize_asset_type, type_label
@@ -396,9 +396,152 @@ async def resolve_voices_for_assets(
     return [found[key] for key in ordered if key in found]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 第 4 步「资产与声音检查」：**只读**地读「这一镜的角色声音从哪来」
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: 结论之一：恰好一个角色绑了声音 → 这一镜继承它。
+SHOT_VOICE_STATE_INHERITED = "inherited"
+#: 结论之一：多个角色绑了声音 → **不替用户挑**，只列候选。
+SHOT_VOICE_STATE_AMBIGUOUS = "ambiguous"
+#: 结论之一：角色一个都没绑，但这一镜自己还有迁移前留下的逐镜声音（只读快照）。
+SHOT_VOICE_STATE_LEGACY_SNAPSHOT = "legacy_snapshot"
+#: 结论之一：本镜已明确标记「无需声音」——生效结论就是没有声音。
+SHOT_VOICE_STATE_OPT_OUT = "opt_out"
+#: 结论之一：角色没绑、本镜也没有历史声音 → 缺项（第 4 步据此给「返回人物资产补充」）。
+SHOT_VOICE_STATE_MISSING = "missing"
+
+
+@dataclass(frozen=True, slots=True)
+class ShotVoiceInheritance:
+    """某一镜「角色声音」的**只读**结论（第 4 步的唯一读路径的返回值）。
+
+    为什么是只读结论而不是"可编辑的绑定"：设计包 §10 明确「第 4 步无人工操作」——
+    选择 / 更换只发生在第 2 步的人物资产详情里。这里只回答三件事：
+    有没有、是谁的声音、从哪个资产继承来的。
+    """
+
+    shot_id: str
+    state: str
+    #: 生效的声音（``inherited`` 时非空；其余状态为空串）
+    file_id: str = ""
+    file_name: str = ""
+    url: str = ""
+    #: 来源人物资产（``inherited`` 时非空）
+    source_asset_type: str = ""
+    source_asset_id: str = ""
+    source_asset_name: str = ""
+    #: 这一镜关联了几个角色 / 其中几个绑了声音（页面据此解释"为什么是缺项"）
+    character_count: int = 0
+    voice_asset_count: int = 0
+    #: ``ambiguous`` 时非空：候选角色的中文名（页面列出来，让用户自己去第 2 步定）
+    candidates: tuple[str, ...] = ()
+    #: 迁移前的逐镜声音（**只读快照**）：只在 ``legacy_snapshot`` 时有意义
+    legacy_file_id: str = ""
+    legacy_file_name: str = ""
+    #: 快照记录的继承来源（``character:<角色ID>``；迁移 009 回填，没有则为空串）
+    legacy_inherited_from: str = ""
+
+
+async def read_shot_voice_inheritance(db: AsyncSession, *, shot_id: str) -> ShotVoiceInheritance:
+    """读「这一镜的角色声音从哪来」：**只读、免费、不写库**（第 4 步的唯一读路径）。
+
+    结论口径（设计包 §10：声音的唯一事实来源是人物资产）
+
+    - 这一镜关联的角色里**恰好一个**绑了声音 → ``inherited``（页面显示「音色名 · 继承自人物资产」）；
+    - **多个**角色都绑了声音 → ``ambiguous``：**不替用户挑**（多人物镜头乱挑一个声音比没有更糟），
+      列出候选，由用户回第 2 步人物资产里处理；
+    - 一个都没有、但这一镜自己还留着迁移前的逐镜声音 → ``legacy_snapshot``（如实标为历史记录，只读）；
+    - 一个都没有、也没有历史声音 → ``missing``（第 4 步据此给「返回人物资产补充」）；
+    - 本镜已明确标记「无需声音」→ ``opt_out``（生效结论就是没有声音；角色侧已绑的声音仍如实带回来，
+      便于页面说明"这个角色有声音，只是本镜标记无需声音"）。
+
+    只认**人物资产**：本区块只管角色声音（人物配音）。场景 / 道具 / 服装上的声音由视频生成侧的
+    ``video_audio_input.resolve_asset_voice_for_shot`` 统一带出，不在第 4 步的角色声音检查里出现。
+
+    与 ``resolve_asset_voice_for_shot`` 的分工：那个函数面向**生成**（镜头自己没表态时才兜底带出，
+    且四类资产都算），本函数面向**检查**（只看人物资产、只读、不改任何生成行为）。
+    """
+    from app.services.studio.bound_asset_files import bound_asset_ids_for_shot
+
+    clean_shot_id = str(shot_id or "").strip()
+    if not clean_shot_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "shot_id_required", "message": "没有指定要检查的镜头，请重新打开这一镜。"},
+        )
+    detail = await db.get(ShotDetail, clean_shot_id)
+    if detail is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "shot_not_found", "message": "这条镜头不存在，请刷新后重试。"},
+        )
+
+    # 这一镜绑定的角色（名称取自同一个来源：bound_asset_files 是"镜头绑了哪些资产"的唯一答案）
+    bound = await bound_asset_ids_for_shot(db, shot_id=clean_shot_id)
+    characters = {
+        str(asset_id): str(asset_name or "")
+        for asset_id, asset_name in (bound.get("characters") or {}).items()
+    }
+    voices = await read_asset_voices(db, asset_ids_by_type={"character": sorted(characters)})
+    # 顺序稳定：先按角色名、再按资产 ID（同一份数据每次结论一致）
+    ordered = sorted(
+        voices.values(),
+        key=lambda item: (characters.get(item.asset_id, ""), item.asset_id),
+    )
+
+    opt_out = bool(getattr(detail, "audio_opt_out", False))
+    legacy_file_id = str(getattr(detail, "audio_file_id", "") or "").strip()
+    legacy_inherited_from = str(getattr(detail, "voice_inherited_from", "") or "").strip()
+    legacy_file_name = ""
+    if legacy_file_id:
+        legacy_row = await db.get(FileItem, legacy_file_id)
+        legacy_file_name = str(getattr(legacy_row, "name", "") or "") if legacy_row is not None else ""
+
+    if opt_out:
+        state = SHOT_VOICE_STATE_OPT_OUT
+    elif len(ordered) == 1:
+        state = SHOT_VOICE_STATE_INHERITED
+    elif len(ordered) > 1:
+        state = SHOT_VOICE_STATE_AMBIGUOUS
+    elif legacy_file_id:
+        state = SHOT_VOICE_STATE_LEGACY_SNAPSHOT
+    else:
+        state = SHOT_VOICE_STATE_MISSING
+
+    single = ordered[0] if len(ordered) == 1 else None
+    return ShotVoiceInheritance(
+        shot_id=clean_shot_id,
+        state=state,
+        # 候选 / 无需声音时也把"其实绑了什么"如实带回去，页面才能把话说明白
+        file_id=single.file_id if single is not None else "",
+        file_name=single.file_name if single is not None else "",
+        url=single.url if single is not None else "",
+        source_asset_type=single.asset_type if single is not None else "",
+        source_asset_id=single.asset_id if single is not None else "",
+        source_asset_name=(characters.get(single.asset_id, "") if single is not None else ""),
+        character_count=len(characters),
+        voice_asset_count=len(ordered),
+        candidates=tuple(
+            (characters.get(item.asset_id) or item.asset_id) for item in ordered
+        )
+        if len(ordered) > 1
+        else (),
+        legacy_file_id=legacy_file_id,
+        legacy_file_name=legacy_file_name,
+        legacy_inherited_from=legacy_inherited_from,
+    )
+
+
 __all__ = [
     "ASSET_VOICE_TYPES",
+    "SHOT_VOICE_STATE_AMBIGUOUS",
+    "SHOT_VOICE_STATE_INHERITED",
+    "SHOT_VOICE_STATE_LEGACY_SNAPSHOT",
+    "SHOT_VOICE_STATE_MISSING",
+    "SHOT_VOICE_STATE_OPT_OUT",
     "AssetVoiceBinding",
+    "ShotVoiceInheritance",
     "asset_voice_source_ref",
     "bind_asset_voice",
     "clear_asset_voice",
@@ -406,5 +549,6 @@ __all__ = [
     "normalize_voice_asset_type",
     "read_asset_voice",
     "read_asset_voices",
+    "read_shot_voice_inheritance",
     "resolve_voices_for_assets",
 ]

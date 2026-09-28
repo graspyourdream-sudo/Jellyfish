@@ -4,12 +4,17 @@
     GET    /studio/asset-voices/{asset_type}/{asset_id}       读一个资产的声音
     PUT    /studio/asset-voices/{asset_type}/{asset_id}       绑定（同一事务内只留一个生效）
     DELETE /studio/asset-voices/{asset_type}/{asset_id}       解绑
+    GET    /studio/asset-voices/shots/{shot_id}/inheritance    读某镜角色声音的继承结果（只读）
 
-**全部免费**：只写 ``file_usages``，不调模型、不触图、不触视频，没有任何出口费用。
+**全部免费**：只写/读 ``file_usages``，不调模型、不触图、不触视频，没有任何出口费用。
 
 为什么单独一个模块而不是塞进 files / shots 路由：这是**资产级**的资源
 （角色/场景/道具/服装 各有一个声音），既不属于某个文件、也不属于某个镜头；
 放在 ``/files`` 下会被读成"文件的操作"，放在 ``/shots`` 下会重新长回逐镜口径。
+
+为什么第 4 步的继承读也在这里（设计包 §10）：它读的是"这一镜的人物资产绑了什么声音"，
+答案的唯一来源就是本模块管理的资产声音表；而且它**只有 GET**——第 4 步不许改声音，
+"选择 / 更换"只在第 2 步的人物资产详情里发生。
 """
 
 from __future__ import annotations
@@ -27,14 +32,17 @@ from app.schemas.studio.asset_voices import (
     AssetVoiceBindRequest,
     AssetVoiceClearRead,
     AssetVoiceRead,
+    ShotVoiceInheritanceRead,
 )
 from app.services.studio.asset_profiles import type_label
 from app.services.studio.asset_voices import (
     AssetVoiceBinding,
+    ShotVoiceInheritance,
     bind_asset_voice,
     clear_asset_voice,
     list_project_asset_voices,
     read_asset_voice,
+    read_shot_voice_inheritance,
 )
 
 router = APIRouter()
@@ -139,4 +147,45 @@ async def delete_asset_voice(
     except HTTPException as exc:
         return _error(exc)
     return success_response(AssetVoiceClearRead(removed=removed))
+
+
+def _to_shot_read(result: ShotVoiceInheritance) -> ShotVoiceInheritanceRead:
+    """服务层的只读结论 → 契约（中文标签由后端给，页面不自己写映射表）。"""
+    return ShotVoiceInheritanceRead(
+        shot_id=result.shot_id,
+        state=result.state,
+        file_id=result.file_id,
+        file_name=result.file_name,
+        url=result.url,
+        source_asset_type=result.source_asset_type,
+        source_asset_id=result.source_asset_id,
+        source_asset_name=result.source_asset_name,
+        character_count=result.character_count,
+        voice_asset_count=result.voice_asset_count,
+        candidates=list(result.candidates),
+        legacy_file_id=result.legacy_file_id,
+        legacy_file_name=result.legacy_file_name,
+        legacy_inherited_from=result.legacy_inherited_from,
+    )
+
+
+@router.get(
+    "/shots/{shot_id}/inheritance",
+    response_model=ApiResponse[ShotVoiceInheritanceRead],
+    summary="读取某镜角色声音的继承结果与来源（只读、免费；第 4 步唯一读路径）",
+)
+async def get_shot_voice_inheritance(
+    shot_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[ShotVoiceInheritanceRead]:
+    """第 4 步「资产与声音检查」的**只读**读口：这一镜的角色声音继承结果、来源、缺项原因。
+
+    刻意**只有 GET**：第 4 步不提供第二套选择 / 更换入口，也不回写。
+    要改声音请回第 2 步「人物资产详情」（``PUT /asset-voices/character/{id}``）。
+    """
+    try:
+        result = await read_shot_voice_inheritance(db, shot_id=shot_id)
+    except HTTPException as exc:
+        return _error(exc)
+    return success_response(_to_shot_read(result))
 
