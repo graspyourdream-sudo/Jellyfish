@@ -811,7 +811,7 @@ const ProjectLobby: React.FC = () => {
         className={`h-full cursor-pointer transition-all duration-200 ${
           isSelected ? 'ring-2 ring-indigo-500 ring-offset-1' : 'hover:shadow-lg'
         }`}
-        bodyStyle={{ padding: '10px' }}
+        styles={{ body: { padding: 10 } }}
         onClick={() => {
           handleSelectProject(p.id)
           if (!multiSelectMode) {
@@ -1164,8 +1164,7 @@ const ProjectLobby: React.FC = () => {
               size="small"
               title="项目速览"
               className="mb-1.5"
-              bodyStyle={{ padding: '10px' }}
-              headStyle={{ minHeight: 36, paddingInline: 10 }}
+              styles={{ body: { padding: 10 }, header: { minHeight: 36, paddingInline: 10 } }}
             >
               {selectedProject ? (
                 <div className="space-y-2">
