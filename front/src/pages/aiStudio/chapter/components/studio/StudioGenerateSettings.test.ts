@@ -4,7 +4,7 @@
  * 为什么用源码扫描而不是渲染测试：本仓库没有 jsdom / testing-library（也不许为此引入新依赖），
  * 而这几条口径恰好都能在源码上钉死，属于既有区域级守卫（`chapterStudioCopy.test.ts`）的同类做法：
  *
- * 1. **四项都在**：画幅 / 模型档位 / 分辨率 / 时长；
+ * 1. **四项都在**：画幅 / **视频模型** / 分辨率 / 时长；
  * 2. **取值范围来自后端**：组件里不许出现比例、分辨率、时长的**硬编码候选清单**
  *    （写一份就会漂移：页面给 1080p、提交时被能力表拒掉）；
  * 3. **主操作唯一**：本组件里 `type="primary"` 只允许出现一次（唯一主色按钮）；
@@ -38,14 +38,35 @@ function stripComments(source: string): string {
     .join('\n')
 }
 
-test('阶段 3 生成设置：四项都在（画幅 / 模型档位 / 分辨率 / 时长）', () => {
+test('阶段 3 生成设置：四项都在（画幅 / 视频模型 / 分辨率 / 时长）', () => {
   const source = stripComments(read(COMPONENT))
-  for (const label of ["'画幅'", "'模型档位'", "'分辨率'", "'时长'"]) {
+  /* ⚠️ 本轮口径：「模型档位」改成「视频模型」—— 它选的就是真实模型，
+     不再是"档位 1 / 档位 2"这种把不同模型糊成一个序号的叫法。 */
+  for (const label of ["'画幅'", "'视频模型'", "'分辨率'", "'时长'"]) {
     assert.ok(source.includes(label), `缺少设置项 ${label}`)
   }
+  assert.ok(!source.includes("'模型档位'"), '「模型档位」这个旧叫法又回来了（本轮已改成「视频模型」）')
   for (const testid of ['generate-ratio', 'generate-model', 'generate-resolution', 'generate-duration']) {
     assert.ok(source.includes(testid), `缺少可交互项 ${testid}`)
   }
+})
+
+test('阶段 3 生成设置：模型下拉显示**真实模型名**，且提交值就是同一个稳定值', () => {
+  const source = stripComments(read(COMPONENT))
+  /* 显示侧：走唯一的展示实现（没有显示名时直接给真实模型名） */
+  assert.ok(
+    /modelDisplayLabel\(\{\s*outlet:\s*'video',\s*modelName:\s*item\s*\}\)/.test(source),
+    '模型下拉没有走 `modelDisplayLabel`（本轮口径：模型原名允许展示）',
+  )
+  /* 提交侧：`value` 必须是下拉里那个真实值本身，不是任何显示改写后的字符串 */
+  assert.ok(
+    /options=\{field\.options\.map\(\(item\)\s*=>\s*\(\{\s*value:\s*item,/.test(source),
+    '模型下拉的 value 不再是真实模型名 —— 显示名转换会提交错模型',
+  )
+  assert.ok(
+    !/value:\s*modelDisplayLabel\(/.test(source),
+    '`value` 用了显示文案：会把显示名当成模型值提交出去',
+  )
 })
 
 test('阶段 3 生成设置：取值范围来自后端，组件里不许写死候选清单', () => {

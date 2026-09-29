@@ -25,7 +25,7 @@ import {
 import type { ColumnsType } from 'antd/es/table'
 /* 主区文案出口一律走共享管道（审计 §7.1-5/6）：原文进「技术详情」，主区只出中文结论。 */
 import { maskInternalIds } from '../components/maskInternalIds'
-/* 模型原始名不许进主区（审计 §6.2）：主区只说「模型方案」的业务名 */
+/* 模型名称展示走唯一实现（本轮口径：模型原名允许上屏，未登记时原样显示真实名称） */
 import { textModelBusinessName } from '../components/enumLabels'
 import { rememberTechnicalDetail, toUserFacingText } from '../components/userFacingMessage'
 import {
@@ -264,7 +264,7 @@ const PromptFlowPage: React.FC = () => {
   return (
     <div style={{ padding: 16 }}>
       <Card
-        title="提示词导入 / 交付"
+        title="导入与交付"
         extra={
           <Space>
             <Select
@@ -1828,7 +1828,7 @@ const QuickSkillPanel: React.FC<{ projectId?: string; onErrorOriginal?: (raw: st
           <Text type="secondary">
             {/* 审计 §4.6 模式 5 / §6.2：原来直渲后端原始模型名（`deepseek-chat` 这类）。
                 主区只说业务方案名，原始名只留在技术详情层。 */}
-            模型方案：{textModelBusinessName(result.model_used)} · 结果 {promptDraft.length} 字
+            模型：{textModelBusinessName(result.model_used)} · 结果 {promptDraft.length} 字
           </Text>
         )}
         {/* 草稿 vs 已保存：两件事分开显示，不让人误以为"生成了就等于写进镜头了" */}

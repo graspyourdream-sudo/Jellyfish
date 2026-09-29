@@ -354,7 +354,12 @@ export function Probe() {
   assert.ok(terms.has('DRY_RUN'), `DRY_RUN 没被抓到：${JSON.stringify(hits)}`)
   assert.ok(terms.has('模式4 接口路径/URL/本机地址'), `接口路径没被抓到：${JSON.stringify(hits)}`)
   assert.ok(surfaceText.includes('jurilu') && surfaceText.includes('manual_workspace'), '提示词来源原值没被抓到')
-  assert.ok(surfaceText.includes('seedance-2.0-mini'), '模型原名没被抓到')
+  /* ⚠️ 本轮口径反转（任务书 §七）：模型原名**允许上屏**，不再是主区禁词。
+     这里断言"抓不到"，把"谁又把模型名加回词表"这件事钉住。 */
+  assert.ok(
+    !terms.has('seedance-2.0-mini'),
+    '模型原名又被判成主区泄漏 —— 本轮口径明确允许展示真实模型名',
+  )
   assert.ok(terms.has('模式1 UUID'), 'UUID 没被抓到')
   assert.ok(terms.has('模式2 内部字段名'), '内部字段名没被抓到')
 })
@@ -630,7 +635,12 @@ test('守卫状态 / 提示词来源 / 画幅来源必须过映射，不许原�
   assert.ok(!/\$\{keyframePlanPreview\.target_ratio_source\}/.test(source), '仍在直渲 `target_ratio_source`')
   // provider / model_name：主区只出业务名
   assert.ok(!/\{`供应商：/.test(source), '主区还在打「供应商：…」标签（§6.2 口径：从主区移除）')
-  assert.ok(/videoModelBusinessName\(/.test(source), '模型必须过 `videoModelBusinessName` 业务化')
+  /* 模型名仍必须走**唯一**的展示实现（它现在的语义是"显示真实模型名 / 显示名 · 原名"），
+     不许就地直渲 `model_name` —— 那样拿不到"有显示名时显示 显示名 · 原名"的规则。 */
+  assert.ok(
+    /videoModelBusinessName\(/.test(source) || /modelDisplayLabel\(/.test(source),
+    '模型名必须过唯一的展示实现',
+  )
   assert.ok(
     !/\$\{keyframePlanPreview\.provider/.test(source),
     '主区还在插值原始 `provider`（§6.2：原始 provider 只进技术详情）',
@@ -1213,10 +1223,15 @@ test('阶段B③词表守卫：词源与 `enumLabels` 同源，新增枚举自�
   assert.ok(MODEL_RAW_NAMES.length >= 3, `模型原名词表只有 ${MODEL_RAW_NAMES.length} 个，可疑`)
   assert.ok(MAIN_SCREEN_FORBIDDEN_UNIQUE_TERMS.includes('槽位'), '主区禁词表里必须有「槽位」（§4.3 点名）')
   assert.ok(MAIN_SCREEN_FORBIDDEN_UNIQUE_TERMS.includes('供应商'), '主区禁词表里必须有「供应商」（§4.3 点名）')
+  /* ⚠️ 这一段的断言在本轮**整体反向**（任务书 §七：模型原名允许展示）：
+     旧实现要求"业务名里不许含原始名"，于是未登记的模型被糊成「当前 XXX 方案」，
+     用户在下拉里分不清自己选的是哪个模型。现在要求**必须原样显示真实名称**。 */
   ;(['video', 'text', 'image'] as const).forEach((outlet) => {
     MODEL_RAW_NAMES.forEach((raw) => {
       const label = modelBusinessName(outlet, raw)
-      assert.ok(!label.toLowerCase().includes(raw), `模型业务名仍含原始名：${outlet}/${raw} → ${label}`)
+      assert.equal(label, raw, `模型名没有被原样显示：${outlet}/${raw} → ${label}`)
     })
   })
+  /* 词表本身没有被写空（它是上面那条断言的前提）。 */
+  assert.ok(MODEL_RAW_NAMES.length >= 3, `模型原名词表只有 ${MODEL_RAW_NAMES.length} 个，可疑`)
 })

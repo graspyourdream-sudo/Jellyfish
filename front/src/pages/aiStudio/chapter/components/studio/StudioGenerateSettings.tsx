@@ -1,7 +1,11 @@
 /**
  * 分镜工作室 · 阶段 3 的「生成视频」设置行（设计包第 11 页 `data-od-id="generate-block"`）。
  *
- * 四个**真实**可选项：画幅 / 模型档位 / 分辨率 / 时长。
+ * 四个**真实**可选项：画幅 / 视频模型 / 分辨率 / 时长。
+ *
+ * 模型那一列显示的是**真实模型名**（本轮口径：模型原名允许展示，见
+ * `components/enumLabels.ts` 的 `modelDisplayLabel`）—— 这一页不能再把不同的模型
+ * 模糊成「档位 1 / 档位 2」，用户必须一眼看出自己选的是哪个模型。
  *
  * ## 为什么这不是"纯前端控件"
  *
@@ -18,6 +22,8 @@
  */
 
 import { Button, Select, Tooltip } from 'antd'
+/* 模型名称的**唯一**展示实现（`显示名 · 真实模型名`，没有显示名时显示真实模型名）。 */
+import { modelDisplayLabel } from '../../../components/enumLabels.ts'
 
 export type GenerationSettingsValue = {
   ratio: string
@@ -86,7 +92,7 @@ export function StudioGenerateSettings({
         {(
           [
             { key: 'ratio' as const, label: '画幅', testId: 'generate-ratio', options: options.ratioOptions, unit: '' },
-            { key: 'model' as const, label: '模型档位', testId: 'generate-model', options: options.modelOptions, unit: '' },
+            { key: 'model' as const, label: '视频模型', testId: 'generate-model', options: options.modelOptions, unit: '' },
             { key: 'resolution' as const, label: '分辨率', testId: 'generate-resolution', options: options.resolutionOptions, unit: '' },
             {
               key: 'durationSeconds' as const,
@@ -116,10 +122,25 @@ export function StudioGenerateSettings({
                       : { ...value, [field.key]: String(next) },
                   )
                 }
+                /*
+                  模型下拉**显示真实模型名**（本轮口径：模型原名允许展示）：
+                  没有单独显示名时就是原名本身，有显示名时是「显示名 · 原名」。
+                  `value` 恒为真实模型名 —— 显示与提交是同一份稳定值，不会选错模型。
+                */
                 options={field.options.map((item) => ({
                   value: item,
-                  label: field.unit ? `${item}${field.unit}` : item,
+                  label:
+                    field.key === 'model'
+                      ? modelDisplayLabel({ outlet: 'video', modelName: item })
+                      : field.unit
+                        ? `${item}${field.unit}`
+                        : item,
                 }))}
+                title={
+                  field.key === 'model'
+                    ? '这里显示的是真实模型名称；每一项都是可直接提交的模型取值'
+                    : undefined
+                }
                 data-testid={field.testId}
               />
             </label>
@@ -138,9 +159,13 @@ export function StudioGenerateSettings({
           </Tooltip>
         ) : null}
         {onInspectRequest ? (
-          <Button size="small" onClick={onInspectRequest} data-testid="generate-inspect-request">
-            查看完整请求
-          </Button>
+          /* 纯只读：它打开的是「本次生成请求（只读）」详情，里面**没有**任何生成 / 保存按钮。
+             真正会出视频的只有右边那个主色按钮。 */
+          <Tooltip title="只读详情：把即将提交的提示词、参考帧、声音、画幅、分辨率、时长与模型摊开给你看，不能在这里生成或修改">
+            <Button size="small" onClick={onInspectRequest} data-testid="generate-inspect-request">
+              查看完整请求
+            </Button>
+          </Tooltip>
         ) : null}
         {onRegenerate ? (
           <Tooltip title="同一轮重复点「生成视频」只会复用已完成的任务、不会重复计费；要真的再生成一次用这个（会再产生一次费用）">

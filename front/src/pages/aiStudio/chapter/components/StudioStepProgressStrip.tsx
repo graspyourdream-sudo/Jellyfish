@@ -174,7 +174,7 @@ export function StudioStepProgressStrip({ projectId, chapterId, step, selectedSh
                 void navigator.clipboard
                   .writeText(text)
                   .then(() => message.success(`已复制交付文本（${text.length} 字）`))
-                  .catch(() => message.error('复制失败，请到「提示词导入/交付」页手动复制'))
+                  .catch(() => message.error('复制失败，请到「提示词管理 · 导入与交付」页手动复制'))
               }}
             >
               复制交付文本

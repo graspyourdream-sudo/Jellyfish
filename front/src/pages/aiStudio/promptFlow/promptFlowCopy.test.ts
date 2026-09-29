@@ -180,7 +180,12 @@ export function Probe() {
   assert.ok(terms.has('供应商'), '「供应商」没被抓到（含 JSX 属性值）')
   assert.ok(terms.has('模式1 UUID'), 'UUID 没被抓到')
   assert.ok(terms.has('模式2 内部字段名'), '`shot_id` / `file_id` 这类字段名没被抓到')
-  assert.ok(terms.has('deepseek-chat'), '模型原名没被抓到（模式 5，词源来自 `enumLabels`）')
+  /* ⚠️ 本轮口径反转：模型原名**允许上屏**，不再是主区禁词。
+     所以这里断言的是"抓不到" —— 反过来钉住"词表没有被谁加回去"。 */
+  assert.ok(
+    !terms.has('deepseek-chat'),
+    '模型原名又被判成主区泄漏了 —— 本轮口径明确允许展示真实模型名（任务书 §七）',
+  )
   assert.ok(extraHits.includes('区域补充: skill 编号拼接'), '`skill_id)` 的拼接形态没被抓到')
   assert.ok(extraHits.includes('区域补充: 完整公网地址'), '完整公网地址没被抓到')
 })
@@ -327,22 +332,31 @@ test('区域6 渲染点专项：placeholder 不带内部参数名（§4.6 模式
   assert.ok(/placeholder="例如：https:\/\/…\/agent"/.test(code), 'placeholder 必须是「例如：https://…/agent」这种形态')
 })
 
-test('区域6 渲染点专项：模型原始名不进主区，改说「模型方案」（§6.2）', () => {
+test('区域6 渲染点专项：模型名按真实名称显示（本轮口径：模型原名允许上屏）', () => {
   const code = stripComments(readPage())
-  assert.equal(
-    /模型：\{result\.model_used/.test(code),
-    false,
-    '主区又直渲 `result.model_used`（原始模型名，模式 5 / §6.2）',
+  /*
+   * 旧要求「模型原始名不进主区，改说模型方案」已由本轮最终口径推翻
+   * （任务书 §七：模型原名允许在正常用户页面展示）。
+   *
+   * 这条守卫因此改成断言**新**口径，并且双向钉住：
+   *   - 源码里**不许**再出现把模型名吞成「当前文本方案」的写法；
+   *   - 展示必须走唯一的 `textModelBusinessName`（现在它的语义就是"显示真实模型名"）；
+   *   - 真正被展示的那一行仍然是 `模型：…`（不再谎称是"方案"）。
+   */
+  assert.ok(
+    /模型：\{textModelBusinessName\(result\.model_used\)\}/.test(code),
+    '生成结果那一行没有显示真实模型名（本轮口径要求直接显示模型名称）',
   )
   assert.ok(
-    /模型方案：\{textModelBusinessName\(result\.model_used\)\}/.test(code),
-    '主区必须走 `textModelBusinessName(...)` 说「模型方案」',
+    !/模型方案：\{textModelBusinessName/.test(code),
+    '又改回「模型方案」这种把真实模型名藏起来的说法了',
   )
-  // 纯函数口径：未登记的模型名也不许原样回显
-  assert.equal(textModelBusinessName('brand-new-model-x'), '当前文本方案')
-  assert.ok(!/brand-new-model-x/.test(textModelBusinessName('brand-new-model-x')), '未登记模型名不许回显原值')
+  assert.equal(textModelBusinessName('brand-new-model-x'), 'brand-new-model-x')
+  assert.ok(
+    !/当前文本方案/.test(textModelBusinessName('brand-new-model-x')),
+    '未登记模型名被吞成兜底文案 —— 用户将无法分辨用的是哪个模型',
+  )
 })
-
 test('区域6 渲染点专项：错误原文有**屏幕**出口（页级默认收起折叠块，双向断言）', () => {
   const code = stripComments(readPage())
   // ① 双向：原文（经掩码）只在折叠块里出现

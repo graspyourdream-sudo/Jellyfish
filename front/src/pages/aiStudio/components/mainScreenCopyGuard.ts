@@ -23,7 +23,22 @@
  * 1. **模式 1/2/4 正则**：UUID、内部字段名、接口路径 / URL / 本机地址、环境变量名；
  * 2. **模式 3 枚举原值**：**直接 import `enumLabels.ts` 的 key 全集**，
  *    保证映射表与测试同源，将来新增枚举自动纳入；
- * 3. **模式 2/5 逐字禁词**：主区禁词表 + 内部术语表（含 `供应商` / `门禁` / 模型原名）。
+ * 3. **模式 2/5 逐字禁词**：主区禁词表 + 内部术语表（含 `供应商` / `门禁`）。
+ *
+ * ## ⚠️ 本轮口径变化：**模型原名不再是主区禁词**（任务书 §七）
+ *
+ * 旧要求是「模型原名只能进技术详情」，于是词表里有一份模型原名清单，
+ * 未登记的模型还被前端模糊成「档位 1 / 档位 2」（用户根本分不清选了哪个模型）。
+ * 本轮最终口径推翻了它：**模型原名允许在正常用户页面直接展示**
+ * （视频 / 图片模型选择器、模型管理、生成设置确认、费用确认、生成结果说明）。
+ *
+ * 因此 `MODEL_RAW_NAMES` 已从本文件的判定逻辑里移除，
+ * 只保留一份 `ALLOWED_MODEL_NAMES` 供测试断言"词表非空"用。
+ *
+ * **仍然禁止**（一个字都没放开）：供应商内部代号、接口路径、数据库字段名、
+ * `file_id`/`task_id`/`script_id` 等内部 ID、原始状态枚举、HTTP 状态码、
+ * 请求体与响应体、原始错误对象、环境变量、调试参数。
+ * 这些仍然由下面对应的正则 / 逐字词表把关。
  *
  * ## 扫描器自身必须有「空转自检」
  *
@@ -35,7 +50,7 @@
  * 所以既能被 `node --test` 直接加载，也能在需要时被浏览器侧复用。
  */
 
-import { ENUM_RAW_VALUES, MODEL_RAW_NAMES } from './enumLabels.ts'
+import { ENUM_RAW_VALUES, MODEL_RAW_NAMES as ALLOWED_MODEL_NAME_SOURCE } from './enumLabels.ts'
 
 /* ------------------------------------------------------------- 扫描面提取 */
 
@@ -328,10 +343,16 @@ export const MAIN_SCREEN_FORBIDDEN_UNIQUE_TERMS: readonly string[] = Array.from(
 export const MAIN_SCREEN_FORBIDDEN_ENUM_VALUES: readonly string[] = ENUM_RAW_VALUES
 
 /**
- * 模式 5 的模型原名清单 —— 同样来自 `enumLabels.ts` 的映射表 key 全集（§8.1 第 4 点），
- * 避免「将来新增模型」时词表漏掉。
+ * 模型原名清单（**已从禁词表移出**，任务书 §七）。
+ *
+ * 保留这个导出只是为了两件事：
+ *   1. 让「词表非空」的自检有据可依（表被写空时立刻发现）；
+ *   2. 挡住"以为还禁着模型名"的误改 —— 名字里带 `ALLOWED` 就是结论。
+ *
+ * ⚠️ 它**不参与** `findLeakTermsInText` 的判定。主区出现真实模型名（如
+ * `seedance-2.0-mini`）不再算泄漏。
  */
-export const MAIN_SCREEN_FORBIDDEN_MODEL_NAMES: readonly string[] = MODEL_RAW_NAMES
+export const ALLOWED_MODEL_NAMES: readonly string[] = ALLOWED_MODEL_NAME_SOURCE
 
 /** 转义成正则字面量。 */
 function escapeRe(text: string): string {
@@ -362,7 +383,8 @@ export function findLeakTermsInText(text: string): string[] {
     })
   }
   wordish(MAIN_SCREEN_FORBIDDEN_ENUM_VALUES)
-  wordish(MAIN_SCREEN_FORBIDDEN_MODEL_NAMES)
+  /* ⚠️ 模型原名**不再**参与判定（任务书 §七：模型原名允许上屏）。
+     枚举原值仍然整词匹配 —— 那是"状态机原值"，与模型名是两件事。 */
 
   return hits
 }

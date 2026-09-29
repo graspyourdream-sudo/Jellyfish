@@ -106,12 +106,9 @@ import {
   fetchBoardReadiness,
   fetchImageModels,
   previewPromptDelivery,
-  persistGeneratedVideo,
   previewFramePlan,
-  previewVideoSubmitPlan,
   saveShotVideoPrompt,
   submitFrameImage,
-  submitVideo,
 } from '../../../services/llmPipelineApi'
 import type { FramePlanResult, ImageModelOption, PromptDeliveryRow } from '../../../services/llmPipelineApi'
 import { buildFileDownloadUrl, resolveAssetUrl } from '../assets/utils'
@@ -175,10 +172,8 @@ import {
   framePromptSourceLabel as framePromptSourceLabelShared,
   guardStatusLabel,
   labelFor,
-  taskStatusLabel,
   videoPromptSourceLabel as videoPromptSourceLabelShared,
 } from '../components/enumLabels'
-import { classifyGenerationFailure, failureText } from '../components/generationGate'
 import { ChapterStudioBatchToolbar } from './components/ChapterStudioBatchToolbar'
 import { ChapterStudioMaintenancePanel } from './components/ChapterStudioMaintenancePanel'
 import { ChapterStudioReadinessDiagnosisPanel } from './components/ChapterStudioReadinessDiagnosisPanel'
@@ -3281,11 +3276,7 @@ function Inspector(props: {
   const [keyframePromptDecisionCollapsed, setKeyframePromptDecisionCollapsed] = useState(true)
   const [keyframePromptQualityChecks, setKeyframePromptQualityChecks] = useState<ShotFramePromptQualityChecks>(null)
   const [videoPromptPreviewOpen, setVideoPromptPreviewOpen] = useState(false)
-  const [videoPromptPreviewLoading, setVideoPromptPreviewLoading] = useState(false)
-  const [videoPromptPreviewSubmitting, setVideoPromptPreviewSubmitting] = useState(false)
   const [videoPromptContextCollapsed, setVideoPromptContextCollapsed] = useState(true)
-  const [videoPromptSaving, setVideoPromptSaving] = useState(false)
-  const [videoPinnedPlan, setVideoPinnedPlan] = useState<VideoPinnedPlanView | null>(null)
   /** 本次打开弹窗时 LLM 生成的原样结果，用于区分「人工编辑」与「原样接受生成结果」。 */
   const [videoLlmDerivedPrompt, setVideoLlmDerivedPrompt] = useState('')
   const resolveVideoRatioForRequest = useCallback(() => {
@@ -3308,12 +3299,27 @@ function Inspector(props: {
    * 再调用一次供应商。用 ref 而不是 state 的原因：submit 回调是闭包，state 更新在同一个
    * 事件里读不到新值，会出现"点了重新生成却还是复用了旧任务"。
    */
-  const videoAttemptRef = useRef(0)
+  /**
+   * 视频提示词的「拼装草稿」。
+   *
+   * ## 本轮收口：这里**只剩 derive**，没有 submit
+   *
+   * 改前这个草稿**自带一个 `submit`**（`submitVideo(...)`），它挂在一个叫
+   * 「视频生成提示词预览」的弹窗里 —— 于是同一个页面上出现了**两条真的会出视频的路径**：
+   *
+   *   A（正门）：`useShotRequestPlan.doGenerate()` / `doRegenerate()` → 四项生成设置随请求提交；
+   *   B（旧）：本草稿的 `submit` → `submitVideoGeneration()` → 裸调 `submitVideo`，
+   *           **绕过**四项设置、绕过 `generateBlockedReason` 预检、各自维护一套 attempt 轮次。
+   *
+   * B 已经整条删除（`submitVideoGeneration` / `regenerateVideoGeneration` 一并移除）：
+   * 阶段 3 现在只有 A 一套提交来源。这里保留 `derive`，因为它提供的是**只读的拼装结果**
+   * （`pack` 用于展示镜头连续性上下文、`prompt` 供提示词编辑区按需填入），
+   * 不再有任何写库或提交动作。
+   */
   const videoPromptDraft = useGenerationDraft<
     { prompt: string },
     { referenceMode: VideoReferenceMode; images: string[] },
-    VideoPromptDerived,
-    { taskId: string | null }
+    VideoPromptDerived
   >({
     initialBase: { prompt: '' },
     initialContext: { referenceMode: 'text_only', images: [] },
@@ -3341,77 +3347,7 @@ function Inspector(props: {
         pack: data?.pack ?? null,
       }
     },
-    submit: async ({ derived, context }) => {
-      if (!selectedShot?.id) {
-        throw new Error('shot is required')
-      }
-      const ratio = resolveVideoRatioForRequest()
-      if (!ratio) {
-        throw new Error('video ratio is required')
-      }
-      // 为什么不再走 /film/tasks/video：那条链路把任务丢给 Celery 队列，而本机没有
-      // Redis / worker（task_always_eager=False），任务只会停在 pending —— 表现就是
-      // "点了生成没反应"。这里改走**同进程内联执行**的直提端点，并在拿到地址后
-      // 立刻落库挂到该镜头，界面刷新即可见。
-      const result = await submitVideo({
-        shot_id: selectedShot.id,
-        reference_mode: context.referenceMode,
-        prompt: (derived.prompt || '').trim(),
-        images: derived.images,
-        ratio,
-        duration_seconds: Math.max(5, Number(shotDetail?.duration ?? 5) || 5),
-        timeout_seconds: 900,
-        // 同一轮（同一 attempt）重复点生成 = 复用既有任务，不重复计费；
-        // 点「重新生成」才会把 attempt +1 → 换成一个新的幂等键。
-        attempt: videoAttemptRef.current,
-      })
-      if (result.status === 'dry_run') {
-        // 演练模式：守卫拦下了真实调用。这不是错误，要说清楚而不是报红。
-        message.info(
-          // 审计 §4.3 模式 4：整句里的 DRY_RUN / JELLYFISH_* 环境变量名全部摘掉
-          '演练模式：本次没有真实生成、没有产生费用。如需真实生成，请联系管理员开启。',
-          8,
-        )
-        // 关键：把「被门禁阻止」和「没有任务 ID」区分开，否则调用方会再报一次红字。
-        return { taskId: null, gated: true }
-      }
-      if (result.deduplicated) {
-        // 后端命中了同一轮的既有任务：**没有**再调供应商、没有产生新费用。
-        // 产物在首次提交时就已经落库并挂到本镜，所以这里**不再**重复登记（否则会多出
-        // 一条 files 记录 + 一个媒体对象）。
-        message.info(
-          '本轮已经提交过，直接复用既有任务，没有重复扣费。要真的再生成一次请点「重新生成」。',
-          8,
-        )
-        if (result.status === 'completed' && result.url) {
-          return {
-            taskId: selectedShot.generated_video_file_id?.trim() || null,
-            completed: true as const,
-            videoUrl: result.url,
-          }
-        }
-      }
-      if (result.status !== 'completed' || !result.url) {
-        // 审计 §4.3 模式 3：`status=xxx` 属英文枚举原值直渲
-        throw new Error(toUserFacingText(result.error, '视频没有生成出来，请重试'))
-      }
-      const fileId = await persistGeneratedVideo(selectedShot.id, result.url, '镜头视频（直提）')
-      const refreshed = await StudioShotDetailsService.getShotDetailApiV1StudioShotDetailsShotIdGet({
-        shotId: selectedShot.id,
-      })
-      if (refreshed.data) onPatchShotDetail(refreshed.data)
-      // 这条链路是**同进程内联执行**：走到这里视频已经生成并落库，
-      // 返回的是产物 file_id，不是可轮询的任务 ID。
-      // 以前调用方拿它去轮询 `/film/tasks/{id}/status` → 必然 404 → 页面永久显示 pending。
-      return {
-        taskId: fileId,
-        completed: true as const,
-        videoUrl: result.url,
-      }
-    },
   })
-  const videoPromptPreviewDraft = videoPromptDraft.base.prompt
-  const videoPromptPreviewImages = videoPromptDraft.context.images
   const videoReferenceMode = videoPromptDraft.context.referenceMode
   const videoPromptPreviewPack = videoPromptDraft.derived?.pack ?? null
   const videoActionBeatPhases = videoPromptPreviewPack?.action_beat_phases ?? []
@@ -3431,7 +3367,6 @@ function Inspector(props: {
   // 已持久化到 shot_details.video_prompt 的内容（交付导出读的就是这一列）。
   const savedVideoPrompt = (shotDetail?.video_prompt ?? '').trim()
   const savedVideoPromptSource = String(shotDetail?.video_prompt_source ?? '').trim()
-  const savedVideoPromptDiffers = Boolean(savedVideoPrompt) && savedVideoPrompt !== (videoPromptPreviewDraft || '').trim()
 
   /**
    * 「4. 视频提示词」步骤里的就地编辑器。
@@ -3470,14 +3405,10 @@ function Inspector(props: {
       setVideoPromptTabSaving(false)
     }
   }
-  const videoLlmDerivedPromptTrimmed = videoLlmDerivedPrompt.trim()
-  const videoLlmResultDiffers = Boolean(videoLlmDerivedPromptTrimmed) && videoLlmDerivedPromptTrimmed !== (videoPromptPreviewDraft || '').trim()
-  const videoPromptSaveSource = videoLlmDerivedPromptTrimmed && videoLlmDerivedPromptTrimmed === (videoPromptPreviewDraft || '').trim() ? 'llm' : 'internal'
-  const [videoTaskPolling, setVideoTaskPolling] = useState(false)
-  const [videoTaskStatus, setVideoTaskStatus] = useState<string | null>(null)
-  const [videoTaskId, setVideoTaskId] = useState<string | null>(null)
-  const [videoTask, setVideoTask] = useState<RelationTaskState | null>(null)
-  const [videoSettledTask, setVideoSettledTask] = useState<RelationTaskState | null>(null)
+  /* 原「视频任务轮询」这套状态（videoTaskPolling / videoTaskStatus / videoTaskId / videoTask /
+     videoSettledTask）随第二套提交链路一起删除：正门 `requestPlan.doGenerate()` 走的是
+     **同进程内联执行**，返回时成片已经落库，没有需要轮询的任务号。
+     留着它只会让人以为还有一条异步任务路径。 */
   const [promptTask, setPromptTask] = useState<RelationTaskState | null>(null)
   const [promptSettledTask, setPromptSettledTask] = useState<RelationTaskState | null>(null)
   const [frameImageTask, setFrameImageTask] = useState<RelationTaskState | null>(null)
@@ -3495,33 +3426,6 @@ function Inspector(props: {
     const shotTitle = selectedShot.title?.trim()
     return shotTitle ? `镜头：${shotTitle}` : `镜头：第 ${selectedShot.index} 镜`
   }, [selectedShot])
-  useRelationTaskNotification({
-    task: videoTask,
-    settledTask: videoSettledTask,
-    title: TASK_COPY.videoGeneration.title,
-    sourceLabel: selectedShotSourceLabel,
-    runningDescription: TASK_COPY.videoGeneration.runningDescription,
-    cancellingDescription: TASK_COPY.videoGeneration.cancellingDescription,
-    successDescription: TASK_COPY.videoGeneration.successDescription,
-    cancelledDescription: TASK_COPY.videoGeneration.cancelledDescription,
-    failedDescription: TASK_COPY.videoGeneration.failedDescription,
-    onCancel:
-      videoTask?.taskId
-        ? () =>
-            void executeTaskCancel({
-              taskId: videoTask.taskId,
-              reason: '用户在分镜工作室取消视频生成任务',
-              applyCancelData: (data) => {
-                setVideoTask((current) => applyTaskCancelState(current, data))
-                return null
-              },
-              cancelledImmediatelyMessage: TASK_COPY.videoGeneration.cancelledImmediatelyMessage,
-              cancelRequestedMessage: TASK_COPY.videoGeneration.cancelRequestedMessage,
-              fallbackErrorMessage: '取消视频生成任务失败',
-            })
-        : null,
-    onNavigate: () => undefined,
-  })
   useRelationTaskNotification({
     task: promptTask,
     settledTask: promptSettledTask,
@@ -3668,7 +3572,7 @@ function Inspector(props: {
     return () => {
       canceled = true
     }
-  }, [selectedShot?.id, selectedShot?.generated_video_file_id, videoTaskStatus, videoTaskPolling])
+  }, [selectedShot?.id, selectedShot?.generated_video_file_id])
 
   useEffect(() => {
     setOpsTitleDraft(selectedShot?.title ?? '')
@@ -4645,249 +4549,67 @@ function Inspector(props: {
     return { referenceMode: 'text_only' as const, images: [] }
   }
 
-  const openVideoPromptPreview = async () => {
+  /**
+   * 打开「本次生成请求（只读）」详情。
+   *
+   * ## 本轮收口：它不再做任何会改状态的事
+   *
+   * 改前这个函数会：① 触发一次视频提示词拼装（**可能真的调用文字模型**）、
+   * ② 再发一次 `previewVideoSubmitPlan` 拿一份与正门平行的计划、
+   * ③ 把结果灌进一个自带 `submit` 的草稿 —— 于是弹窗里能直接出视频。
+   *
+   * 现在它只做一件事：打开弹窗。详情内容全部来自 `requestPlan`
+   * （「生成视频」真正会提交的那一份计划），因此
+   *   - 打开详情**不产生任何调用**（不会付费、不会生成）；
+   *   - 展示的内容与即将提交的内容**必然一致**。
+   *
+   * 「拼装一版提示词」这个能力没有删，它搬到了提示词编辑区
+   * （见 `deriveVideoPromptForEditor`），由用户在编辑区显式触发。
+   */
+  const openVideoPromptPreview = () => {
+    if (!selectedShot?.id) {
+      message.warning('请先选择一个分镜')
+      return
+    }
+    setVideoPromptContextCollapsed(true)
+    setVideoPromptPreviewOpen(true)
+  }
+
+  /**
+   * 在**提示词编辑区**按需拼装一版视频提示词（显式动作，会调用一次文字模型）。
+   *
+   * 为什么搬到这里：原来这一步藏在「查看完整请求」弹窗里 —— 用户想"看一眼请求"
+   * 就会顺带触发一次模型调用，而"保存 / 编辑提示词"的入口却在别处。
+   * 现在职责归位：详情只读，编辑与生成都在编辑区。
+   */
+  const [videoPromptDeriving, setVideoPromptDeriving] = useState(false)
+  const deriveVideoPromptForEditor = async () => {
     if (!selectedShot?.id) {
       message.warning('请先选择一个分镜')
       return
     }
     const { referenceMode, images } = buildVideoRefSelection()
-    const nextContext = { referenceMode, images }
-    const savedPrompt = (shotDetail?.video_prompt ?? '').trim()
-    const savedSource = String(shotDetail?.video_prompt_source ?? '').trim()
-    // 已保存的提示词优先回填到输入框，避免 LLM 结果把它静默覆盖掉。
-    videoPromptDraft.hydrate({
-      base: { prompt: savedPrompt },
-      context: nextContext,
-    })
-    setVideoPromptContextCollapsed(true)
-    setVideoPinnedPlan(null)
-    setVideoPromptPreviewOpen(true)
-    setVideoPromptPreviewLoading(true)
-    // 计划预览用到的提示词与参考图（带提示词请求时后端只做本地组装，不会触发 LLM 出词）。
-    let planPrompt = savedPrompt
-    let planImages = images
+    setVideoPromptDeriving(true)
     try {
       const derived = await videoPromptDraft.deriveNow({
         base: { prompt: '' },
-        context: nextContext,
+        context: { referenceMode, images },
       })
-      if (derived) {
-        const llmPrompt = (derived.prompt ?? '').trim()
-        setVideoLlmDerivedPrompt(llmPrompt)
-        const initialPrompt = savedPrompt || derived.prompt
-        planPrompt = initialPrompt
-        planImages = derived.images
-        videoPromptDraft.hydrate({
-          base: { prompt: initialPrompt },
-          context: {
-            referenceMode,
-            images: derived.images,
-          },
-          derived: {
-            ...derived,
-            prompt: initialPrompt,
-          },
-        })
-        if (savedPrompt) {
-          if (savedPrompt !== llmPrompt) {
-            message.warning(
-              `已载入该镜头已保存的视频提示词（来源：${videoPromptSourceLabel(savedSource)}），本次大模型生成结果未覆盖它；` +
-                '如需改用本次生成结果，请在弹窗内点击「使用本次大模型结果」。',
-            )
-          } else {
-            message.info('已载入该镜头已保存的视频提示词')
-          }
-        }
+      const nextPrompt = String(derived?.prompt ?? '').trim()
+      if (!nextPrompt) {
+        message.warning('这次没有拼装出可用的提示词，请检查本镜的参考帧与画面信息')
+        return
       }
+      setVideoLlmDerivedPrompt(nextPrompt)
+      setVideoPromptTabDraft(nextPrompt)
+      message.info('已拼装一版提示词并填入编辑区：确认无误后点「保存到镜头」才会写回。')
     } catch {
-      message.error('获取视频提示词预览失败')
+      message.error('拼装视频提示词失败，请稍后重试')
     } finally {
-      setVideoPromptPreviewLoading(false)
-    }
-    if (planPrompt) {
-      // 固定模型直提计划：只预览（不提交、不触网），用于如实展示后端固定策略与 DRY_RUN 守卫状态。
-      void previewVideoSubmitPlan({
-        shot_id: selectedShot.id,
-        reference_mode: referenceMode,
-        prompt: planPrompt,
-        images: planImages,
-        ratio: resolveVideoRatioForRequest(),
-      })
-        .then((plan) => setVideoPinnedPlan(normalizeVideoPinnedPlan(plan)))
-        .catch(() => setVideoPinnedPlan(null))
+      setVideoPromptDeriving(false)
     }
   }
 
-  /**
-   * 保存视频提示词到镜头（`shot_details.video_prompt` + `video_prompt_source`）。
-   *
-   * 来源判定：与本次大模型生成结果完全一致 → `llm`；被人工改过 → `internal`。
-   * 保存后回读一次详情，让 inspector 立刻显示已持久化的值（与 patchShotDetailImmediate 同款做法）。
-   */
-  const saveVideoPromptToShot = async () => {
-    if (!selectedShot?.id) {
-      message.warning('请先选择一个分镜')
-      return
-    }
-    const prompt = (videoPromptPreviewDraft || '').trim()
-    if (!prompt) {
-      message.warning('提示词为空，无法保存')
-      return
-    }
-    const llmPrompt = videoLlmDerivedPrompt.trim()
-    const source = llmPrompt && prompt === llmPrompt ? 'llm' : 'internal'
-    const shotId = selectedShot.id
-    setVideoPromptSaving(true)
-    try {
-      await saveShotVideoPrompt(shotId, prompt, source)
-      const refreshed = await StudioShotDetailsService.getShotDetailApiV1StudioShotDetailsShotIdGet({ shotId })
-      if (refreshed.data) onPatchShotDetail(refreshed.data)
-      message.success(`视频提示词已保存到镜头（来源：${videoPromptSourceLabel(source)}）`)
-    } catch (err) {
-      void showUserError(err, '保存视频提示词失败')
-    } finally {
-      setVideoPromptSaving(false)
-    }
-  }
-
-  /** 放弃已保存/人工编辑内容，改用本次大模型生成结果（保存时会标记为 llm 来源）。 */
-  const applyVideoLlmDerivedPrompt = () => {
-    const llmPrompt = videoLlmDerivedPrompt.trim()
-    if (!llmPrompt) {
-      message.warning('本次没有可用的大模型生成结果')
-      return
-    }
-    const currentDerived = videoPromptDraft.derived
-    videoPromptDraft.hydrate({
-      base: { prompt: llmPrompt },
-      context: videoPromptDraft.context,
-      derived: currentDerived
-        ? { ...currentDerived, prompt: llmPrompt }
-        : { prompt: llmPrompt, images: videoPromptDraft.context.images, pack: null },
-    })
-    message.info('已切换为本次大模型生成结果')
-  }
-
-  /**
-   * 明确「重新生成」：把 attempt 加 1，换一个新的幂等键，才会真的再调用一次供应商。
-   *
-   * 为什么必须有这个按钮：没有它，用户在"结果不满意"时只能再点一次「生成」——而那是
-   * 同一轮，会被后端正确地判成复用（不重复扣费），于是表现为"点了没反应"。
-   * 语义要在这里说清楚：这是**会再花一次钱**的动作。
-   */
-  const regenerateVideoGeneration = async () => {
-    videoAttemptRef.current += 1
-    message.info(
-      `已开始第 ${videoAttemptRef.current + 1} 轮生成（重新生成会真的再产生一次费用）。`,
-      6,
-    )
-    await submitVideoGeneration()
-  }
-
-  const submitVideoGeneration = async () => {
-    if (!selectedShot?.id) {
-      message.warning('请先选择一个分镜')
-      return
-    }
-    if (!resolveVideoRatioForRequest()) {
-      message.warning('当前镜头缺少视频比例，请先设置项目默认比例或镜头覆盖比例')
-      return
-    }
-    const prompt = (videoPromptPreviewDraft || '').trim()
-    if (!prompt) {
-      message.warning('请输入视频提示词')
-      return
-    }
-    setVideoPromptPreviewSubmitting(true)
-    try {
-      const submitted = await videoPromptDraft.submitNow()
-      const result = submitted as
-        | { taskId: string | null; gated?: boolean; completed?: boolean; videoUrl?: string }
-        | null
-      if (result?.gated) {
-        // DRY_RUN 提示已经在提交实现里说清楚了，这里不再叠加误导性的红字。
-        return
-      }
-      if (result?.completed && result.videoUrl) {
-        // 内联执行已完成的成功路径：本轮就结束，不启动任何轮询。
-        setVideoTaskId(result.taskId ?? null)
-        setVideoTaskStatus('已生成')
-        setVideoTaskPolling(false)
-        setVideoSettledTask(null)
-        setVideoTask(null)
-        setVideoPromptPreviewOpen(false)
-        message.success('视频已生成并写入本镜')
-        return
-      }
-      const taskId = result?.taskId
-      if (!taskId) {
-        // 审计 §4.3 模式 2/3：主区不出现「接口」「任务 ID」
-        message.error('视频没有生成出来：服务没有返回成片，请重试')
-        return
-      }
-      setVideoTaskId(taskId)
-      setVideoTaskStatus('排队中')
-      setVideoTaskPolling(true)
-      setVideoTask({
-        taskId,
-        status: 'pending',
-        progress: 0,
-        cancelRequested: false,
-      })
-      setVideoSettledTask(null)
-      setVideoPromptPreviewOpen(false)
-    } catch (error) {
-      // 真实原因照原样显示（DRY_RUN / 模型未配置 / 参数缺失 / 服务错误都能看出来）
-      const failure = classifyGenerationFailure(error, 'video')
-      setVideoTaskStatus(null)
-      setVideoTaskPolling(false)
-      message.error(failureText(failure))
-    } finally {
-      setVideoPromptPreviewSubmitting(false)
-    }
-  }
-
-  useEffect(() => {
-    if (!videoTaskPolling || !videoTaskId) return
-    let cancelled = false
-    void (async () => {
-      try {
-        let finalTaskState: RelationTaskState | null = null
-        for (let i = 0; i < 60; i += 1) {
-          await sleep(2000)
-          if (cancelled) return
-          const statusRes = await FilmService.getTaskStatusApiV1FilmTasksTaskIdStatusGet({ taskId: videoTaskId })
-          const status = statusRes.data?.status ?? null
-          if (!status) continue
-          if (statusRes.data) {
-            finalTaskState = toRelationTaskStateFromStatusRead(statusRes.data)
-            setVideoTask(finalTaskState)
-          }
-          setVideoTaskStatus(status)
-          if (status === 'succeeded' || status === 'failed' || status === 'cancelled') break
-        }
-        if (
-          !cancelled &&
-          finalTaskState &&
-          (finalTaskState.status === 'succeeded' ||
-            finalTaskState.status === 'failed' ||
-            finalTaskState.status === 'cancelled')
-        ) {
-          setVideoTask(null)
-          setVideoSettledTask(finalTaskState)
-        }
-      } catch {
-        if (!cancelled) {
-          message.error('获取视频任务状态失败')
-        }
-      } finally {
-        if (!cancelled) setVideoTaskPolling(false)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [videoTaskPolling, videoTaskId])
   const updateCardState = (frameType: PromptFrameType, patch: Partial<KeyframeCardState>) => {
     setKeyframeCards((prev) => ({ ...prev, [frameType]: { ...prev[frameType], ...patch } }))
   }
@@ -5324,6 +5046,21 @@ function Inspector(props: {
   })
 
   /**
+   * 「固定模型直提计划」的只读视图（**从正门那一份计划派生**）。
+   *
+   * 改前它是自己的一份 state，由 `openVideoPromptPreview()` **再发一次**
+   * `previewVideoSubmitPlan` 填进去 —— 于是同一页面对同一个镜头有两份互相独立、
+   * 参数还可能不一致的「提交计划」。现在唯一的来源就是 `requestPlan.plan`
+   * （即「生成视频」真正会提交的那一份），所以弹窗里展示的与即将提交的**必然一致**。
+   *
+   * 字段名保持 `videoPinnedPlan`，是为了让既有的产物文案与守卫测试不受影响。
+   */
+  const videoPinnedPlan = useMemo(
+    () => normalizeVideoPinnedPlan(requestPlan.plan),
+    [requestPlan.plan],
+  )
+
+  /**
    * 第 3 批收尾（审计 §4.3 模式 4/6 + §7.1-6 成对文案）：④「本次请求实际使用的帧」里
    * 后端给的**帧不可用原因**（`reference_preflight` 会把本机 / 内网 host 拼进句子）——
    * 主区只出产品自己写的中文结论，原句只进技术详情层。
@@ -5641,12 +5378,26 @@ function Inspector(props: {
                         >
                           保存到镜头
                         </Button>
+                        {/*
+                          拼装一版提示词：**显式动作**（会调用一次文字模型）。
+                          改前这一步藏在「查看完整请求」弹窗里 —— 用户只想"看一眼请求"，
+                          却顺带触发了一次模型调用；现在它归位到提示词编辑区。
+                        */}
                         <Button
-                          disabled={!videoLlmDerivedPrompt.trim() || videoPromptTabSaving}
-                          onClick={() => setVideoPromptTabDraft(videoLlmDerivedPrompt.trim())}
+                          loading={videoPromptDeriving}
+                          disabled={videoPromptTabSaving}
+                          onClick={() => void deriveVideoPromptForEditor()}
                         >
-                          填入本次生成结果
+                          拼装一版提示词
                         </Button>
+                        {videoLlmDerivedPrompt.trim() ? (
+                          <Button
+                            disabled={videoPromptTabSaving}
+                            onClick={() => setVideoPromptTabDraft(videoLlmDerivedPrompt.trim())}
+                          >
+                            填入最近一次拼装结果
+                          </Button>
+                        ) : null}
                         <Button
                           disabled={videoPromptTabSaving || !videoPromptTabDraft}
                           onClick={() => setVideoPromptTabDraft(savedVideoPrompt)}
@@ -6589,7 +6340,6 @@ function Inspector(props: {
                     </div>
                     <div className="text-xs text-gray-500">
                       生成入口在工作区「⑥ 生成视频」；这里只列已产出的视频（同一份预检与守卫）。
-                      {videoTaskStatus ? ` 任务状态：${taskStatusLabel(videoTaskStatus)}` : ''}
                     </div>
                   </div>
 
@@ -7808,143 +7558,202 @@ function Inspector(props: {
           })()}
         </Modal>
 
+        {/*
+          ============================ 「查看完整请求」弹窗（**纯只读**） ============================
+
+          本轮最终收口（任务书 §8）。改前这个弹窗叫「视频生成提示词预览」，里面有
+          「保存提示词」「重新生成（下一轮）」「生成」三个**写操作** —— 于是同一个页面上
+          存在第二套出视频的链路，还能绕过四项生成设置与生成前预检。
+
+          现在它的定位是**纯只读详情**：标题、页脚、正文里都没有任何写操作，
+          只有一个「关闭」。展示的内容全部来自 `requestPlan`（= 「生成视频」真正会提交的
+          那一份计划），所以「看到的请求」与「提交的请求」必然一致。
+
+          保留的信息：提示词、参考方式与参考帧、声音、画幅、分辨率、时长、模型；
+          原始请求与后端原话放在默认收起的「技术详情」里。
+
+          提示词的编辑与保存不在这一层：它在第 3 步的「视频提示词」编辑区
+          （保存到镜头 / 拼装一版提示词），那里有独立的校验与来源标记。
+        */}
         <Modal
-          title="视频生成提示词预览"
+          title="本次生成请求（只读）"
           open={videoPromptPreviewOpen}
-          onCancel={() => {
-            if (videoPromptPreviewSubmitting) return
-            setVideoPromptPreviewOpen(false)
-          }}
+          onCancel={() => setVideoPromptPreviewOpen(false)}
           footer={[
-            <Button
-              key="cancel"
-              disabled={videoPromptPreviewSubmitting || videoPromptSaving}
-              onClick={() => {
-                if (videoPromptPreviewSubmitting || videoPromptSaving) return
-                setVideoPromptPreviewOpen(false)
-              }}
-            >
-              取消
-            </Button>,
-            <Button
-              key="save-prompt"
-              loading={videoPromptSaving}
-              disabled={videoPromptPreviewSubmitting || videoPromptPreviewLoading}
-              onClick={() => void saveVideoPromptToShot()}
-            >
-              保存提示词
-            </Button>,
-            <Button
-              key="regenerate"
-              danger
-              loading={videoPromptPreviewSubmitting}
-              disabled={videoPromptSaving}
-              onClick={() => void regenerateVideoGeneration()}
-            >
-              重新生成（下一轮）
-            </Button>,
-            <Button
-              key="submit"
-              type="primary"
-              loading={videoPromptPreviewSubmitting}
-              disabled={videoPromptSaving}
-              onClick={() => void submitVideoGeneration()}
-            >
-              生成
+            <Button key="close" onClick={() => setVideoPromptPreviewOpen(false)}>
+              关闭
             </Button>,
           ]}
           width={900}
           destroyOnHidden
         >
-          {videoPromptPreviewLoading ? (
-            <div className="py-8 text-center">
-              <Spin />
+          <div className="space-y-3">
+            <Alert
+              type="info"
+              showIcon
+              message="这一页只是把即将提交的内容摊开给你看，不能在这里生成或修改"
+              description="要改提示词请到第 3 步的「视频提示词」编辑区保存；要出视频请在生成设置行点「生成视频」。"
+            />
+
+            {/* -------------------- 1. 四项生成设置（真正会随请求提交的值） -------------------- */}
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
+              <div className="font-medium text-slate-700">本次生成设置</div>
+              <div className="mt-2 flex flex-wrap gap-2" data-testid="inspect-request-settings">
+                <Tag>{`画幅：${requestPlan.settings.ratio || requestPlan.plan?.ratio || '未取到'}`}</Tag>
+                {/* 模型原名可以直接展示（本轮产品口径）：下拉里也是同一个真实模型名 */}
+                <Tag>{`视频模型：${requestPlan.settings.model || requestPlan.plan?.model_name || '未取到'}`}</Tag>
+                <Tag>{`分辨率：${requestPlan.settings.resolution || requestPlan.plan?.resolution || '未取到'}`}</Tag>
+                <Tag>{`时长：${requestPlan.settings.durationSeconds ?? requestPlan.plan?.seconds ?? '未取到'}s`}</Tag>
+              </div>
+              <div className="mt-2 text-[11px] leading-5">
+                {requestPlan.generateBlockedReason
+                  ? `当前还生成不了：${requestPlan.generateBlockedReason}`
+                  : '这四项会随请求一起提交，并由服务端按该模型的允许范围再校验一次。'}
+              </div>
             </div>
-          ) : (
-            <div className="space-y-3">
-              <div
-                className={`rounded-lg border px-3 py-2 text-[11px] leading-5 ${
-                  savedVideoPrompt
-                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                    : 'border-slate-200 bg-slate-50 text-slate-600'
-                }`}
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium">
-                    {savedVideoPrompt ? '该镜头已有保存的视频提示词' : '该镜头尚未保存视频提示词'}
-                  </span>
-                  {savedVideoPrompt ? (
-                    <>
-                      <Tag color="green">{`来源：${videoPromptSourceLabel(savedVideoPromptSource)}`}</Tag>
-                      <Tag>{`长度 ${savedVideoPrompt.length} 字`}</Tag>
-                      {savedVideoPromptDiffers ? <Tag color="orange">与当前编辑内容不一致</Tag> : null}
-                    </>
-                  ) : (
-                    <Tag>交付导出读取这里保存的提示词</Tag>
-                  )}
-                </div>
-                <div className="mt-1">
-                  {savedVideoPrompt
-                    ? '打开弹窗时已回填该已保存内容，并且不会被大模型结果自动覆盖；点击「保存提示词」才会写回。'
-                    : '当前草稿尚未落库，交付页面（「提示词导入/交付」）读不到；点击「保存提示词」可写入该镜头。'}
-                </div>
-                <div className="mt-1">
-                  {`本次保存将标记来源为：${videoPromptSourceLabel(videoPromptSaveSource)}`}
-                  {videoLlmResultDiffers ? '（与本次大模型生成结果不一致）' : '（与本次大模型生成结果一致）'}
-                </div>
-              </div>
-              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
-                {/* 审计 §4.3 模式 4：「生成路径：直提」+ 两个完整接口路径 + Celery/Redis/pending
-                    整段从主区撤下 —— 接口路径与历史实现说明下沉到下面默认收起的「技术详情」。 */}
-                <div className="font-medium">生成方式：立即执行，生成完自动挂到本镜</div>
-                <div className="mt-1">
-                  「生成」会在当前服务里直接跑完并等你看到结果：成功后自动把成片登记成素材并挂到本镜
-                  （刷新后仍可见、交付也能读到）。
-                </div>
-                <div className="mt-1">
-                  本集统一用「短视频标准方案」（固定 480p、最短 5 秒）；
-                  参考音频（若该镜头绑定）与参考图也会一并带上。演练模式下只返回占位结果，不发生真实费用。
-                </div>
-                {videoPinnedPlan ? (
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <Tag color={videoPinnedPlan.modelPinned ? 'green' : 'red'}>
-                      {`模型方案：${videoModelBusinessName(videoPinnedPlan.modelName)}`}
-                    </Tag>
-                    <Tag>{`分辨率：${videoPinnedPlan.resolution || '未知'}`}</Tag>
-                    <Tag>{`最短时长：${videoPinnedPlan.seconds || 0}s`}</Tag>
-                    {/* 审计 §4.3 模式 5：「供应商：prov-xxx」从主区移除，原始值只进技术详情 */}
-                    {videoPinnedPlan.providerSupported ? null : <Tag color="red">当前视频方案不支持这个参考方式</Tag>}
-                  </div>
+
+            {/* -------------------- 2. 已保存 / 即将提交的提示词（只读） -------------------- */}
+            <div
+              className={`rounded-lg border px-3 py-2 text-[11px] leading-5 ${
+                savedVideoPrompt
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                  : 'border-slate-200 bg-slate-50 text-slate-600'
+              }`}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">
+                  {savedVideoPrompt ? '该镜头已有保存的视频提示词' : '该镜头尚未保存视频提示词'}
+                </span>
+                {savedVideoPrompt ? (
+                  <>
+                    {/* ⚠️ 同一字段同口径：这里的「来源：…」与工作区 ① 必须都走 videoPromptSourceLabel */}
+                    <Tag color="green">{`来源：${videoPromptSourceLabel(savedVideoPromptSource)}`}</Tag>
+                    <Tag>{`长度 ${savedVideoPrompt.length} 字`}</Tag>
+                  </>
                 ) : (
-                  // 审计 §4.3 点名的开发术语：「契约」不上主区
-                  <div className="mt-2">暂时还读不到这次的视频方案预览（参考图数量或镜头数据不满足生成条件）。</div>
+                  <Tag>交付导出读取的是编辑区保存过的那一份</Tag>
                 )}
-                <div className="mt-1">
-                  {videoPinnedPlan?.guardStatus
-                    ? `是否允许真实付费：${describeGuardStatus(videoPinnedPlan.guardStatus)}`
-                    : '暂时读不到是否允许真实付费（未取到计划预览）。'}
-                </div>
-                {videoPinnedPlan && videoPinnedPlan.warnings.length > 0 ? (
-                  /* 第 3 批收尾（审计 §4.3 模式 4/6 + §7.1-6 成对文案）：
-                     旧实现把后端 warnings 过一遍管道后逐条铺在主区 —— 那仍然是**后端句子的改写结果**，
-                     且原因里可能带本机 / 内网 host。主区改成产品自己写的中文结论，
-                     后端原话进默认收起的「技术详情」。 */
-                  <div className="mt-1">
-                    <div className="rounded bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
-                      {`这次的提交计划有 ${videoPinnedPlan.warnings.length} 条需要注意的地方：可能有个别参考图没能带上，或时长 / 画幅按项目默认值提交。`}
-                      生成前请先核对上面的方案标签与参考图；原始说明见下面的「技术详情」。
-                    </div>
-                    <TechnicalDetailSection testId="video-pinned-plan-warning-detail" hint="生成服务对这次提交计划的原始说明">
-                      <ul className="mt-0 list-disc pl-4">
-                        {videoPinnedPlan.warnings.map((item: string, index: number) => (
-                          <li key={`video-pinned-warning-${index}`}>{maskInternalIds(item)}</li>
-                        ))}
-                      </ul>
-                    </TechnicalDetailSection>
-                  </div>
-                ) : null}
-                {/* 审计 §4.3 模式 4：「DRY_RUN 守卫只作用于直提端点…」整句下沉到「技术详情」 */}
               </div>
+              <div className="mt-1">
+                {savedVideoPrompt
+                  ? '要修改它，请到第 3 步的「视频提示词」编辑区改好再点「保存到镜头」；这一页只读，不会写回任何内容。'
+                  : '还没有保存过的提示词：请到第 3 步的「视频提示词」编辑区写好并保存，交付导出才读得到。'}
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-1 text-xs text-gray-500">本次提交的提示词</div>
+              {String(requestPlan.plan?.prompt ?? '').trim() ? (
+                <pre
+                  className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700"
+                  data-testid="inspect-request-prompt"
+                >
+                  {String(requestPlan.plan?.prompt ?? '')}
+                </pre>
+              ) : (
+                <div className="text-xs text-gray-400">未取到本次提交的提示词。</div>
+              )}
+              {requestPlan.plan?.prompt_source ? (
+                <div className="mt-1 text-[11px] text-gray-400">
+                  {`这份提示词的来源：${videoPromptSourceLabel(requestPlan.plan.prompt_source)}`}
+                </div>
+              ) : null}
+            </div>
+
+            {/* -------------------- 3. 参考方式与参考帧 -------------------- */}
+            <div>
+              <div className="mb-1 text-xs text-gray-500">
+                {`参考方式：${referenceModeLabel(requestPlan.plan?.reference_mode ?? requestPlan.referenceMode)}`}
+              </div>
+              {(requestPlan.plan?.frames ?? []).length === 0 ? (
+                <div className="text-xs text-gray-400">本次没有参考帧（纯文本提交）。</div>
+              ) : (
+                <div className="space-y-1">
+                  {(requestPlan.plan?.frames ?? []).map((frame: VideoPlanFrame) => (
+                    <div
+                      key={`${frame.role}:${frame.frame_type}`}
+                      className="flex items-center justify-between gap-2 rounded border border-slate-200 px-2 py-1 text-[11px]"
+                    >
+                      <span>{`${frameTypeLabel(frame.frame_type)}：${frame.file_id ? '已绑定' : '未绑定'}`}</span>
+                      <Tag color={frame.usable ? 'green' : 'red'}>
+                        {frame.usable ? '可以带上' : describeFrameBlockReason(frame.reason).mainText}
+                      </Tag>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* -------------------- 4. 声音 -------------------- */}
+            <div>
+              <div className="mb-1 text-xs text-gray-500">声音</div>
+              {requestPlan.audioFile ? (
+                <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                  <Tag color="blue">本镜已绑定声音</Tag>
+                  <span className="text-gray-500">
+                    {requestPlan.plan?.audio?.included
+                      ? '会作为参考音频随本次请求一起提交。'
+                      : '本次不会携带它（原因见技术详情）。'}
+                  </span>
+                </div>
+              ) : (
+                <div className="text-xs text-gray-400">本镜没有绑定声音。</div>
+              )}
+            </div>
+
+            {/* -------------------- 5. 固定策略、守卫与告警 -------------------- */}
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
+              <div className="font-medium">生成方式：立即执行，生成完自动挂到本镜</div>
+              <div className="mt-1">
+                「生成视频」会在当前服务里直接跑完并等你看到结果：成功后自动把成片登记成素材并挂到本镜
+                （刷新后仍可见、交付也能读到）。
+              </div>
+              <div className="mt-1">
+                本集统一用「短视频标准方案」（固定 480p、最短 5 秒）；
+                参考音频（若该镜头绑定）与参考图也会一并带上。演练模式下只返回占位结果，不发生真实费用。
+              </div>
+              {videoPinnedPlan ? (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Tag color={videoPinnedPlan.modelPinned ? 'green' : 'red'}>
+                    {`模型：${videoModelBusinessName(videoPinnedPlan.modelName)}`}
+                  </Tag>
+                  <Tag>{`分辨率：${videoPinnedPlan.resolution || '未知'}`}</Tag>
+                  <Tag>{`最短时长：${videoPinnedPlan.seconds || 0}s`}</Tag>
+                  {/* 审计 §4.3 模式 5：「供应商：prov-xxx」从主区移除，原始值只进技术详情 */}
+                  {videoPinnedPlan.providerSupported ? null : <Tag color="red">当前视频方案不支持这个参考方式</Tag>}
+                </div>
+              ) : (
+                <div className="mt-2">暂时还读不到这次的视频方案预览（参考图数量或镜头数据不满足生成条件）。</div>
+              )}
+              <div className="mt-1">
+                {videoPinnedPlan?.guardStatus
+                  ? `是否允许真实付费：${describeGuardStatus(videoPinnedPlan.guardStatus)}`
+                  : '暂时读不到是否允许真实付费（未取到计划预览）。'}
+              </div>
+              {videoPinnedPlan && videoPinnedPlan.warnings.length > 0 ? (
+                /* 第 3 批收尾（审计 §4.3 模式 4/6 + §7.1-6 成对文案）：
+                   旧实现把后端 warnings 过一遍管道后逐条铺在主区 —— 那仍然是**后端句子的改写结果**，
+                   且原因里可能带本机 / 内网 host。主区改成产品自己写的中文结论，
+                   后端原话进默认收起的「技术详情」。 */
+                <div className="mt-1">
+                  <div className="rounded bg-amber-50 px-3 py-2 text-[11px] leading-5 text-amber-800">
+                    {`这次的提交计划有 ${videoPinnedPlan.warnings.length} 条需要注意的地方：可能有个别参考图没能带上，或时长 / 画幅按项目默认值提交。`}
+                    生成前请先核对上面的方案标签与参考图；原始说明见下面的「技术详情」。
+                  </div>
+                  <TechnicalDetailSection testId="video-pinned-plan-warning-detail" hint="生成服务对这次提交计划的原始说明">
+                    <ul className="mt-0 list-disc pl-4">
+                      {videoPinnedPlan.warnings.map((item: string, index: number) => (
+                        <li key={`video-pinned-warning-${index}`}>{maskInternalIds(item)}</li>
+                      ))}
+                    </ul>
+                  </TechnicalDetailSection>
+                </div>
+              ) : null}
+              {/* 审计 §4.3 模式 4：「DRY_RUN 守卫只作用于直提端点…」整句下沉到「技术详情」 */}
+            </div>
+
+            {/* -------------------- 6. 镜头连续性上下文（拼装过一次才展示） -------------------- */}
+            {videoPromptPreviewPack ? (
               <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-600">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -8041,48 +7850,40 @@ function Inspector(props: {
                   ) : null}
                 </div>
               </div>
-              <div>
-                <div className="text-xs text-gray-500 mb-2">关联图片（参考图）</div>
-                {videoPromptPreviewImages.length === 0 ? (
-                  <div className="text-xs text-gray-400">暂无关联图片</div>
-                ) : (
-                  <div className="flex gap-2 overflow-x-auto pb-1">
-                    <Image.PreviewGroup>
-                      {videoPromptPreviewImages.map((fid) => (
-                        <Image
-                          key={fid}
-                          width={72}
-                          height={72}
-                          style={{ objectFit: 'cover', borderRadius: 8 }}
-                          src={buildFileDownloadUrl(fid)}
-                        />
-                      ))}
-                    </Image.PreviewGroup>
-                  </div>
-                )}
-              </div>
-              <div>
-                <div className="mb-2 flex items-center justify-between gap-3">
-                  <div className="text-xs text-gray-500">提示词（可编辑）</div>
-                  <div className="flex items-center gap-2">
-                    {videoLlmDerivedPromptTrimmed && videoLlmResultDiffers ? (
-                      <Button type="link" size="small" className="px-0" onClick={applyVideoLlmDerivedPrompt}>
-                        使用本次大模型结果
-                      </Button>
-                    ) : null}
-                    <span className="text-[11px] text-gray-400">{`保存来源：${videoPromptSourceLabel(videoPromptSaveSource)}`}</span>
-                  </div>
+            ) : null}
+
+            {/* -------------------- 7. 关联图片（参考图） -------------------- */}
+            <div>
+              <div className="text-xs text-gray-500 mb-2">关联图片（参考图）</div>
+              {requestPlan.imageFiles.length === 0 ? (
+                <div className="text-xs text-gray-400">暂无关联图片</div>
+              ) : (
+                <div className="flex gap-2 overflow-x-auto pb-1">
+                  <Image.PreviewGroup>
+                    {requestPlan.imageFiles.map((item) => (
+                      <Image
+                        key={String(item.file_id ?? item.slot ?? Math.random())}
+                        width={72}
+                        height={72}
+                        style={{ objectFit: 'cover', borderRadius: 8 }}
+                        src={item.url || buildFileDownloadUrl(String(item.file_id ?? ''))}
+                      />
+                    ))}
+                  </Image.PreviewGroup>
                 </div>
-                <Input.TextArea
-                  rows={10}
-                  value={videoPromptPreviewDraft}
-                  onChange={(e) => videoPromptDraft.setBase({ prompt: e.target.value })}
-                  placeholder="请输入视频提示词…"
-                  disabled={videoPromptPreviewSubmitting || videoPromptSaving}
-                />
-              </div>
+              )}
             </div>
-          )}
+
+            {/* -------------------- 8. 技术详情（默认收起）：原始请求与后端原话 -------------------- */}
+            <TechnicalDetailSection
+              testId="video-request-technical-detail"
+              hint="本次生成请求的原始字段与后端原话，只在排查问题时需要看。"
+            >
+              <div className="whitespace-pre-wrap break-all text-[11px]">
+                {maskInternalIds(JSON.stringify(requestPlan.plan ?? {}, null, 2))}
+              </div>
+            </TechnicalDetailSection>
+          </div>
         </Modal>
       </div>
     </div>

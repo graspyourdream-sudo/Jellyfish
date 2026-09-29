@@ -342,7 +342,7 @@ export const VIDEO_PROMPT_SOURCE = enumSpec(
     /* ⚠️ 全站唯一名字，不许再起别名（用户 2026-09-26 拍板）。
      *
      * `jurilu` 是**外部导入工具名**，不是模型供应商，也不是 6 类泄漏模式里的任何一类：
-     * 它是本项目的业务流程名词（导航「提示词导入/交付」、抓取面板标题、审计 §4.5 的建议口径
+     * 它是本项目的业务流程名词（导航「提示词管理 · 导入与交付」、抓取面板标题、审计 §4.5 的建议口径
      * 「来源：巨日禄导入」都在用它）。要隐藏的是**枚举原名 `jurilu`**，不是这个工具名。
      *
      * 历史上同一条文案出现过三种写法（本文件的「剧立方导入」、`ProjectStudioStepPanel` 的
@@ -526,36 +526,49 @@ export const TASK_KIND = enumSpec(
   '后台任务',
 )
 
-/* -------------------------------------------------- 模型方案的业务名称（§6.2） */
+/* ------------------------------------------------ 模型名称的展示口径（本轮最终口径） */
 
 /**
- * 视频出口的模型方案业务名。
+ * ## 产品口径：**模型原名允许直接展示**
  *
- * 口径来源：审计 §6.2 ——「用户要判断的是这套方案贵不贵、够不够快、能不能出我要的效果，
- * 而不是厂商叫什么」；原始 provider / 模型 ID / 模型名一律进技术详情。
- * 现成先例是 `chapter/components/useShotRequestPlan.ts` 的 `videoModelBusinessName()`，
- * 本表按同一模式把它以及**文本出口 / 图片出口**收敛到一处（审计 §6.2 要求「各补一张同型表」）。
+ * 本轮最终收口（任务书 §七）推翻了两条旧要求：
+ *   - 旧：「模型原名只能进技术详情」；
+ *   - 旧：「模型下拉不能显示模型原名」（于是未登记的模型被模糊成「档位 1 / 档位 2」，
+ *     用户根本分不清自己选的是哪个模型）。
+ *
+ * 现在允许展示模型原名的位置（§7.1 逐条列出）：视频生成模型选择器 / 图片生成模型选择器 /
+ * 模型管理 / 生成设置确认 / 费用确认 / 生成结果所使用的模型说明。
+ * `seedance-2.0-mini` 这类真实名称可以直接上屏，不需要改成「档位 1」。
+ *
+ * ## 显示规则（§7.2）
+ *
+ * | 情形 | 显示 |
+ * |---|---|
+ * | 有独立显示名 + 有模型原名 | `显示名 · 模型原名`（例：`快速视频 · seedance-2.0-mini`） |
+ * | 只有独立显示名 | 显示名 |
+ * | 只有模型原名 | **模型原名**（不编造「档位」之类的序号） |
+ * | 两个都没有 | 出口兜底（「当前视频方案」等），**不回显空值** |
+ *
+ * 选中的值**永远按真实稳定值提交**：本模块只决定"显示成什么字"，
+ * 下拉选项的 `value` 始终是真实模型名（见 `chapter/components/studio/StudioGenerateSettings.tsx`），
+ * 所以显示名转换**不可能**导致提交错模型。
+ *
+ * ## 今天为什么看到的就是模型原名
+ *
+ * `models` 表里 `name` 就是模型唯一名，**没有**独立的显示名列
+ * （`backend/app/models/llm.py` 的 `Model` 只有 `name` / `description`）。
+ * 既然系统里没有"已配置的用户显示名"，按上表第 3 行就**直接显示真实模型名** ——
+ * 这比编一个「档位 1」诚实，也保证下拉里两项一定区分得开。
+ * 将来真加了显示名列，把它作为 `displayName` 传进来，第 1 行的形态自动生效。
+ *
+ * ## 仍然禁止上屏的内容（本轮**没有**放开）
+ *
+ * 供应商内部代号 / 接口路径 / 数据库字段名 / `file_id`·`task_id`·`script_id` 等内部 ID /
+ * 原始状态枚举 / HTTP 状态码 / 请求体响应体与原始错误对象 / 环境变量 / 调试参数 ——
+ * 这些继续由 `components/mainScreenCopyGuard.ts` 的词表盯着（模型原名已从该词表移除）。
  */
-export const VIDEO_MODEL_BUSINESS_NAMES: Readonly<Record<string, string>> = {
-  'seedance-2.0-mini': '短视频标准方案',
-  'seedance-2.0': '短视频标准方案',
-  'seedance-1.0-pro': '短视频高清方案',
-}
 
-/** 文本（提示词）出口的模型方案业务名。原始模型名只在技术详情里出现。 */
-export const TEXT_MODEL_BUSINESS_NAMES: Readonly<Record<string, string>> = {
-  'deepseek-chat': '文本标准方案',
-  'deepseek-reasoner': '文本深度思考方案',
-}
-
-/** 图片出口的模型方案业务名。 */
-export const IMAGE_MODEL_BUSINESS_NAMES: Readonly<Record<string, string>> = {
-  'gpt-image-2': '图片标准方案',
-  image2: '图片标准方案',
-  'nano-banana-2-ext': '图片高清方案',
-}
-
-/** 三个出口的业务名兜底。**绝不允许回显模型原名 / provider 名。** */
+/** 三个出口「连模型名都拿不到」时的兜底。**绝不回显空串，也不回显供应商代号。** */
 export const MODEL_BUSINESS_NAME_FALLBACK: Readonly<Record<string, string>> = {
   video: '当前视频方案',
   text: '当前文本方案',
@@ -564,40 +577,101 @@ export const MODEL_BUSINESS_NAME_FALLBACK: Readonly<Record<string, string>> = {
 
 export type ModelOutlet = 'text' | 'image' | 'video'
 
-const MODEL_BUSINESS_NAME_TABLE: Readonly<Record<ModelOutlet, Readonly<Record<string, string>>>> = {
-  text: TEXT_MODEL_BUSINESS_NAMES,
-  image: IMAGE_MODEL_BUSINESS_NAMES,
-  video: VIDEO_MODEL_BUSINESS_NAMES,
+/**
+ * 三张**同型表**：真实模型名 → 一句业务摘要。
+ *
+ * 它们不再用于"遮住模型名"，而是给需要一句话概括的场景（列表摘要、批量说明）用；
+ * 主区凡是要指出"用的是哪个模型"的地方，一律显示真实模型名（见 `modelDisplayLabel`）。
+ */
+export const VIDEO_MODEL_BUSINESS_NAMES: Readonly<Record<string, string>> = {
+  'seedance-2.0-mini': '短视频标准方案',
+  'seedance-2.0': '短视频标准方案',
+  'seedance-1.0-pro': '短视频高清方案',
+}
+
+export const TEXT_MODEL_BUSINESS_NAMES: Readonly<Record<string, string>> = {
+  'deepseek-chat': '文本标准方案',
+  'deepseek-reasoner': '文本深度思考方案',
+}
+
+export const IMAGE_MODEL_BUSINESS_NAMES: Readonly<Record<string, string>> = {
+  'gpt-image-2': '图片标准方案',
+  image2: '图片标准方案',
+  'nano-banana-2-ext': '图片高清方案',
+}
+
+export type ModelDisplayInput = {
+  /** 真实模型名（后端 `models.name`，也是提交时用的稳定值） */
+  modelName?: string | null
+  /** 系统里已配置的用户显示名（今天没有这一列，调用方通常不传） */
+  displayName?: string | null
+  outlet?: ModelOutlet
 }
 
 /**
- * 原始模型名 → 主区业务说法（三出口各一张表）。
+ * 模型名称的**唯一**展示实现（规则见文件头那张表）。
  *
- * 与旧 `videoModelBusinessName()` 的关键区别：旧实现的兜底是 `?? key`，
- * 也就是**未登记的模型名会原样上屏** —— 那正是模式 5 泄漏。
- * 这里未登记时给「当前 XXX 方案」，原始名只进技术详情。
+ * 它只决定"显示成什么字"；**提交值不受影响** —— 提交始终用调用方手里的真实值。
  */
-export function modelBusinessName(outlet: ModelOutlet, modelName: string | null | undefined): string {
-  const key = String(modelName ?? '').trim()
-  if (!key) return MODEL_BUSINESS_NAME_FALLBACK[outlet]
-  const table = MODEL_BUSINESS_NAME_TABLE[outlet]
-  return table[key] ?? table[key.toLowerCase()] ?? MODEL_BUSINESS_NAME_FALLBACK[outlet]
+export function modelDisplayLabel(input: ModelDisplayInput): string {
+  const outlet: ModelOutlet = input.outlet ?? 'video'
+  const modelName = String(input.modelName ?? '').trim()
+  const displayName = String(input.displayName ?? '').trim()
+  if (displayName && modelName && displayName !== modelName) return `${displayName} · ${modelName}`
+  if (displayName) return displayName
+  if (modelName) return modelName
+  return MODEL_BUSINESS_NAME_FALLBACK[outlet]
 }
 
-/** 视频出口（保留旧名，调用点可平滑替换）。 */
-export function videoModelBusinessName(modelName: string | null | undefined): string {
-  return modelBusinessName('video', modelName)
+/**
+ * 出口通用入口（保留旧名，调用点可平滑替换）。
+ *
+ * ⚠️ **语义已变**：未登记的模型名不再被吞成「当前 XXX 方案」，
+ * 而是**原样显示真实名称** —— 这正是本轮口径要求的"允许展示模型原名"。
+ * 第三个参数是新增的可选显示名，用来实现 `显示名 · 原名` 形态。
+ */
+export function modelBusinessName(
+  outlet: ModelOutlet,
+  modelName: string | null | undefined,
+  displayName?: string | null,
+): string {
+  return modelDisplayLabel({ outlet, modelName, displayName })
+}
+
+/** 视频出口。 */
+export function videoModelBusinessName(
+  modelName: string | null | undefined,
+  displayName?: string | null,
+): string {
+  return modelDisplayLabel({ outlet: 'video', modelName, displayName })
 }
 
 /** 文本出口。 */
-export function textModelBusinessName(modelName: string | null | undefined): string {
-  return modelBusinessName('text', modelName)
+export function textModelBusinessName(
+  modelName: string | null | undefined,
+  displayName?: string | null,
+): string {
+  return modelDisplayLabel({ outlet: 'text', modelName, displayName })
 }
 
 /** 图片出口。 */
-export function imageModelBusinessName(modelName: string | null | undefined): string {
-  return modelBusinessName('image', modelName)
+export function imageModelBusinessName(
+  modelName: string | null | undefined,
+  displayName?: string | null,
+): string {
+  return modelDisplayLabel({ outlet: 'image', modelName, displayName })
 }
+
+/**
+ * 一句话业务摘要（**不遮模型名**，只是在模型名前后给一句人话）。
+ *
+ * 用于「需要一句概括」的场合：返回 `显示名 · 真实模型名` 的展示标签，
+ * 拿不到模型名时才退回业务方案名。**未登记的模型名照样原样显示。**
+ */
+export function modelSummaryLabel(outlet: ModelOutlet, modelName: string | null | undefined): string {
+  return modelDisplayLabel({ outlet, modelName })
+}
+
 
 /* ------------------------------- §4.3 ChapterStudio：几个带兜底的出口（单一定义） */
 
@@ -994,7 +1068,13 @@ export const ENUM_RAW_VALUES: readonly string[] = Array.from(
   new Set(ALL_ENUM_SPECS.flatMap((spec) => spec.values.map((value) => value.toLowerCase()))),
 ).sort()
 
-/** 全部模型原名（模式 5 的扫描词源，审计 §8.1 第 4 点）。 */
+/**
+ * 全部模型原名（上面三张表的 key 全集）。
+ *
+ * ⚠️ **用途已变**：它不再是"主区禁词词源"（模型原名允许上屏，见 `modelDisplayLabel`），
+ * 现在只作为「模型词表非空」的自检来源 —— 保证那三张表没有被写空。
+ * 禁词表里**已经移除**模型原名，见 `components/mainScreenCopyGuard.ts`。
+ */
 export const MODEL_RAW_NAMES: readonly string[] = Array.from(
   new Set(
     [VIDEO_MODEL_BUSINESS_NAMES, TEXT_MODEL_BUSINESS_NAMES, IMAGE_MODEL_BUSINESS_NAMES].flatMap((table) =>

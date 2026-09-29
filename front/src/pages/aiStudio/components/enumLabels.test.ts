@@ -32,12 +32,14 @@ import {
   labelFor,
   lookupLabel,
   modelBusinessName,
+  modelDisplayLabel,
   partialFailureHeadline,
   textModelBusinessName,
   videoModelBusinessName,
   videoPromptSourceLabel,
   type EnumSpec,
 } from './enumLabels.ts'
+import { findMainScreenLeaks } from './mainScreenCopyGuard.ts'
 
 /** `components/` → `src/`：别名守卫要扫全仓源码。 */
 const SRC_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
@@ -297,21 +299,46 @@ test('参考方式的未登记兜底不是原值', () => {
   assert.equal(labelFor(REFERENCE_MODE, 'brand_new_mode'), '未识别的参考方式')
 })
 
-/* ------------------------------------------------- §6.2 模型方案业务名 */
+/* ------------------------------------ §7 模型名称展示口径（本轮最终：原名允许上屏） */
 
-test('模型方案名：已登记给出业务说法，未登记给「当前 XXX 方案」而不是模型原名', () => {
-  assert.equal(videoModelBusinessName('seedance-2.0-mini'), '短视频标准方案')
-  assert.equal(textModelBusinessName('deepseek-chat'), '文本标准方案')
-  assert.equal(imageModelBusinessName('gpt-image-2'), '图片标准方案')
-  // 未登记：绝不能回显原始模型名
-  assert.equal(videoModelBusinessName('seedance-9.9-turbo'), '当前视频方案')
-  assert.equal(textModelBusinessName('some-new-llm'), '当前文本方案')
-  assert.equal(imageModelBusinessName('flux-pro-99'), '当前图片方案')
-  assert.equal(modelBusinessName('video', ''), '当前视频方案')
-  assert.equal(modelBusinessName('image', null), '当前图片方案')
+/**
+ * 本轮最终口径（任务书 §七）**推翻**了旧要求：
+ *   - 旧：模型原名只能进技术详情；未登记模型给「当前 XXX 方案」，不许回显原名；
+ *   - 新：**模型原名允许在正常用户页面直接展示**（模型选择器 / 模型管理 /
+ *     生成设置确认 / 费用确认 / 生成结果说明）。
+ *
+ * 因此下面这几条断言全部**反向**：原来断言"不许含原名"，现在断言"原名必须能看到"。
+ */
+
+test('模型名称：没有独立显示名时**直接显示真实模型名**（不编造「档位 1」）', () => {
+  assert.equal(videoModelBusinessName('seedance-2.0-mini'), 'seedance-2.0-mini')
+  assert.equal(textModelBusinessName('deepseek-chat'), 'deepseek-chat')
+  assert.equal(imageModelBusinessName('gpt-image-2'), 'gpt-image-2')
+  /* 未登记的模型名同样原样显示 —— 旧实现把它吞成「当前视频方案」，
+     用户在下拉里就分不清自己选的是哪个模型。 */
+  assert.equal(videoModelBusinessName('seedance-9.9-turbo'), 'seedance-9.9-turbo')
+  assert.equal(textModelBusinessName('some-new-llm'), 'some-new-llm')
+  assert.equal(imageModelBusinessName('flux-pro-99'), 'flux-pro-99')
 })
 
-test('模型方案名绝不含「供应商」这类主区禁词', () => {
+test('模型名称：有独立显示名时是「显示名 · 模型原名」', () => {
+  assert.equal(
+    modelDisplayLabel({ outlet: 'video', modelName: 'seedance-2.0-mini', displayName: '快速视频' }),
+    '快速视频 · seedance-2.0-mini',
+  )
+  /* 只给显示名（没有模型名）时用显示名 */
+  assert.equal(modelDisplayLabel({ outlet: 'video', modelName: '', displayName: '快速视频' }), '快速视频')
+  /* 显示名与模型名相同时不重复拼 */
+  assert.equal(modelDisplayLabel({ video: undefined, outlet: 'video', modelName: 'x', displayName: 'x' } as never), 'x')
+})
+
+test('模型名称：连模型名都拿不到时给中文兜底，不回显空值', () => {
+  assert.equal(modelBusinessName('video', ''), '当前视频方案')
+  assert.equal(modelBusinessName('image', null), '当前图片方案')
+  assert.equal(modelBusinessName('text', undefined), '当前文本方案')
+})
+
+test('模型名称仍不含「供应商」/ provider 这类内部代号（本轮只放开模型原名）', () => {
   const samples = ['seedance-2.0-mini', 'deepseek-chat', 'gpt-image-2', 'unmapped-model']
   ;(['video', 'text', 'image'] as const).forEach((outlet) => {
     samples.forEach((sample) => {
@@ -322,15 +349,32 @@ test('模型方案名绝不含「供应商」这类主区禁词', () => {
   })
 })
 
-test('模型原始名不得出现在业务说法里（原始名只进技术详情）', () => {
-  const offenders: string[] = []
-  ;(['video', 'text', 'image'] as const).forEach((outlet) => {
-    MODEL_RAW_NAMES.forEach((raw) => {
-      const label = modelBusinessName(outlet, raw)
-      if (label.toLowerCase().includes(raw)) offenders.push(`${outlet}：${raw} → 「${label}」仍含原始名`)
-    })
+test('模型词表非空（原名词源表被写空会立刻暴露）', () => {
+  assert.ok(MODEL_RAW_NAMES.length >= 3, `模型原名词表只有 ${MODEL_RAW_NAMES.length} 个，可疑`)
+  /* 词表里的每一个都必须能原样显示出来 —— 这是本轮口径的核心。 */
+  MODEL_RAW_NAMES.forEach((raw) => {
+    assert.equal(modelBusinessName('video', raw), raw, `${raw} 没有被原样显示`)
   })
-  assert.deepEqual(offenders, [], offenders.join('\n'))
+})
+
+test('模型原名**不再是**主区禁词（词表已从扫描器里移出）', () => {
+  /* 反证：把真实模型名放进用户可见文案里，扫描器**不该**再报它。 */
+  const probe = `const __probe__ = () => <div>本次使用模型：seedance-2.0-mini</div>`
+  const hits = findMainScreenLeaks(probe)
+  assert.deepEqual(
+    hits.filter((hit) => hit.term === 'seedance-2.0-mini'),
+    [],
+    '模型原名仍被判成主区泄漏 —— 本轮口径明确允许展示模型原名',
+  )
+  /* 但别的禁词照抓不误（不能因为放开模型名就把扫描器整体放松）。 */
+  const stillCaught = findMainScreenLeaks(
+    `const __probe__ = () => <div title="供应商 file_id">候选 12 条</div>`,
+  )
+  assert.ok(
+    stillCaught.some((hit) => hit.term === '供应商') &&
+      stillCaught.some((hit) => hit.term === '模式2 内部字段名'),
+    '放开模型原名之后，其它禁词（供应商 / 内部字段名）必须仍然被抓到',
+  )
 })
 
 /* ------------------------------------------------ 外部工具显示名的「别名漂移」守卫 */
