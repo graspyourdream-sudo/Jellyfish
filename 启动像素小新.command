@@ -19,6 +19,9 @@
 #     前端端口被占用且确认是**本项目**的开发服务器 → 直接打开浏览器（不重复起一份）
 #     后端端口被占用 → 自动改用一个空闲端口，并把前端指向它（避免连到别的 worktree 的后端）
 #
+# 其它环境变量：
+#   JELLYFISH_NO_BROWSER=1  只打印地址、不自动打开浏览器（自动化/远程验收用）
+#
 # 停服：回到本窗口按 Control + C（会同时停掉后端和前端）。
 set -u
 
@@ -143,6 +146,20 @@ report_occupied_backend() {
   esac
 }
 
+# 打开浏览器：`JELLYFISH_NO_BROWSER=1` 时只打印地址、不弹标签页
+# （与既有桌面启动项的那个约定同名同义；自动化/远程验收时用）。
+#
+# 为什么要有这个开关：验收时弹出来的标签页会**活过**被停掉的服务 ——
+# 下次有人点它就会看到「连不上后端」，那种"页面还在、后端没了"的假故障，
+# 真机上正是这么踩到的（用户报「创建广告项目失败：Failed to fetch」的那次）。
+open_browser() {
+  if [ "${JELLYFISH_NO_BROWSER:-0}" = "1" ]; then
+    echo "（JELLYFISH_NO_BROWSER=1：不自动打开浏览器，请手动访问上面的地址）"
+    return 0
+  fi
+  command -v open >/dev/null 2>&1 && open "$1" >/dev/null 2>&1 || true
+}
+
 # 两个服务都通了再打开浏览器
 wait_and_open() {
   local attempt backend_url front_url
@@ -154,7 +171,7 @@ wait_and_open() {
       echo "✅ 已就绪：$front_url"
       echo "   （后端：${backend_url}　接口文档：${backend_url}/docs）"
       echo ""
-      command -v open >/dev/null 2>&1 && open "$front_url" >/dev/null 2>&1
+      open_browser "$front_url"
       return 0
     fi
     sleep 0.5
@@ -182,7 +199,7 @@ for arg in "$@"; do
     --check) CHECK_ONLY=1 ;;
     -h|--help)
       # 只打印文件头那段注释（第 1 行是 shebang，不打印），避免维护两份用法说明
-      sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "未知参数：$arg（用 --help 看用法）" >&2; exit 1 ;;
@@ -227,7 +244,7 @@ FRONT_URL="http://${HOST}:${FRONT_PORT}"
 if ! port_free "$FRONT_PORT"; then
   if front_is_ours "$FRONT_URL"; then
     echo "前端已经在运行（${FRONT_URL}），直接打开浏览器，不再重复启动。"
-    command -v open >/dev/null 2>&1 && open "$FRONT_URL" >/dev/null 2>&1
+    open_browser "$FRONT_URL"
     pause_and_exit 0
   fi
   picked="$(find_free_port 7789 7820 || true)"
