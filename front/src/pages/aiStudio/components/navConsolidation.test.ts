@@ -216,6 +216,8 @@ test('短剧项目页的新建只提供普通短剧的两种起步路径（不�
 
 const AD_CREATE = 'pages/aiStudio/project/adProjectCreate.ts'
 const AD_MODAL = 'pages/aiStudio/project/AdProjectCreateModal.tsx'
+/* 创建失败的「原因 / 下一步」两行文案的单一来源（真机反馈收口新增）。 */
+const AD_FAILURE = 'pages/aiStudio/project/adProjectCreateFailure.ts'
 const DRAMA_PLAN = 'pages/aiStudio/dramaPlan/DramaPlanPage.tsx'
 
 test('广告项目的创建只有一份实现：默认值 / 校验 / 请求体 / 提交都在同一个模块', () => {
@@ -302,7 +304,18 @@ test('广告项目创建的防重复与失败恢复（源码级）', () => {
   assert.ok(/data-testid="ad-create-saved"/.test(modal), '缺少"项目已经保存"的中间态出口')
   assert.ok(/项目已经保存/.test(modal), '跳转失败时没有明确说「项目已经保存」')
   assert.ok(/项目\*\*没有\*\*创建成功，也没有保存任何内容/.test(modal), '创建失败时没有说清"有没有保存"')
-  assert.ok(/下一步：/.test(modal), '创建失败时没有给"下一步怎么办"')
+  /* 「原因 / 下一步」两行搬到了 `adProjectCreateFailure.ts`（单一来源）：真机反馈是
+     「后端没在跑」时只弹一句 `Failed to fetch`，用户看不懂、照着"再点一次"也不会好。
+     所以这两句的**内容**断言落在那个模块，弹窗只断言"确实接上了、确实上屏了"。 */
+  assert.ok(existsSync(resolve(SRC_ROOT, AD_FAILURE)), `${AD_FAILURE} 不存在（失败文案的单一来源被删了？）`)
+  assert.ok(
+    /describeAdProjectCreateFailure\(exc\)/.test(modal),
+    '创建失败时没有接上失败文案判定（会退回只弹 Failed to fetch）',
+  )
+  assert.ok(/nextStepLine/.test(modal), '创建失败时没有把"下一步怎么办"上屏')
+  const failure = readCode(AD_FAILURE)
+  assert.ok(/下一步：/.test(failure), '创建失败时没有给"下一步怎么办"')
+  assert.ok(/连不上后端服务/.test(failure), '请求没送到服务时没有点明"连不上后端"')
   assert.ok(/进入策划/.test(modal), '没有提供「进入策划」的重试入口')
   /* 已经保存过时再点主按钮**不再创建**，只重试跳转 */
   assert.ok(/if \(saved\) \{/.test(modal), '已保存的中间态下没有拦住重复创建')

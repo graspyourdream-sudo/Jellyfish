@@ -55,6 +55,9 @@ const SCANNED_FILES: readonly string[] = [
      它们同样在主区渲染文案，必须一起扫。 */
   'AdProjectCreateModal.tsx',
   'adProjectCreate.ts',
+  /* 真机反馈收口新增：创建失败的「原因 / 下一步」两行文案就产自这个模块
+     （它会把**正在连的后端地址**写进用户可见文案），属于用户可见文案，必须一起扫。 */
+  'adProjectCreateFailure.ts',
 ]
 
 function readSource(file: string): string {

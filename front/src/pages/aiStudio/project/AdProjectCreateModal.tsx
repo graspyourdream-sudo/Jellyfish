@@ -40,6 +40,7 @@ import {
 } from './projectStartPresets'
 import { ProjectVisualStyleAndStyleFields } from './ProjectVisualStyleAndStyleFields'
 import { useProjectStyleOptions } from './useProjectStyleOptions'
+import { describeAdProjectCreateFailure } from './adProjectCreateFailure'
 import { listProductEntities, uploadReferenceFile, type ProductEntityOption } from '../../../services/dramaPlanApi'
 import {
   createAdProject,
@@ -204,14 +205,13 @@ export function AdProjectCreateModal({ open, onCancel, onCreated }: AdProjectCre
          不会因为重试再建一次默认章节。 */
       enterPlan(created, { keepOnFailure: true })
     } catch (exc) {
-      const reason = exc instanceof Error && exc.message ? exc.message : ''
-      /* 失败文案必须回答三件事：发生了什么 / 项目有没有保存 / 接下来怎么办。 */
+      /* 失败文案必须回答三件事：发生了什么 / 项目有没有保存 / 接下来怎么办。
+         「原因 / 下一步」两行由 `describeAdProjectCreateFailure` 给 —— 它会把
+         「请求根本没送到服务」和「服务应答了但失败」分开，前者不会只给一句
+         `Failed to fetch`，而是点名正在连的后端地址并给出启动服务的做法。 */
+      const { reasonLine, nextStepLine } = describeAdProjectCreateFailure(exc)
       setErrorText(
-        [
-          '项目**没有**创建成功，也没有保存任何内容。',
-          reason && reason !== 'empty project' ? `原因：${reason}` : '原因：创建接口这次没有成功（可能是网络或服务暂时不可用）。',
-          '下一步：确认网络后直接再点一次「创建并进入策划」；如果一直失败，请稍后再试或联系管理员。',
-        ].join('\n'),
+        ['项目**没有**创建成功，也没有保存任何内容。', reasonLine, nextStepLine].join('\n'),
       )
     } finally {
       submittingRef.current = false
