@@ -1,5 +1,17 @@
 # Jellyfish Agent Guide
 
+## 产品命名
+
+1. **用户可见产品名称：像素小新**（英文：**Pixel Xiaoxin**）；产品说明继续用「AI 短剧工作台」。
+2. **`Jellyfish / jellyfish` 是历史内部代号**，不是当前用户品牌名。内部代码、包名、环境变量
+   （`JELLYFISH_*`）、localStorage / 事件键（`jellyfish_*`）、数据库、API 路径、
+   `jellyfish:` 幂等前缀**继续使用它，不得改名**（改了会丢用户设置、让旧任务无法识别）。
+3. 用户可见文案**只有一个来源**：`layout` 命名空间的 `title`（组件里写 `t('title')`），
+   非 i18n 环境用 `front/src/branding.ts` 的常量。**不要在组件里手写品牌名。**
+4. **禁止无迁移方案的全仓替换**：不得因为「品牌改名了」就对全仓做 `Jellyfish → 像素小新`
+   的机械替换。将来若确实要迁移内部代号，必须作为**独立迁移项目**处理，并提供兼容层与数据迁移。
+5. 完整口径（保留清单、兼容性结论、迁移条件）见 `docs/architecture/product-branding.md`。
+
 ## 代码规范
 
 1. API 变更后，必须运行 `pnpm run openapi:update` 同步 OpenAPI 接口。

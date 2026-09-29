@@ -4,7 +4,11 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Jellyfish</title>
+    <!-- 品牌名口径见 `docs/architecture/product-branding.md`：用户可见名称是「像素小新」，
+         `Jellyfish / jellyfish` 只作为内部兼容代号保留（存储键、环境变量、API、兼容前缀）。
+         这里是首屏渲染前的静态兜底（默认语言为中文）；运行起来后由 `MainLayout` 按当前语言
+         把 `document.title` 同步成「像素小新」/「Pixel Xiaoxin」。 -->
+    <title>像素小新</title>
     <!-- runtime env for Docker/Nginx: window.__ENV = { BACKEND_URL: "http://localhost:8000" } -->
     <script src="/env.js"></script>
   </head>

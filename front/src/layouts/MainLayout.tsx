@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react'
+import React, { useEffect, useMemo } from 'react'
 import { Layout, Menu, theme, Dropdown, Space, Avatar, Select, Breadcrumb } from 'antd'
 import {
   MenuFoldOutlined,
@@ -118,6 +118,14 @@ const MainLayout: React.FC = () => {
 
   const selectedKeys = useMemo(() => resolveSelectedKey(location.pathname), [location.pathname])
 
+  /* 浏览器标签（`document.title`）的用户可见品牌名：**跟随当前语言**，取值只有一个来源
+     —— `layout` 命名空间的 `title`（中文「像素小新」/ 英文「Pixel Xiaoxin」）。
+     `index.html` 里那份静态 `<title>像素小新</title>` 只是首屏渲染前的兜底。
+     品牌口径与「为什么内部仍叫 Jellyfish」见 `docs/architecture/product-branding.md`。 */
+  useEffect(() => {
+    document.title = t('title')
+  }, [t, language])
+
   const breadcrumbItems = useMemo(() => {
     const path = location.pathname.replace(/^\/+/, '').split('/').filter(Boolean)
     if (path.length === 0) return [{ title: t('title') }]
@@ -212,7 +220,9 @@ const MainLayout: React.FC = () => {
       >
         <div className="flex items-center h-16 px-4 border-b border-solid" style={{ borderColor: token.colorBorderSecondary }}>
           <Link to="/projects" className="flex items-center gap-2 min-w-0">
-            <img src="/logo.svg" alt="Jellyfish" className="w-8 h-8 shrink-0" />
+            {/* 图标本轮沿用现有 `logo.svg`（不重做图形）；替代文本取**当前语言的品牌名**
+                （`layout.title`：中文「像素小新」/ 英文「Pixel Xiaoxin」），不再写死旧代号。 */}
+            <img src="/logo.svg" alt={t('title')} className="w-8 h-8 shrink-0" />
             {!collapsed && (
               <div className="min-w-0">
                 <div className="text-base font-semibold text-gray-900 truncate">
