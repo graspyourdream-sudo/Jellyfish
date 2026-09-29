@@ -243,7 +243,42 @@ fi
 FRONT_URL="http://${HOST}:${FRONT_PORT}"
 if ! port_free "$FRONT_PORT"; then
   if front_is_ours "$FRONT_URL"; then
-    echo "前端已经在运行（${FRONT_URL}），直接打开浏览器，不再重复启动。"
+    # 已经在跑一份本项目的实例。**这里必须说清楚"模式属于那个进程"** ——
+    # 真机踩过：用户双击「真实模式」入口没反应（只弹了个标签页），
+    # 因为模式开关是**后端进程启动时**读的环境变量，已经在跑的那个改不了。
+    # 不把这句话打出来，用户只会以为"真实模式坏了"。
+    echo "本项目已经有一份实例在运行：${FRONT_URL}"
+    # 注意：`BACKEND_URL` 在下面「端口：后端」那一段才赋值，所以这里直接用端口拼。
+    running_backend_url="http://${HOST}:${BACKEND_PORT}"
+    running_mode="$(backend_mode_of "${running_backend_url}${MODE_PATH}")"
+    case "$running_mode" in
+      dry_run)
+        echo "  它当前是**演练模式**（不会花钱）。"
+        if [ "$WANT_REAL" = "1" ]; then
+          echo ""
+          echo "⚠️  你要的是真实模式，但**模式在进程启动时就定死了**，改不了已经在跑的这一份。"
+          echo "    请回到原来那个启动窗口按 Control + C 停掉，再双击「启动像素小新（真实模式·会花钱）」。"
+          pause_and_exit 1
+        fi
+        ;;
+      real|real_unconfirmed)
+        echo "  它当前是**真实模式**（出图/出视频/调模型/上传都会真的花钱，请谨慎操作）。"
+        if [ "$WANT_REAL" != "1" ]; then
+          echo ""
+          echo "⚠️  注意：这份实例不会因为你双击了演练模式入口就变回演练。"
+          echo "    要回到不花钱：回到原启动窗口按 Control + C 停掉，再双击「启动像素小新」。"
+        fi
+        ;;
+      *)
+        echo "  ⚠️  读不到它自报的模式（后端可能不是本项目、或已停止响应）。"
+        ;;
+    esac
+    if ! http_ok "${running_backend_url}${HEALTH_PATH}"; then
+      echo "  ⚠️  后端 ${running_backend_url} 已经没有响应了：这个页面看着还在，但点任何按钮都会报「连不上后端」。"
+      echo "     请回到原启动窗口按 Control + C 停掉（或直接关掉那个页面），再重新启动。"
+      pause_and_exit 1
+    fi
+    echo "直接打开浏览器，不再重复启动。"
     open_browser "$FRONT_URL"
     pause_and_exit 0
   fi
