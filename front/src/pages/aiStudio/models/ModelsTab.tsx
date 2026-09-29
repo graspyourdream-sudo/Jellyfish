@@ -705,7 +705,7 @@ export default function ModelsTab() {
         }}
         onOk={() => void handleSaveModel()}
         width={560}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" className="pt-2">
           <Form.Item name="name" label="名称" rules={[{ required: true }]}>

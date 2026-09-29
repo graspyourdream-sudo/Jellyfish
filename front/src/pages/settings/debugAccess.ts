@@ -10,9 +10,13 @@
  *
  * | 场景 | 是否显示 / 是否可进 |
  * |---|---|
- * | 开发模式（`vite dev`，`import.meta.env.DEV === true`） | 显示，可进 |
- * | 生产构建 + 显式调试开关开启 + 用户是管理员 | 显示，可进 |
- * | 生产构建，其它任何情况（含普通用户、开关未开） | **不显示**；直达旧路由时安全跳到设置默认页签 |
+ * | 开发模式（`vite dev`，`import.meta.env.DEV === true`）**且**用户是管理员 | 显示，可进 |
+ * | 生产构建 + 显式调试开关开启 **且**用户是管理员 | 显示，可进 |
+ * | 普通用户（任何环境） | **不显示**；直达旧路由时安全跳到设置默认页签 |
+ * | 生产构建且调试开关未开 | **不显示**（连管理员也看不到） |
+ *
+ * 两道门是**与**的关系：环境门（开发模式 或 显式开关）**且**权限门（管理员）。
+ * 写成"或"会让开发模式下的访客也看见调试页签，与「普通用户不得显示」直接冲突。
  *
  * 「显式调试开关」是构建期环境变量 `VITE_ENABLE_DEBUG_TOOLS`：只有把它显式设成
  * `true` / `1` / `yes` 才算开启，**未设置、空串、其它值一律视为关闭**
@@ -78,16 +82,27 @@ export type DebugAccessDecision = {
  */
 export function resolveDebugAccess(input: DebugAccessInput): DebugAccessDecision {
   const isAdmin = String(input.role ?? '').trim() === DEBUG_TOOLS_ADMIN_ROLE
-  if (input.devMode) {
-    return { visible: true, allowed: true, reason: '' }
-  }
-  if (parseExplicitDebugFlag(input.explicitDebugFlag) && isAdmin) {
+  /**
+   * 两道门**同时**要过（这是把任务书 §五 的两句话读通之后的结果）：
+   *
+   *   - 「普通用户**和**普通生产环境不得显示开发调试页签」→ 权限门；
+   *   - 「只允许在开发模式，或者显式调试开关开启且用户具有管理员权限时显示」→ 环境门。
+   *
+   * 如果按字面把它写成 `devMode || (flag && admin)`，那么开发模式下的**访客**也会
+   * 看见调试页签 —— 与第一句直接冲突（实机验收就撞上了这条）。
+   * 正确的合取是：**环境门（开发模式 或 显式开关）且 权限门（管理员）**。
+   *
+   * 生产构建两门都不满足：`DEV` 恒为 false，而 `VITE_ENABLE_DEBUG_TOOLS` 默认没有配置，
+   * 所以普通生产环境**只有管理员显式开启调试开关**才可能看到它。
+   */
+  const environmentOpen = input.devMode || parseExplicitDebugFlag(input.explicitDebugFlag)
+  if (environmentOpen && isAdmin) {
     return { visible: true, allowed: true, reason: '' }
   }
   return {
     visible: false,
     allowed: false,
-    reason: '「开发调试」只在开发模式，或显式开启调试开关且当前用户是管理员时可用。',
+    reason: '「开发调试」只对管理员开放，并且需要处在开发模式、或由管理员显式开启调试开关。',
   }
 }
 

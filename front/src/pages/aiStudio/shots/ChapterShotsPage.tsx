@@ -795,7 +795,7 @@ export function ChapterShotsPage() {
         closable={!extracting}
         maskClosable={!extracting}
         keyboard={!extracting}
-        destroyOnClose
+        destroyOnHidden
         width={520}
       >
         <Form form={createForm} layout="vertical" preserve={false}>

@@ -164,33 +164,40 @@ export function AdProjectCreateModal({ open, onCancel, onCreated }: AdProjectCre
 
   const handleSubmit = useCallback(async () => {
     if (submittingRef.current) return
-    /* 已经保存过（跳转失败那一步）时，再点主按钮**不再创建**，只重试跳转。 */
-    if (saved) {
-      enterPlan(saved, { keepOnFailure: true })
-      return
-    }
-    let values: { name?: string; description?: string; default_video_ratio?: string }
-    try {
-      await form.validateFields()
-      values = form.getFieldsValue()
-    } catch {
-      return
-    }
-    const pending: AdProjectDraft = {
-      ...draft,
-      name: String(values?.name ?? draft.name ?? ''),
-      description: String(values?.description ?? draft.description ?? ''),
-      defaultVideoRatio: String(values?.default_video_ratio ?? draft.defaultVideoRatio ?? ''),
-    }
-    const invalid = validateAdProjectDraft(pending)
-    if (invalid) {
-      setErrorText(invalid)
-      return
-    }
+    /**
+     * ⚠️ 锁必须在**任何 `await` 之前**置位。
+     *
+     * 为什么：`form.validateFields()` 是异步的。如果先校验再上锁，两次点击都会
+     * 在锁还是 false 的时候通过检查，于是各提交一次 —— 这正是"连点产生两个项目"的形态
+     * （真机复现过）。校验失败时再把锁放掉，用户仍然可以直接重试。
+     */
     submittingRef.current = true
     setSubmitting(true)
-    setErrorText('')
     try {
+      /* 已经保存过（跳转失败那一步）时，再点主按钮**不再创建**，只重试跳转。 */
+      if (saved) {
+        enterPlan(saved, { keepOnFailure: true })
+        return
+      }
+      let values: { name?: string; description?: string; default_video_ratio?: string }
+      try {
+        await form.validateFields()
+        values = form.getFieldsValue()
+      } catch {
+        return
+      }
+      const pending: AdProjectDraft = {
+        ...draft,
+        name: String(values?.name ?? draft.name ?? ''),
+        description: String(values?.description ?? draft.description ?? ''),
+        defaultVideoRatio: String(values?.default_video_ratio ?? draft.defaultVideoRatio ?? ''),
+      }
+      const invalid = validateAdProjectDraft(pending)
+      if (invalid) {
+        setErrorText(invalid)
+        return
+      }
+      setErrorText('')
       const created = await createAdProject(pending, projectIdRef.current)
       onCreated?.(created)
       /* 项目 + 默认章节都由后端在同一事务里建好：这里只跳转一次，
@@ -228,7 +235,7 @@ export function AdProjectCreateModal({ open, onCancel, onCreated }: AdProjectCre
       maskClosable={!submitting}
       footer={null}
       width={640}
-      destroyOnClose
+      destroyOnHidden
     >
       <Alert
         type="info"

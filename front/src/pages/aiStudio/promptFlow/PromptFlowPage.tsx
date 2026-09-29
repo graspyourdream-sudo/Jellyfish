@@ -881,7 +881,7 @@ const JuriluImportPanel: React.FC<{ projectId?: string; onErrorOriginal?: (raw: 
       okText="创建并选中"
       cancelText="取消"
       confirmLoading={creatingChapter}
-      destroyOnClose
+      destroyOnHidden
     >
       <Space direction="vertical" size="small" style={{ width: '100%' }}>
         <Text strong>章节标题</Text>

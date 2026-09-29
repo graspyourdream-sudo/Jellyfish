@@ -440,7 +440,7 @@ const PromptTemplateManager: FC = () => {
         okText="保存"
         cancelText="取消"
         confirmLoading={submitting}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form layout="vertical" form={createForm}>
           <Form.Item

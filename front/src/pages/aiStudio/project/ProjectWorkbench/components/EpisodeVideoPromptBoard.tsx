@@ -2058,7 +2058,7 @@ export function EpisodeVideoPromptBoard({
           clearJuriluCredentials()
         }}
         width={640}
-        destroyOnClose
+        destroyOnHidden
       >
         <Radio.Group
           value={importTab}

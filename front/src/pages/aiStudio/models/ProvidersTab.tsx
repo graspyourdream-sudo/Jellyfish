@@ -722,7 +722,7 @@ export default function ProvidersTab() {
         }}
         onOk={() => void handleSaveProvider()}
         width={560}
-        destroyOnClose
+        destroyOnHidden
       >
         <ProviderTechnicalConfigFields
           form={form}

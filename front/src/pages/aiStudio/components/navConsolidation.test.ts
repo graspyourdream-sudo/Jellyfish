@@ -418,10 +418,14 @@ test('开发调试的准入判定：权限 + 开关 + 开发模式，三条规�
     /value === 'true' \|\| value === '1' \|\| value === 'yes'/.test(access),
     '显式调试开关的解析口径不对（必须只有显式真值才算开启）',
   )
-  assert.ok(/if \(input\.devMode\)/.test(access), '缺少"开发模式直接放行"这一条')
+  /* 环境门（开发模式 或 显式开关）**且** 权限门（管理员）—— 两道门缺一不可。 */
   assert.ok(
-    /parseExplicitDebugFlag\(input\.explicitDebugFlag\) && isAdmin/.test(access),
-    '生产环境必须是"开关开启 **且** 管理员"才放行',
+    /const environmentOpen = input\.devMode \|\| parseExplicitDebugFlag\(input\.explicitDebugFlag\)/.test(access),
+    '环境门不是「开发模式 或 显式开关」',
+  )
+  assert.ok(
+    /if \(environmentOpen && isAdmin\)/.test(access),
+    '环境门与权限门必须是**与**的关系（写成"或"会让开发模式下的访客也看见调试页签）',
   )
   /* 页签可见性与路由准入用同一份结论（否则会出现"看不见页签但能直达"） */
   assert.ok(

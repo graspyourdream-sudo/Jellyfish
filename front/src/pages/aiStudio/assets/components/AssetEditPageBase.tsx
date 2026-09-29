@@ -1970,7 +1970,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         cancelText="取消"
         confirmLoading={Boolean(promptPreviewImage && generatingByImageId[promptPreviewImage.id])}
         onOk={() => void confirmGenerateWithPrompt()}
-        destroyOnClose
+        destroyOnHidden
         width={900}
       >
         {promptPreviewLoading ? (
@@ -2038,7 +2038,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         open={smartDetectOpen}
         onCancel={() => setSmartDetectOpen(false)}
         footer={null}
-        destroyOnClose
+        destroyOnHidden
         width={880}
       >
         {smartDetectLoading ? (
@@ -2115,7 +2115,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             </Space>
           </div>
         }
-        destroyOnClose
+        destroyOnHidden
         width={960}
       >
         {imagePromptLoading ? (
@@ -2304,7 +2304,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
             </Tooltip>
           </Space>
         }
-        destroyOnClose
+        destroyOnHidden
         width={720}
       >
         <div className="space-y-3">
@@ -2388,7 +2388,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         open={referenceBatchOpen}
         onCancel={() => setReferenceBatchOpen(false)}
         footer={<Button onClick={() => setReferenceBatchOpen(false)}>关闭</Button>}
-        destroyOnClose
+        destroyOnHidden
         width={880}
       >
         <div className="space-y-4">
@@ -2589,7 +2589,7 @@ export function AssetEditPageBase<TAsset extends BaseAsset, TImage extends BaseA
         okText="用这个项目继续"
         cancelText="取消"
         confirmLoading={referenceBatchLoading}
-        destroyOnClose
+        destroyOnHidden
       >
         <div className="space-y-3">
           <div className="text-sm text-gray-600">

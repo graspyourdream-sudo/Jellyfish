@@ -260,7 +260,7 @@ export function FilesTab() {
         footer={null}
         width={720}
         onCancel={() => setPreviewVideo(null)}
-        destroyOnClose
+        destroyOnHidden
       >
         {previewVideo ? (
           <video
