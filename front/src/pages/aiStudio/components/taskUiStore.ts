@@ -3,6 +3,15 @@ import { create } from 'zustand'
 import { FilmService } from '../../../services/generated'
 import type { TaskListItemRead, TaskStatus } from '../../../services/generated'
 import { resolveTaskSourceLabel, resolveTaskTitle } from './taskCopy'
+import {
+  loadTaskReadStateFrom,
+  markAllTasksRead,
+  markTaskKeysRead,
+  saveTaskReadStateTo,
+  syncTaskReadState,
+  type TaskReadInput,
+  type TaskReadState,
+} from './taskUnread'
 
 export type TaskUiItem = {
   taskId: string
@@ -41,7 +50,23 @@ type TaskUiState = {
   optimisticItems: Record<string, TaskUiItem>
   contextScopes: Record<string, TaskPageContext[]>
   open: boolean
+  /**
+   * 「当前设备」的已读状态（未读角标的唯一来源）。
+   *
+   * 为什么放在 store 而不是 TaskCenter 的组件状态里：任务列表由 `TaskRuntimeProvider`
+   * 每若干秒轮询一次，未读是靠**每轮轮询**累计出来的（窗口很窄，不能现算）。
+   * 放在 store 里，轮询组件与角标组件共用同一份，且刷新后从本机恢复。
+   */
+  taskRead: TaskReadState
   setServerTasks: (tasks: TaskListItemRead[]) => void
+  /** 首次成功轮询落基线（历史结束任务不算未读） */
+  applyTaskReadBaseline: (tasks: TaskListItemRead[]) => void
+  /** 每轮成功轮询后把新出现的已结束任务记成未读 */
+  observeTasksForUnread: (tasks: TaskListItemRead[]) => void
+  /** 把指定键标为已读（点「查看」/ 打开面板看到的那几条） */
+  markTaskRead: (keys: string[]) => void
+  /** 「全部已读」 */
+  markAllTaskRead: () => void
   upsertTask: (task: TaskUiItem) => void
   removeTask: (taskId: string) => void
   registerPageContext: (scopeId: string, contexts: TaskPageContext[]) => void
@@ -100,15 +125,68 @@ export function isTaskHighlighted(task: TaskUiItem, contexts: TaskPageContext[])
   )
 }
 
+/** 本机存储的可达性探测（无 window / 隐私模式 → 只影响"记住"，不影响本轮展示）。 */
+function localTaskReadStorage(): Storage | null {
+  if (typeof window === 'undefined') return null
+  try {
+    return window.localStorage
+  } catch {
+    return null
+  }
+}
+
+function persistTaskRead(state: TaskReadState): void {
+  saveTaskReadStateTo(localTaskReadStorage(), state)
+}
+
+/** `TaskListItemRead` → 未读逻辑需要的最小字段（结构化，不复制业务含义）。 */
+function toTaskReadInputs(tasks: readonly TaskListItemRead[]): TaskReadInput[] {
+  return tasks.map((task) => ({
+    task_id: String(task.task_id ?? ''),
+    status: String(task.status ?? ''),
+    finished_at_ts: task.finished_at_ts ?? null,
+    updated_at_ts: task.updated_at_ts ?? null,
+  }))
+}
+
 export const useTaskUiStore = create<TaskUiState>((set, get) => ({
   serverItems: {},
   optimisticItems: {},
   contextScopes: {},
   open: false,
+  /* 刷新 / 重新进入都从**本机**恢复已读状态（这就是"已读在刷新后仍保留"的实现）。 */
+  taskRead: loadTaskReadStateFrom(localTaskReadStorage()),
   setServerTasks: (tasks) =>
     set(() => ({
       serverItems: Object.fromEntries(tasks.map((task) => [task.task_id, task])),
     })),
+  applyTaskReadBaseline: (tasks) =>
+    set((state) => {
+      const next = syncTaskReadState(state.taskRead, toTaskReadInputs(tasks), { applyBaseline: true })
+      persistTaskRead(next)
+      return { taskRead: next }
+    }),
+  observeTasksForUnread: (tasks) =>
+    set((state) => {
+      const next = syncTaskReadState(state.taskRead, toTaskReadInputs(tasks))
+      if (next.unreadKeys.length === state.taskRead.unreadKeys.length) return {}
+      persistTaskRead(next)
+      return { taskRead: next }
+    }),
+  markTaskRead: (keys) =>
+    set((state) => {
+      const next = markTaskKeysRead(state.taskRead, keys)
+      if (next === state.taskRead) return {}
+      persistTaskRead(next)
+      return { taskRead: next }
+    }),
+  markAllTaskRead: () =>
+    set((state) => {
+      const next = markAllTasksRead(state.taskRead)
+      if (next === state.taskRead) return {}
+      persistTaskRead(next)
+      return { taskRead: next }
+    }),
   upsertTask: (task) =>
     set((state) => ({
       optimisticItems: {

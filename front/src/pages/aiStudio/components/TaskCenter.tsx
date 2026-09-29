@@ -25,6 +25,7 @@ import {
   type TaskFreshness,
 } from './taskCopy'
 import { maskInternalIds } from './maskInternalIds'
+import { activeTaskLabel, taskReadKey, unreadTaskCount } from './taskUnread'
 
 const TASK_CENTER_OPEN_STORAGE_KEY = 'jellyfish_task_center_open_v1'
 const TASK_CENTER_POSITION_STORAGE_KEY = 'jellyfish_task_center_position_v1'
@@ -135,6 +136,9 @@ export function TaskCenter() {
   const optimisticItems = useTaskUiStore((state) => state.optimisticItems)
   const contextScopes = useTaskUiStore((state) => state.contextScopes)
   const cancelTask = useTaskUiStore((state) => state.cancelTask)
+  const taskRead = useTaskUiStore((state) => state.taskRead)
+  const markTaskRead = useTaskUiStore((state) => state.markTaskRead)
+  const markAllTaskRead = useTaskUiStore((state) => state.markAllTaskRead)
   const dragStateRef = useRef<{
     pointerId: number
     offsetX: number
@@ -205,6 +209,19 @@ export function TaskCenter() {
   )
   const activeContexts = useMemo(() => flattenPageContexts(contextScopes), [contextScopes])
   const resolvedTasks = useResolvedTaskCenterTasks(tasks, navigate)
+  /**
+   * 红色角标的数字 = **未读的已结束任务结果**数量。
+   *
+   * 它不是 `tasks.length`（那是全部任务数，改前就是这么错的），也不是
+   * "当前列表里已结束的条数"（列表按时间窗取，刷新一次旧任务就没了，
+   * 角标会自己变回 0）。它来自 store 里**累计并持久化**的未读键集合。
+   */
+  const unreadCount = useMemo(() => unreadTaskCount(taskRead), [taskRead])
+  /** 活跃任务数：**单独**用中性文案展示，绝不混进红色角标。 */
+  const activeCount = useMemo(
+    () => resolvedTasks.filter((task) => ['pending', 'running', 'streaming'].includes(task.status)).length,
+    [resolvedTasks],
+  )
   const taskKindOptions = useMemo(
     () =>
       Array.from(
@@ -340,6 +357,21 @@ export function TaskCenter() {
     setDragging(false)
   }
 
+  /**
+   * 打开面板时，把用户**实际看见的**已结束任务标为已读。
+   *
+   * 「实际看见的」= 当前这一页真正渲染出来的那几条（`pagedTasks`），
+   * 不是全部任务 —— 把翻页外看不见的也标成已读等于替用户说"你看过了"。
+   */
+  useEffect(() => {
+    if (!open) return
+    const visibleKeys = pagedTasks
+      .map((task) => taskReadKey({ task_id: task.taskId, status: task.status, finished_at_ts: task.finishedAtTs, updated_at_ts: task.updatedAtTs }))
+      .filter((key): key is string => !!key)
+    if (visibleKeys.length === 0) return
+    markTaskRead(visibleKeys)
+  }, [markTaskRead, open, pagedTasks])
+
   const handleButtonClick = () => {
     const drag = dragStateRef.current
     if (drag?.moved) {
@@ -398,6 +430,23 @@ export function TaskCenter() {
                 }}
                 options={taskKindOptions}
               />
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-gray-400">
+                  红色角标只表示「还没看过的已结束结果」
+                  {unreadCount > 0 ? `（当前 ${unreadCount} 条）` : ''}；
+                  {activeCount > 0 ? ` 另有 ${activeTaskLabel(activeCount)}` : ' 当前没有在跑的任务'}。
+                </span>
+                <Button
+                  size="small"
+                  type="link"
+                  className="px-0"
+                  disabled={unreadCount === 0}
+                  onClick={markAllTaskRead}
+                  data-testid="task-center-mark-all-read"
+                >
+                  全部已读
+                </Button>
+              </div>
               <div className="text-[11px] text-gray-400">
                 默认优先：当前页 → 运行中 → 最近结束 → 全部 · 每页最多 3 条
               </div>
@@ -454,6 +503,14 @@ export function TaskCenter() {
                                   size="small"
                                   icon={<ArrowRightOutlined />}
                                   onClick={() => {
+                                    /* 点「查看」= 这一条结果用户处理过了：立刻标为已读 */
+                                    const key = taskReadKey({
+                                      task_id: task.taskId,
+                                      status: task.status,
+                                      finished_at_ts: task.finishedAtTs,
+                                      updated_at_ts: task.updatedAtTs,
+                                    })
+                                    if (key) markTaskRead([key])
                                     task.onNavigate?.()
                                     setOpen(false)
                                   }}
@@ -532,7 +589,7 @@ export function TaskCenter() {
         </div>
       ) : null}
 
-      <Badge count={tasks.length} size="small" offset={[-4, 4]} showZero={false}>
+      <Badge count={unreadCount} size="small" offset={[-4, 4]} showZero={false}>
         <Button
           type="primary"
           size="middle"
@@ -547,6 +604,15 @@ export function TaskCenter() {
         >
           <span className="inline-flex items-center gap-1">
             <span>{open ? '收起任务' : '任务中心'}</span>
+            {/*
+              活跃任务用**中性/蓝色**文案单独显示（任务书 §6.1）：
+              红色角标只说"有没看过的结果"，蓝色文字只说"还有事情在跑"。
+            */}
+            {activeCount > 0 ? (
+              <span className="text-[11px] text-cyan-100" data-testid="task-center-active-count">
+                {activeTaskLabel(activeCount)}
+              </span>
+            ) : null}
             <PushpinOutlined className="text-[11px] opacity-70" />
           </span>
         </Button>
