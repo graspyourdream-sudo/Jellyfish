@@ -63,6 +63,9 @@ const REGISTERED_FILES: readonly string[] = [
   'editor/VideoEditor.tsx',
   'files/FileManager.tsx',
   'prompts/PromptTemplateManager.tsx',
+  /* 本轮收口新增：提示词管理的页签外壳（模板管理 / 导入与交付）。
+     它自己在 `prompts/` 目录下，必须显式登记 —— 否则扫描范围会悄悄变大。 */
+  'prompts/PromptCenter.tsx',
 ]
 
 /** 全仓唯一的「技术详情」实现（审计 §8.1.1：组件级豁免只能给一个文件）。 */

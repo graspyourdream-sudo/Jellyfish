@@ -149,7 +149,7 @@ export function describeGenerationGate(
       state: 'not_configured',
       tone: 'error',
       label: `${outletLabel}还没配置`,
-      description: `请先到「模型管理」指定默认${outletLabel}。${
+      description: `请先到「设置 → 模型与服务」指定默认${outletLabel}。${
         snapshot.dryRun ? '另外，后台当前是演练模式。' : ''
       }`,
       technicalDetail: `${model.reason}${snapshot.dryRun ? `；${openHint}` : ''}`,

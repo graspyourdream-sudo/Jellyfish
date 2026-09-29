@@ -42,7 +42,7 @@ const VideoEditor: React.FC = () => {
           to={projectId ? `/projects/${projectId}/chapters` : '/projects'}
           className="text-sm text-gray-600 hover:text-blue-600 flex items-center gap-1"
         >
-          <ArrowLeftOutlined /> {projectId ? '返回章节列表' : '项目列表'}
+          <ArrowLeftOutlined /> {projectId ? '返回章节列表' : '返回短剧项目'}
         </Link>
       </div>
       <Card

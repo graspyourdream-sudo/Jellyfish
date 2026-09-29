@@ -156,7 +156,10 @@ test('能不能生成：模型没配好要说清去哪里配，不暴露内部�
   const missing = describeGenerationReadiness({ outletLabel: '图片', modelReady: false, dryRun: false })
   assert.equal(missing.tone, 'error')
   assert.equal(missing.title, '还不能生成图片')
-  assert.match(missing.detail, /模型管理/)
+  /* 本轮收口：一级入口「模型管理」已并入「设置 · 模型与服务」，
+     文案必须指向**新**的落点，否则用户在左侧永远找不到它。 */
+  assert.match(missing.detail, /设置 → 模型与服务/)
+  assert.ok(!/模型管理/.test(missing.detail), '文案还在指旧一级入口「模型管理」')
   assert.deepEqual(findInternalTerms(`${missing.title}${missing.detail}`), [])
 
   const ready = describeGenerationReadiness({ outletLabel: '图片', modelReady: true, dryRun: false })

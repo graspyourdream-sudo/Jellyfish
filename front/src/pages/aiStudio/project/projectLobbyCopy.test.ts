@@ -51,6 +51,10 @@ const SCANNED_FILES: readonly string[] = [
   'ProjectWorkbench.tsx',
   'projectStartPresets.ts',
   'useProjectStyleOptions.ts',
+  /* 本轮收口新增：广告项目新建的**唯一实现**（列表页与剧情策划页共用）。
+     它们同样在主区渲染文案，必须一起扫。 */
+  'AdProjectCreateModal.tsx',
+  'adProjectCreate.ts',
 ]
 
 function readSource(file: string): string {

@@ -156,8 +156,32 @@ test('唯一主操作：全页只剩「确认策划 / 继续准备资产」一�
    *「确认策划是策划阶段唯一主要操作」。
    * 正文区的「确认商品卡」与「一次生成全部」都必须是次级按钮。
    */
+  /*
+   * ⚠️ 本轮收口新增了一个**入口层**的主色按钮：还没有项目时，空态里的
+   * 「新建广告视频」（任务书 §3.3：没有广告项目时页面必须给出唯一明确主操作，
+   * 不能要求用户先离开本页去别处建项目）。
+   *
+   * 因此这里把主色按钮分成两层来数，两层各自都只允许一个／两个：
+   *   - **入口层**（`drama-plan-empty-create`）：1 个，就是那个"新建广告视频"；
+   *   - **策划层**（本页正文）：2 个，仍然是「确认策划」与「继续准备资产」。
+   * 两层都必须**指名存在**，这样"少一个"或"多一个"都不会悄悄溜过去。
+   */
+  assert.ok(
+    /<Button[\s\S]{0,200}?type="primary"[\s\S]{0,200}?data-testid="drama-plan-empty-create"/.test(PAGE_CODE),
+    '空态里的「新建广告视频」必须是主色按钮（没有项目时它是唯一明确主操作）',
+  )
+  assert.ok(
+    !/data-testid="drama-plan-create-ad-project"\s*\n\s*type="primary"/.test(PAGE_CODE) &&
+      !/type="primary"[\s\S]{0,200}?data-testid="drama-plan-create-ad-project"/.test(PAGE_CODE),
+    '项目选择卡里的「新建广告视频」不该是主色按钮（同屏两个同义主色按钮会抢注意力）',
+  )
   const primaryCount = (PAGE_CODE.match(/type="primary"/g) ?? []).length
-  assert.equal(primaryCount, 2, `主色按钮应只有底部那两个（确认策划 / 继续准备资产），实际 ${primaryCount} 个`)
+  /* 3 = 入口层 1（空态新建广告视频） + 策划层 2（确认策划 / 继续准备资产） */
+  assert.equal(
+    primaryCount,
+    3,
+    `主色按钮应为「空态新建广告视频 1 + 底部确认策划/继续准备资产 2」，实际 ${primaryCount} 个`,
+  )
   assert.ok(!/type="primary" ghost/.test(PAGE_CODE), '「一次生成全部」不该是主色按钮')
   /* 付费动作仍然要写明会调用模型（原有口径不回退） */
   assert.ok(PAGE_CODE.includes('一次生成全部（将调用 1 次模型）'))

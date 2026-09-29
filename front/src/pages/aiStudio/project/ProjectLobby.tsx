@@ -3,7 +3,6 @@ import { formatUserFacingTime } from '../components/userFacingTime'
 import {
   Card,
   Input,
-  InputNumber,
   Button,
   Progress,
   Radio,
@@ -15,7 +14,6 @@ import {
   Select,
   AutoComplete,
   Switch,
-  Upload,
   message,
   Space,
   Tag,
@@ -43,22 +41,20 @@ import { getChapterPreparationState } from './ProjectWorkbench/chapterPreparatio
 import { getChapterShotsPath } from './ProjectWorkbench/routes'
 import { loadProjectFlowStatsForChapters, type ProjectFlowStats } from './ProjectWorkbench/projectFlowStats'
 import {
-  AD_DEFAULT_SHOT_COUNT,
-  AD_PRODUCT_SOURCE_OPTIONS,
+  DRAMA_START_MODE_OPTIONS,
   OVERALL_STYLE_PRESETS,
-  buildAdProjectCreateFields,
   dramaPlanPath,
   resolveProjectVideoRatio,
   resolveStartLandingPath,
-  START_MODE_OPTIONS,
   resolveOverallStyleFields,
   toBackendStartMode,
-  type AdProductSourceChoice,
   type OverallStyleKey,
   type ProjectStartModeChoice,
 } from './projectStartPresets'
-/* 剧情广告那一类项目：资料来源的上传/选已有、以及阶段文案，都走聊天策划分片的服务层与映射表。 */
-import { listProductEntities, uploadReferenceFile, type ProductEntityOption } from '../../../services/dramaPlanApi'
+/* 广告项目的新建向导：**唯一实现**（本页与「剧情策划」页共用同一组件与同一条提交逻辑）。 */
+import { AdProjectCreateModal } from './AdProjectCreateModal'
+import { newProjectId } from './adProjectCreate'
+/* 剧情广告那一类项目：阶段文案走聊天策划分片的映射表。 */
 import { adPhaseLabel } from '../components/enumLabels'
 
 type ViewMode = 'grid' | 'compact' | 'large'
@@ -157,8 +153,48 @@ const SORT_SELECT_OPTIONS: { label: string; value: SortKey }[] = (
   Object.keys(SORT_KEY_LABELS) as SortKey[]
 ).map((key) => ({ label: SORT_KEY_LABELS[key], value: key }))
 
-const ProjectLobby: React.FC = () => {
+/**
+ * 项目大厅的**项目类型**参数（本轮收口新增）。
+ *
+ * 左侧 5 个一级入口里，「短剧项目」与「广告视频」是**两个入口、同一份列表实现**：
+ * 用户看到的差别只有「列哪些项目」和「新建时能选什么起点」，
+ * 卡片 / 搜索 / 排序 / 状态 / 批量操作 / 进入项目这些能力必须逐字相同。
+ * 因此用参数而不是复制出第二套列表（任务书 §3.2 明确要求）。
+ *
+ * | scope | 显示 | 新建 |
+ * |---|---|---|
+ * | `drama`（默认） | 只显示 `kind=drama`（非 `ad`）的普通短剧 | 只提供普通短剧的两种起步路径（从剧本 / 从视频提示词） |
+ * | `ad` | 只显示 `kind=ad` 的剧情广告 | 固定创建 `kind=ad`（复用 `AdProjectCreateModal`） |
+ */
+export type ProjectLobbyScope = 'drama' | 'ad'
+
+const SCOPE_COPY: Readonly<Record<ProjectLobbyScope, {
+  title: string
+  subtitle: string
+  searchPlaceholder: string
+  emptyText: string
+  createLabel: string
+}>> = {
+  drama: {
+    title: '短剧项目',
+    subtitle: '普通短剧项目：从剧本或视频提示词开始，走剧本 → 分镜 → 资产 → 提示词 → 生成五步。',
+    searchPlaceholder: '搜索短剧项目名称或描述',
+    emptyText: '暂无短剧项目，点击「新建短剧项目」开始',
+    createLabel: '新建短剧项目',
+  },
+  ad: {
+    title: '广告视频',
+    subtitle: '剧情广告项目：先做商品资料与剧情策划，确认策划后再进入同一条五步流程。',
+    searchPlaceholder: '搜索广告项目名称或描述',
+    emptyText: '暂无广告项目，点击「新建广告视频」开始',
+    createLabel: '新建广告视频',
+  },
+}
+
+const ProjectLobby: React.FC<{ scope?: ProjectLobbyScope }> = ({ scope = 'drama' }) => {
   const navigate = useNavigate()
+  const isAdScope = scope === 'ad'
+  const copy = SCOPE_COPY[scope]
   const [projects, setProjects] = useState<ProjectView[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -182,74 +218,22 @@ const ProjectLobby: React.FC = () => {
   const [form] = Form.useForm()
   const [editForm] = Form.useForm()
 
-  /* 剧情广告（`kind=ad`）新建向导：资料来源 + 基本制作要求。
-     这几项用组件状态而不是表单字段：上传/选已有商品的列表要中途拉取，
-     塞进 Form 反而要额外维护"列表加载中"这一层状态。 */
-  const [adSource, setAdSource] = useState<AdProductSourceChoice>('paste')
-  const [adSourceText, setAdSourceText] = useState('')
-  const [adFileIds, setAdFileIds] = useState<string[]>([])
-  const [adFileNames, setAdFileNames] = useState<string[]>([])
-  const [adUploading, setAdUploading] = useState(false)
-  const [adProductId, setAdProductId] = useState('')
-  const [adProducts, setAdProducts] = useState<ProductEntityOption[]>([])
-  const [adProductsNote, setAdProductsNote] = useState('')
-  const [adGenre, setAdGenre] = useState('')
-  const [adTone, setAdTone] = useState('')
-  const [adShotCount, setAdShotCount] = useState<number>(AD_DEFAULT_SHOT_COUNT)
-  const [adDuration, setAdDuration] = useState<number>(0)
-  const [adDirectorNotes, setAdDirectorNotes] = useState('')
-  const [adMandatory, setAdMandatory] = useState('')
-  const [adForbidden, setAdForbidden] = useState('')
+  /* 剧情广告（`kind=ad`）的新建向导**不再在本文件里**：
+     它已经抽成唯一实现 `AdProjectCreateModal` + `adProjectCreate.ts`，
+     供「广告视频」列表页与「剧情策划」页两处共用（任务书 §3.3 要求同一个组件、
+     同一份默认值、同一套校验、同一条提交逻辑）。本页只负责把弹窗打开。 */
 
   const useMock = import.meta.env.VITE_USE_MOCK === 'true'
 
-  /** 多行文本 → 一行一条的数组（必含 / 禁含）。 */
-  const linesToArray = (value: string): string[] =>
-    value
-      .split('\n')
-      .map((item) => item.trim())
-      .filter(Boolean)
-
-  const resetAdFields = () => {
-    setAdSource('paste')
-    setAdSourceText('')
-    setAdFileIds([])
-    setAdFileNames([])
-    setAdProductId('')
-    setAdProductsNote('')
-    setAdGenre('')
-    setAdTone('')
-    setAdShotCount(AD_DEFAULT_SHOT_COUNT)
-    setAdDuration(0)
-    setAdDirectorNotes('')
-    setAdMandatory('')
-    setAdForbidden('')
-  }
-
-  /** 选「已有商品」时才拉一次商品列表（免费、只读）。 */
-  const loadAdProducts = async () => {
-    if (adProducts.length > 0) return
-    try {
-      setAdProducts(await listProductEntities())
-      setAdProductsNote('')
-    } catch {
-      setAdProductsNote('读不到已有商品列表：可以改用粘贴或上传资料，或先建项目再到策划页补商品卡。')
-    }
-  }
-
-  /** 向导里上传商品资料（TXT / DOCX / 图片）→ 拿文件编号交给后端解析或归档。 */
-  const handleAdUpload = async (file: File) => {
-    setAdUploading(true)
-    try {
-      const uploaded = await uploadReferenceFile(file)
-      setAdFileIds((current) => [...current, uploaded.id])
-      setAdFileNames((current) => [...current, uploaded.name || file.name])
-      message.success(`已上传《${uploaded.name || file.name}》`)
-    } catch {
-      message.error('资料上传失败，请稍后重试（也可以先在向导里选「暂无商品资料」，创建后到策划页再补）')
-    } finally {
-      setAdUploading(false)
-    }
+  /**
+   * 本页只收哪一类项目（**唯一的类型判据**）。
+   *
+   * `kind` 的取值域只有 `drama` / `ad`；历史数据缺这一列时按普通短剧算
+   * （`toUIProject` 已经给过 `'drama'` 兜底），所以这里对空值一律不当作广告。
+   */
+  const inScope = (kind: string | null | undefined): boolean => {
+    const value = String(kind ?? 'drama')
+    return isAdScope ? value === 'ad' : value !== 'ad'
   }
 
   const toUIProject = (p: ProjectRead): ProjectView => {
@@ -306,18 +290,11 @@ const ProjectLobby: React.FC = () => {
     }
   }
 
-  const newProjectId = () => {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-      return crypto.randomUUID()
-    }
-    return `p_${Date.now()}_${Math.random().toString(16).slice(2)}`
-  }
-
   const load = async () => {
     setLoading(true)
     try {
       if (useMock) {
-        setProjects(mockProjects)
+        setProjects(mockProjects.filter((p) => inScope(String((p as ProjectView).kind ?? 'drama'))))
       } else {
         /**
          * 一次拉满一页（100 条），不再写死 `pageSize: 10`。
@@ -331,10 +308,13 @@ const ProjectLobby: React.FC = () => {
           pageSize: 100,
         })
         const items = res.data?.items ?? []
-        setProjects(items.map(toUIProject))
+        /* 按项目类型分流：两个入口各自只显示自己那一类，**不混入**另一类。
+           筛选放在数据层（而不是仅渲染层）—— 否则「阶段摘要」「流转统计」这些
+           每个项目各发一次请求的副作用会替看不见的项目白跑一遍。 */
+        setProjects(items.map(toUIProject).filter((p) => inScope(p.kind ?? 'drama')))
       }
     } catch {
-      setProjects(useMock ? mockProjects : [])
+      setProjects([])
     } finally {
       setLoading(false)
     }
@@ -342,7 +322,7 @@ const ProjectLobby: React.FC = () => {
 
   useEffect(() => {
     void load()
-  }, [])
+  }, [scope])
 
   const getProjectStatus = (p: ProjectView): 'draft' | 'inProgress' | 'completed' => {
     if (p.progress >= 90) return 'completed'
@@ -565,8 +545,12 @@ const ProjectLobby: React.FC = () => {
   }
 
   const handleOpenCreate = () => {
+    if (isAdScope) {
+      /* 广告入口的表单在 `AdProjectCreateModal` 里（唯一实现），本页这套 Form 只服务普通短剧。 */
+      setCreateModalOpen(true)
+      return
+    }
     form.resetFields()
-    resetAdFields()
     const defaultVisual = (projectStyleOptions.visualStyles[0]?.value ?? '现实') as ProjectVisualStyleChoice
     const defaultStyle =
       projectStyleOptions.defaultStyleByVisual?.[defaultVisual] ??
@@ -582,6 +566,16 @@ const ProjectLobby: React.FC = () => {
     setCreateModalOpen(true)
   }
 
+  /**
+   * 普通短剧的新建提交。
+   *
+   * ⚠️ 这里**只可能**建出普通短剧：本页（`scope="drama"`）的生产方式选项里
+   * 没有「剧情广告」（见 `DRAMA_START_MODE_OPTIONS`），而广告项目的创建走
+   * `AdProjectCreateModal` —— 两条路彻底分开，不存在「在短剧项目页误建广告」的路径。
+   *
+   * 反面也成立：`start_mode` 仍然只经 `toBackendStartMode` 换算
+   * （真实事故：UI 起点被 `as any` 原样发出去，后端 422，整条第 1 步断掉）。
+   */
   const handleCreateSubmit = async (values: {
     name: string
     description?: string
@@ -597,26 +591,6 @@ const ProjectLobby: React.FC = () => {
       const startMode: ProjectStartModeChoice = values.startMode ?? 'script'
       // 「整体风格」预设覆盖三个既有列；选「其他自定义」时用用户自己填的值。
       const preset = resolveOverallStyleFields(values.overallStyle)
-      /* 只有「剧情广告」才补 `kind` + `ad_*` 三个字段：其余起点的请求体一个字节都不变
-         （后端那两个 DTO 是强类型且 `extra=forbid`，给了 null 之外的形状就是 422）。 */
-      const adFields = buildAdProjectCreateFields({
-        startMode,
-        productSource: {
-          choice: adSource,
-          text: adSourceText,
-          fileIds: adFileIds,
-          productId: adProductId,
-        },
-        requirements: {
-          genre: adGenre,
-          tone: adTone,
-          shotCount: adShotCount,
-          durationSeconds: adDuration,
-          directorNotes: adDirectorNotes,
-          mandatoryElements: linesToArray(adMandatory),
-          forbiddenElements: linesToArray(adForbidden),
-        },
-      })
       const res = await StudioProjectsService.createProjectApiV1StudioProjectsPost({
         requestBody: {
           id: createdId,
@@ -632,35 +606,29 @@ const ProjectLobby: React.FC = () => {
           // 方案 B（2026-09-23）：预设只负责「自动填入默认值」，用户手填的优先
           default_video_ratio: resolveProjectVideoRatio(values.overallStyle, values.default_video_ratio),
           /* UI 起点（script / prompts / **drama_ad**）≠ 后端 `start_mode`（只有 script / prompts）。
-             `drama_ad` 在这里就是 script；"这是剧情广告项目"由下面的 `kind: 'ad'` 表达。
-             换算只走 `toBackendStartMode`：**不要在这里写回 `as any`** ——
-             真实事故就是它把「drama_ad 被当成 start_mode 发出去」的类型错误吞到了运行时（422）。 */
+             本页只会有前两种；换算仍然只走 `toBackendStartMode` —— **不要在这里写回 `as any`**。 */
           start_mode: toBackendStartMode(startMode),
           progress: 0,
-          ...(adFields ?? {}),
         },
       })
       const created = res.data
       if (!created) throw new Error('empty project')
       const ui = toUIProject(created)
-      /* 剧情广告的默认章节是**后端在同一事务里建的**，响应里的 `chapter_id` 必须用上：
-         策划页是章节级的，不带它就会退化成再建一集。 */
+      /* 起点是 `prompts` 时默认章节是**后端在同一事务里建的**，响应里的 `chapter_id` 要带上：
+         不带就会退化成进工作台后再建一集。 */
       const createdChapterId = String(
         (created as unknown as Record<string, unknown>).chapter_id ?? '',
       )
       message.success(
-        startMode === 'drama_ad'
-          ? '剧情广告项目创建成功：已建立默认章节，正在进入剧情策划'
-          : startMode === 'prompts'
-            ? '项目创建成功：已自动创建默认章节，正在进入整集视频提示词看板'
-            : '项目创建成功',
+        startMode === 'prompts'
+          ? '项目创建成功：已自动创建默认章节，正在进入整集视频提示词看板'
+          : '项目创建成功',
       )
       setCreateModalOpen(false)
       setProjects((prev) => (Array.isArray(prev) ? [...prev, ui] : [ui]))
-      // 三种起点：剧情广告直接进剧情策划页，其余进工作台对应步骤
       navigate(resolveStartLandingPath(startMode, ui.id, createdChapterId))
     } catch {
-      message.error('创建失败')
+      message.error('创建失败：项目没有保存，可以直接再点一次「创建并进入」重试')
     }
   }
 
@@ -986,12 +954,17 @@ const ProjectLobby: React.FC = () => {
 
   return (
     <div className="min-h-0 flex-1 flex flex-col overflow-hidden">
+      {/* 页面标题：左侧入口名与页内标题必须同一口径（面包屑 / 菜单 / 页面标题三处一致） */}
+      <div className="flex-shrink-0 pb-2">
+        <div className="text-base font-semibold text-gray-800">{copy.title}</div>
+        <div className="text-[11px] text-gray-500">{copy.subtitle}</div>
+      </div>
       <div className="flex-shrink-0 space-y-2 pb-2">
       <div className="sticky top-0 z-10 pb-1.5 bg-gradient-to-b from-[rgba(249,250,251,0.96)] to-[rgba(249,250,251,0.9)] backdrop-blur">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Space wrap size="small" className="flex-1 min-w-[240px]">
             <Input.Search
-              placeholder="搜索项目名称或描述"
+              placeholder={copy.searchPlaceholder}
               allowClear
               size="small"
               className="w-64 max-w-full"
@@ -1123,7 +1096,7 @@ const ProjectLobby: React.FC = () => {
             </Space>
 
             <Button type="primary" size="small" className="text-[11px]" icon={<PlusOutlined />} onClick={handleOpenCreate}>
-              新建项目
+              {copy.createLabel}
             </Button>
           </Space>
         </div>
@@ -1138,7 +1111,7 @@ const ProjectLobby: React.FC = () => {
               <Col span={24}>
                 <Card>
                   <div className="text-center text-gray-500 py-8 text-sm">
-                    {search ? '没有匹配的项目' : '暂无项目，点击「新建项目」开始'}
+                    {search ? '没有匹配的项目' : copy.emptyText}
                   </div>
                 </Card>
               </Col>
@@ -1204,10 +1177,10 @@ const ProjectLobby: React.FC = () => {
                     block
                     size="small"
                     icon={<EnterOutlined />}
-                    onClick={() => navigate(`/projects/${selectedProject.id}`)}
+                    onClick={() => handlePrimaryAction(selectedProject, projectStageMap[selectedProject.id])}
                     className="text-[11px]"
                   >
-                    进入章节工作台
+                    {isAdScope ? '进入剧情策划' : '进入章节工作台'}
                   </Button>
                 </div>
               ) : (
@@ -1221,9 +1194,24 @@ const ProjectLobby: React.FC = () => {
       </Row>
       </div>
 
+      {/*
+        「广告视频」入口的新建：**同一个组件**（`AdProjectCreateModal`）也与「剧情策划」页共用。
+        它固定创建 `kind=ad`，并且必须用 modal 而不是本文件那套 Form —— 那套是普通短剧的。
+      */}
+      <AdProjectCreateModal
+        open={isAdScope && createModalOpen}
+        onCancel={() => setCreateModalOpen(false)}
+        onCreated={(created) => {
+          setCreateModalOpen(false)
+          void load()
+          // 刚创建的项目属于广告视频列表：即使用户停留在列表页，也要能立刻看到它
+          message.success(`广告项目《${created.projectName || '未命名项目'}》已创建`)
+        }}
+      />
+
       <Modal
         title="新建短剧项目"
-        open={createModalOpen}
+        open={!isAdScope && createModalOpen}
         onCancel={() => setCreateModalOpen(false)}
         footer={null}
         width={520}
@@ -1252,11 +1240,14 @@ const ProjectLobby: React.FC = () => {
           <Form.Item name="description" label="项目简介（选填）">
             <Input.TextArea rows={4} placeholder="项目简介与风格说明，建议 80–120 字" />
           </Form.Item>
-          {/* 第一步：先选生产方式（三种起点：从剧本开始 / 从视频提示词开始 / 剧情广告；最后汇入同一条生产流程） */}
+          {/* 生产方式：**只有普通短剧的两种起步路径**。
+              第三种起点「剧情广告」不在这里 —— 它是另一个一级入口「广告视频」的固定行为
+              （`AdProjectCreateModal` 硬编 `kind=ad`）。在「短剧项目」里给出广告选项，
+              用户建完就会发现这条项目从当前列表里消失（它归广告视频页），那才是真的坑。 */}
           <Form.Item name="startMode" label="生产方式" rules={[{ required: true }]}>
             <Radio.Group className="w-full">
               <Space direction="vertical" size={4} className="w-full">
-                {START_MODE_OPTIONS.map((option) => (
+                {DRAMA_START_MODE_OPTIONS.map((option) => (
                   <Radio key={option.key} value={option.key}>
                     <span className="text-sm">{option.label}</span>
                     <span className="ml-2 text-[11px] text-gray-500">{option.description}</span>
@@ -1265,138 +1256,10 @@ const ProjectLobby: React.FC = () => {
               </Space>
             </Radio.Group>
           </Form.Item>
-          {/* 剧情广告专属：商品资料来源 + 基本制作要求（只在选「剧情广告」时出现） */}
-          <Form.Item shouldUpdate noStyle>
-            {() =>
-              form.getFieldValue('startMode') === 'drama_ad' ? (
-                <div className="mb-3 rounded border border-purple-100 bg-purple-50/40 p-3">
-                  <div className="mb-2 text-sm font-medium text-gray-700">商品资料来源</div>
-                  <Space wrap size={4} className="mb-2">
-                    {AD_PRODUCT_SOURCE_OPTIONS.map((option) => (
-                      <Radio.Button
-                        key={option.key}
-                        checked={adSource === option.key}
-                        onChange={() => {
-                          setAdSource(option.key)
-                          if (option.key === 'existing') void loadAdProducts()
-                        }}
-                      >
-                        {option.label}
-                      </Radio.Button>
-                    ))}
-                  </Space>
-                  <div className="mb-2 text-[11px] text-gray-500">
-                    {AD_PRODUCT_SOURCE_OPTIONS.find((option) => option.key === adSource)?.hint}
-                  </div>
-                  {adSource === 'paste' && (
-                    <Input.TextArea
-                      rows={4}
-                      value={adSourceText}
-                      placeholder="把商品详情、卖点、人群、价格等资料贴在这里（创建后可在策划页一键提取）"
-                      onChange={(event) => setAdSourceText(event.target.value)}
-                    />
-                  )}
-                  {adSource === 'upload' && (
-                    <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                      <Upload
-                        multiple
-                        showUploadList={false}
-                        accept=".txt,.md,.docx,image/png,image/jpeg,image/webp,image/gif"
-                        beforeUpload={(file) => {
-                          void handleAdUpload(file as unknown as File)
-                          return false
-                        }}
-                      >
-                        <Button size="small" loading={adUploading}>
-                          上传资料文件（TXT / DOCX / 图片）
-                        </Button>
-                      </Upload>
-                      {adFileNames.length > 0 && (
-                        <div className="text-[11px] text-gray-500">已上传：{adFileNames.join('、')}</div>
-                      )}
-                      <div className="text-[11px] text-gray-500">
-                        创建后到策划页做「从资料提取」：文档会被解析成文字，图片只作为参考资料归档。
-                      </div>
-                    </Space>
-                  )}
-                  {adSource === 'existing' && (
-                    <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                      {adProductsNote ? (
-                        <div className="text-[11px] text-amber-600">{adProductsNote}</div>
-                      ) : (
-                        <Select
-                          style={{ width: '100%' }}
-                          placeholder="选一个已有的商品资料"
-                          value={adProductId || undefined}
-                          options={adProducts.map((item) => ({
-                            value: item.id,
-                            label: item.name || item.description || '未命名商品',
-                          }))}
-                          onChange={(value) => setAdProductId(String(value))}
-                        />
-                      )}
-                    </Space>
-                  )}
-                  {adSource === 'none' && (
-                    <div className="text-[11px] text-gray-500">
-                      先建项目：商品卡留到策划页手工填写，缺项会标「待补充」，不会被编造。
-                    </div>
-                  )}
+          <div className="mb-3 text-[11px] text-gray-500">
+            要做剧情广告？请到左侧「广告视频」里新建 —— 那条路会先带你做商品资料与剧情策划。
+          </div>
 
-                  <div className="mt-3 mb-2 text-sm font-medium text-gray-700">基本制作要求</div>
-                  <Row gutter={8}>
-                    <Col span={8}>
-                      <div className="mb-1 text-[11px] text-gray-500">题材</div>
-                      <Input value={adGenre} placeholder="留空沿用项目风格" onChange={(event) => setAdGenre(event.target.value)} />
-                    </Col>
-                    <Col span={8}>
-                      <div className="mb-1 text-[11px] text-gray-500">调性</div>
-                      <Input value={adTone} placeholder="例：一本正经地荒诞" onChange={(event) => setAdTone(event.target.value)} />
-                    </Col>
-                    <Col span={4}>
-                      <div className="mb-1 text-[11px] text-gray-500">镜头数</div>
-                      <InputNumber
-                        min={1}
-                        max={16}
-                        style={{ width: '100%' }}
-                        value={adShotCount}
-                        onChange={(value) => setAdShotCount(Number(value ?? AD_DEFAULT_SHOT_COUNT))}
-                      />
-                    </Col>
-                    <Col span={4}>
-                      <div className="mb-1 text-[11px] text-gray-500">时长（秒）</div>
-                      <InputNumber
-                        min={0}
-                        max={600}
-                        style={{ width: '100%' }}
-                        value={adDuration}
-                        onChange={(value) => setAdDuration(Number(value ?? 0))}
-                      />
-                    </Col>
-                    <Col span={24}>
-                      <div className="mb-1 mt-2 text-[11px] text-gray-500">导演备注</div>
-                      <Input
-                        value={adDirectorNotes}
-                        placeholder="例：不要旁白、结尾不要硬引导"
-                        onChange={(event) => setAdDirectorNotes(event.target.value)}
-                      />
-                    </Col>
-                    <Col span={12}>
-                      <div className="mb-1 mt-2 text-[11px] text-gray-500">必须出现（一行一条）</div>
-                      <Input.TextArea rows={2} value={adMandatory} onChange={(event) => setAdMandatory(event.target.value)} />
-                    </Col>
-                    <Col span={12}>
-                      <div className="mb-1 mt-2 text-[11px] text-gray-500">禁止出现（一行一条）</div>
-                      <Input.TextArea rows={2} value={adForbidden} onChange={(event) => setAdForbidden(event.target.value)} />
-                    </Col>
-                  </Row>
-                  <div className="mt-2 text-[11px] text-gray-500">
-                    创建成功后会直接进入剧情策划页（商品卡 → 一句话核心创意 → 完整剧情 → 分镜 → 确认策划）。
-                  </div>
-                </div>
-              ) : null
-            }
-          </Form.Item>
           {/* 第二步：项目整体风格（预设直接写进既有列：视觉风格 + 视频风格 + 画幅） */}
           <Form.Item name="overallStyle" label="整体风格" rules={[{ required: true }]}>
             <Radio.Group

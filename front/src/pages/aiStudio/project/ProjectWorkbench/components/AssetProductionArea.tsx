@@ -2323,8 +2323,8 @@ export const AssetProductionArea = forwardRef<AssetProductionAreaHandle, AssetPr
           message={
             <span className="text-xs">
               {imageModelState === 'missing'
-                ? '还没有配置图片生成用的模型，现在点生成会失败：请先到「模型管理」里配置默认图片模型。'
-                : '暂时无法确认图片生成是否已配置好；如果生成后没有结果，可以到「模型管理」里核对。'}
+                ? '还没有配置图片生成用的模型，现在点生成会失败：请先到「设置 → 模型与服务」里配置默认图片模型。'
+                : '暂时无法确认图片生成是否已配置好；如果生成后没有结果，可以到「设置 → 模型与服务」里核对。'}
             </span>
           }
         />

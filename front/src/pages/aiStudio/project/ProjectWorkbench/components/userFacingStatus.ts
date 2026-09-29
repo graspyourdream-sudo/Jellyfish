@@ -311,7 +311,7 @@ export function describeGenerationReadiness(input: GenerationReadinessInput): Ge
     return {
       tone: 'error',
       title: `还不能生成${input.outletLabel}`,
-      detail: `后台还没有可用的${input.outletLabel}模型，请先到「模型管理」选择一个可用模型。`,
+      detail: `后台还没有可用的${input.outletLabel}模型，请先到「设置 → 模型与服务」选择一个可用模型。`,
     }
   }
   if (input.modelReady === null || input.modelReady === undefined || input.dryRun === null || input.dryRun === undefined) {

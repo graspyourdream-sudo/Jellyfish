@@ -90,6 +90,8 @@ import StepShell from '../components/studio/StepShell'
    资产预览卡片直接用她，不在这里另抄一张表（审计 §4.5 模式 2）。 */
 import { profileFieldLabel } from '../project/ProjectWorkbench/components/workbench/workbenchState'
 import { resolveAssetPreparationPath } from '../project/projectStartPresets'
+/* 广告项目的新建：**同一个组件**，与「广告视频」列表页共用同一份默认值 / 校验 / 提交逻辑。 */
+import { AdProjectCreateModal } from '../project/AdProjectCreateModal'
 import {
   AD_PHASE,
   CAMERA_ANGLE,
@@ -268,6 +270,9 @@ const DramaPlanPage: React.FC = () => {
   const [confirmResult, setConfirmResult] = useState<Record<string, unknown> | null>(null)
   const [consistency, setConsistency] = useState<DramaPlanConsistencyRead | null>(null)
 
+  /* 「新建广告视频」弹窗：本页在没有可用项目时的唯一主操作（不会再要求用户离开本页）。 */
+  const [adCreateOpen, setAdCreateOpen] = useState(false)
+
   /* 「从资料提取」弹窗 */
   const [extractOpen, setExtractOpen] = useState(false)
   const [extractSource, setExtractSource] = useState<ExtractSourceType>('paste')
@@ -415,6 +420,31 @@ const DramaPlanPage: React.FC = () => {
     },
     [applyCard, applyRead, setSearchParams],
   )
+
+  /**
+   * URL → 状态同步（**唯一真相是 URL**）。
+   *
+   * 为什么必须有：`projectId` / `chapterId` 原来只在挂载时从 `searchParams` 读一次。
+   * 于是「在本页新建项目 → 页面自己跳到带 `projectId`+`chapterId` 的地址」这一跳
+   * （组件并没有卸载，React Router 只换了查询参数）不会更新状态，页面会停在空态 ——
+   * 表现就是"创建成功了但什么都没发生"。浏览器前进 / 后退同理。
+   *
+   * 只认**URL 真的变了**这一次（用 ref 记住上一次的值），避免和 `openChapter`
+   * 自己写 URL 的动作打架：那条路径写进去的就是同一份值，同步一次是幂等的。
+   */
+  const lastUrlKeyRef = useRef('')
+  useEffect(() => {
+    const urlProjectId = searchParams.get('projectId') ?? ''
+    const urlChapterId = searchParams.get('chapterId') ?? ''
+    const key = `${urlProjectId}|${urlChapterId}`
+    if (lastUrlKeyRef.current === key) return
+    lastUrlKeyRef.current = key
+    if (urlProjectId === projectId && urlChapterId === chapterId) return
+    setProjectId(urlProjectId)
+    setChapterId(urlChapterId)
+    setConfirmResult(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams])
 
   /**
    * 深链自动落位：URL 里只有 `?projectId=` 时**自动取一集可用的空章节**。
@@ -876,6 +906,20 @@ const DramaPlanPage: React.FC = () => {
   )
 
   return (
+    <>
+    <AdProjectCreateModal
+      open={adCreateOpen}
+      onCancel={() => setAdCreateOpen(false)}
+      /* 创建成功：弹窗自己会跳到 `?projectId=…&chapterId=…`（与列表页同一条落点）。
+         这里额外把状态同步一次 —— 组件不卸载的情况下 URL 变了，上面的 URL→状态
+         同步 effect 固然会处理，但显式同步能让「进入策划」这一跳更快、也更明确。 */
+      onCreated={(created) => {
+        setAdCreateOpen(false)
+        setProjectId(created.projectId)
+        setChapterId(created.chapterId)
+        lastUrlKeyRef.current = `${created.projectId}|${created.chapterId}`
+      }}
+    />
     <StepShell
       context={{
         projectId,
@@ -887,10 +931,10 @@ const DramaPlanPage: React.FC = () => {
         actions: (
           <Button
             size="small"
-            onClick={() => navigate(projectId ? `/projects/${projectId}` : '/projects')}
+            onClick={() => navigate(projectId ? `/projects/${projectId}` : '/ad-videos')}
             data-testid="drama-plan-back"
           >
-            返回项目工作台
+            {projectId ? '返回项目工作台' : '返回广告视频'}
           </Button>
         ),
       }}
@@ -947,6 +991,17 @@ const DramaPlanPage: React.FC = () => {
           {chapterId && <Text type="secondary">当前集：{chapterTitle || '未命名'}（章节编号见下方技术详情）</Text>}
           {read?.ad_phase_label && <Tag color="blue">{read.ad_phase_label}</Tag>}
           {read?.meta?.dry_run === true && <Tag color="orange">演练模式：本页不会真实调用模型</Tag>}
+          {/*
+            项目选择卡里的「新建广告视频」是**次级**按钮：本页的主色按钮只有一个，
+            并且落在"还没有项目"那时的空态里（任务书 §3.3 要求的唯一明确主操作）。
+            这里用次级是为了不出现两个同义的主色按钮抢注意力。
+          */}
+          <Button
+            data-testid="drama-plan-create-ad-project"
+            onClick={() => setAdCreateOpen(true)}
+          >
+            新建广告视频
+          </Button>
         </Space>
       </Card>
 
@@ -972,7 +1027,29 @@ const DramaPlanPage: React.FC = () => {
       )}
 
       {!chapterId ? (
-        <Empty description="先选一个项目（会自动取一集没有分镜的空章节，没有就新建一集）" />
+        /*
+          本轮收口（任务书 §3.3）：原来这里只有一句 Empty，没有项目时用户**必须离开本页**
+          才能建项目。现在给出唯一明确主操作「新建广告视频」——
+          它复用与「广告视频」列表页完全相同的创建组件（同默认值、同校验、同一条提交逻辑），
+          固定创建 `kind=ad`，创建成功后自动建默认章节并回到本页的策划工作台。
+        */
+        <Card data-testid="drama-plan-empty">
+          <div className="py-6 text-center">
+            <div className="mb-1 text-base font-medium text-gray-800">还没有可策划的广告项目</div>
+            <div className="mb-4 text-xs text-gray-500">
+              剧情策划是章节级的：先有一个广告项目（会自动建立默认章节），再从商品资料开始做。
+              如果你已经有广告项目，直接在上面的「项目」里选一个即可（会自动取一集没有分镜的空章节）。
+            </div>
+            <Button
+              type="primary"
+              size="large"
+              data-testid="drama-plan-empty-create"
+              onClick={() => setAdCreateOpen(true)}
+            >
+              新建广告视频
+            </Button>
+          </div>
+        </Card>
       ) : (
         <Spin spinning={busy !== 'idle'}>
           {/* ============================ 1. 商品信息卡 ============================ */}
@@ -1934,6 +2011,7 @@ const DramaPlanPage: React.FC = () => {
         </Space>
       </Modal>
     </StepShell>
+    </>
   )
 }
 

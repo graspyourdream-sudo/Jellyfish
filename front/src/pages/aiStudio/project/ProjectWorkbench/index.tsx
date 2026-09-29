@@ -605,7 +605,7 @@ const ProjectWorkbench: React.FC = () => {
         <Empty description="项目不存在或已被删除" />
         <Link to="/projects">
           <Button type="link" icon={<ArrowLeftOutlined />}>
-            返回项目列表
+            返回短剧项目
           </Button>
         </Link>
       </Card>

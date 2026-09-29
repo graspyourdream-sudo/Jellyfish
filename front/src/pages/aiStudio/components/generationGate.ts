@@ -163,14 +163,14 @@ function resolveModelConfig(
       return {
         state: 'unknown',
         modelName: '',
-        reason: `默认${label}对应的生成服务已失效，请到「模型管理」重新指定。`,
+        reason: `默认${label}对应的生成服务已失效，请到「设置 → 模型与服务」重新指定。`,
       }
     }
     if (readString(provider, 'status').toLowerCase() === 'disabled') {
       return {
         state: 'missing',
         modelName: '',
-        reason: `默认${label}对应的生成服务已停用，请到「模型管理」换一个。`,
+        reason: `默认${label}对应的生成服务已停用，请到「设置 → 模型与服务」换一个。`,
       }
     }
   }

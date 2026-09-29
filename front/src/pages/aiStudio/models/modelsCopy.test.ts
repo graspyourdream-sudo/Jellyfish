@@ -107,6 +107,10 @@ const REGION_FILES: readonly string[] = [
   'pages/NotFound.tsx',
   'i18n.ts',
   'store/useAppStore.ts',
+  /* 本轮收口新增：一级入口「设置」的页签外壳与调试权限判定。
+     它们直接渲染主区文案（三个区域名、无权限时的中文说明），所以必须一起扫。 */
+  'pages/settings/SettingsCenter.tsx',
+  'pages/settings/debugAccess.ts',
 ]
 
 /** 模型 / 供应商配置页（「供应商」这个词只在这些文件里放行）。 */
@@ -567,7 +571,14 @@ test('§4.7 区域词表守卫：「供应商」的放行只对模型页生效�
   const nonModelFiles = REGION_FILES.filter((rel) => !MODEL_PAGE_FILES.includes(rel))
   assert.deepEqual(
     nonModelFiles,
-    ['pages/Settings.tsx', 'pages/NotFound.tsx', 'i18n.ts', 'store/useAppStore.ts'],
+    [
+      'pages/Settings.tsx',
+      'pages/NotFound.tsx',
+      'i18n.ts',
+      'store/useAppStore.ts',
+      'pages/settings/SettingsCenter.tsx',
+      'pages/settings/debugAccess.ts',
+    ],
     '非模型页文件表变了 —— 「供应商」的放行范围必须重新复核',
   )
   assert.ok(
@@ -739,16 +750,34 @@ test('§4.7 模式 3：模型设置页的日志级别选项名必须是中文（
 
 /* -------------------------------------------------------- ③ MainLayout 定点断言 */
 
-test('§4.7 模式 3：导航 / 用户名 / 角色已中文化，`LLM 调试台（开发）` 按裁定保留', () => {
+test('§4.7 模式 3：导航 / 用户名 / 角色已中文化（`LLM 调试台（开发）` 的一级入口已按新口径移除）', () => {
   const raw = readFileSync(resolve(SRC_ROOT, 'layouts/MainLayout.tsx'), 'utf8')
   const code = stripComments(raw)
   assert.ok(/'Agent管理'/.test(code) === false, '导航名 `Agent管理` 又回来了（§4.7 模式 3 点名要改中文）')
   assert.ok(/agents: '智能体管理'/.test(raw), '导航名必须改成「智能体管理」')
+  /*
+   * ⚠️ **旧裁定已被本轮最终口径推翻**（任务书 §五）。
+   *
+   * 改前这里断言的是 `raw.includes('LLM 调试台（开发）')` —— 理由是"用户已裁定该页
+   * 仅开发可见、导航入口淡化本轮不改路由"（审计 §9.1 第 9 项）。
+   *
+   * 那条断言其实是一条**假绿**：`MainLayout.tsx` 的注释里恰好带着这个字符串，
+   * 所以即便导航项被删掉，它照样通过 —— 它从来没有真的守住"导航入口"这件事。
+   *
+   * 现在的口径是：`模型管理` / `系统设置` / `LLM 调试台（开发）` 三个一级入口
+   * 合并成「设置」（页内三个区域，开发调试按权限显示）。因此这里改成
+   * **对渲染代码**断言：`/llm-pipeline` 不许再作为一级导航项出现；
+   * 旧路由仍由 `App.tsx` 兼容（那条由 `navConsolidation.test.ts` 负责）。
+   */
   assert.ok(
-    raw.includes('LLM 调试台（开发）'),
-    '`LLM 调试台（开发）` 被改了 —— 用户已裁定该页「仅开发可见、阶段 B 不投工、导航入口淡化本轮不改路由」' +
-      '（审计 §9.1 第 9 项），改名属产品命名决策，不在本次治理范围',
+    !/label: <Link to="\/llm-pipeline">/.test(code),
+    '「LLM 调试台（开发）」又回到一级导航了 —— 本轮口径是它并入「设置 · 开发调试」',
   )
+  assert.ok(
+    !/'llm-pipeline':\s*'LLM 调试台/.test(code),
+    '面包屑里又出现「LLM 调试台」这个旧一级模块名',
+  )
+  assert.ok(/'llm-pipeline':\s*'设置'/.test(code), '旧 /llm-pipeline 的面包屑必须显示新的一级模块名「设置」')
   assert.ok(/\{user\.name\}/.test(code), '右上角用户名渲染点不见了（定点断言的落点）')
   assert.ok(
     !/\{user\.role\}/.test(code),
@@ -869,10 +898,11 @@ test('阶段B⑦扫描范围守卫：登记表里的文件真实存在，且都�
   )
   assert.deepEqual(intruders, [], `扫描面里混进了其它批次 / 按裁定不进扫描面的文件：${intruders.join('、')}`)
   /* 也不许悄悄缩窄（例如把某个文件从表里删掉就「干净」了）。 */
+  /* 9（审计 §4.7 登记）+ 2（本轮收口新增的设置入口外壳与权限判定）= 11 */
   assert.equal(
     REGION_FILES.length,
-    9,
-    `扫描面必须恰好是审计 §4.7 的 9 个文件，实际 ${REGION_FILES.length} 个`,
+    11,
+    `扫描面必须是 9 个 §4.7 登记文件 + 2 个本轮新增的设置入口文件，实际 ${REGION_FILES.length} 个`,
   )
   assert.ok(
     !REGION_FILES.some((relPath) => relPath.endsWith('.test.ts') || relPath.endsWith('.test.tsx')),
