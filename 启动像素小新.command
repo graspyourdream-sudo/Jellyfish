@@ -258,6 +258,7 @@ if ! port_free "$FRONT_PORT"; then
           echo ""
           echo "⚠️  你要的是真实模式，但**模式在进程启动时就定死了**，改不了已经在跑的这一份。"
           echo "    请回到原来那个启动窗口按 Control + C 停掉，再双击「启动像素小新（真实模式·会花钱）」。"
+          echo "    （如果那个窗口停在「确认开启真实模式？输入 yes」，Ctrl+C 就能把它退掉。）"
           pause_and_exit 1
         fi
         ;;
@@ -275,7 +276,8 @@ if ! port_free "$FRONT_PORT"; then
     esac
     if ! http_ok "${running_backend_url}${HEALTH_PATH}"; then
       echo "  ⚠️  后端 ${running_backend_url} 已经没有响应了：这个页面看着还在，但点任何按钮都会报「连不上后端」。"
-      echo "     请回到原启动窗口按 Control + C 停掉（或直接关掉那个页面），再重新启动。"
+      echo "     这是**上一次启动没走完**留下的空壳（例如上次真实模式卡在确认那句、就退掉了）。"
+      echo "     处理办法：回到那个启动窗口按 Control + C（或直接关掉它），再重新双击本入口。"
       pause_and_exit 1
     fi
     echo "直接打开浏览器，不再重复启动。"
@@ -327,6 +329,21 @@ if [ "$WANT_REAL" = "1" ]; then
   echo " 出图、出视频、调用大模型、上传素材都会**真的执行**，会真的花钱。"
   echo " 回到不花钱的演练模式：直接双击本文件（默认就是演练模式）。"
   echo "############################################"
+  echo ""
+  # ⚠️ 确认必须放在**启动任何服务之前**。
+  # 真机事故：这一步原先在「run_backend.sh --real」内部（前端已经在后台起好了），
+  # 用户没注意到这句提示，于是窗口看着"没反应"、前端却已经占了端口 ——
+  # 之后再点任何入口都会被"已有实例在运行"拦住，形成死循环。
+  # 现在：先问清楚，得到 yes 才启动；取消的话**一个服务都不会起**。
+  printf '确认开启真实模式？输入 yes 后回车（直接回车或任何其它输入都会被当作取消）：'
+  read -r real_answer || real_answer=""
+  if [ "$real_answer" != "yes" ]; then
+    echo ""
+    echo "已取消：没有开启真实模式，也没有启动任何服务（端口都是干净的）。"
+    echo "想要不花钱地启动：直接双击「启动像素小新」。"
+    pause_and_exit 1
+  fi
+  echo "已确认真实模式 —— 下面开始启动服务。"
 else
   echo "================  演练模式  ================"
   echo " 出图、出视频、调用大模型、上传素材都不会真的执行，不会花钱。"
@@ -375,8 +392,14 @@ echo "提示：保持这个窗口打开，系统才会持续运行；要停止�
 echo ""
 
 cd "$PROJECT_DIR" || pause_and_exit 1
-# 演练/真实两套守卫环境变量由 run_backend.sh 统一设置（单一口径，不在本脚本重写一遍）
-PORT="$BACKEND_PORT" HOST="$HOST" bash "$BACKEND_SCRIPT" $([ "$WANT_REAL" = "1" ] && echo --real)
+# 演练/真实两套守卫环境变量由 run_backend.sh 统一设置（单一口径，不在本脚本重写一遍）。
+# 真实模式这里带 `--yes`：确认已经在**启动任何服务之前**问过了（见上面的 read），
+# 不让用户在一个已经开始起服务的窗口里再答一次（那正是"双击没反应"的成因）。
+backend_args=()
+if [ "$WANT_REAL" = "1" ]; then
+  backend_args=(--real --yes)
+fi
+PORT="$BACKEND_PORT" HOST="$HOST" bash "$BACKEND_SCRIPT" ${backend_args[@]+"${backend_args[@]}"}
 
 echo ""
 echo "服务已停止。"
