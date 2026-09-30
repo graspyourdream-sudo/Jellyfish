@@ -230,15 +230,18 @@ docker compose --env-file deploy/compose/.env -f deploy/compose/docker-compose.y
 同时起后端与前端 → 两个都通了再打开浏览器。默认走**演练模式**（不会产生任何费用）。
 
 ```bash
-./启动像素小新.command          # 演练模式（默认，零费用）
-./启动像素小新.command --real   # 真实模式（会真花钱，需按提示确认一次）
-./启动像素小新.command --check  # 只体检（依赖与端口），不启动服务
+./启动像素小新.command                  # 演练模式（默认，零费用；双击也是这一条）
+./启动像素小新.command --real           # 真实模式（会真花钱，终端里手工敲会先问一次 yes）
+./启动像素小新.command --real --yes     # 真实模式且不再询问（给桌面双击入口用）
+./启动像素小新.command --check          # 只体检（依赖与端口），不启动服务
 ```
 
 停服：回到窗口按 `Control + C`（后端与前端一起停）。
 默认后端 8000 / 前端 7788；端口被占用时不会硬顶，也不会悄悄复用别人的服务 ——
 后端会改用一个空闲端口，并把前端（`VITE_BACKEND_URL`）指到它。
-环境变量 `JELLYFISH_BACKEND_PORT` / `JELLYFISH_FRONT_PORT` 可覆盖端口。
+环境变量 `JELLYFISH_BACKEND_PORT` / `JELLYFISH_FRONT_PORT` 可覆盖端口；
+`JELLYFISH_NO_BROWSER=1` 只打印地址、不自动开浏览器。
+命令行参数**优先于** `JELLYFISH_REAL_MODE` 这类环境变量（显式参数赢，避免"以为在演练、其实在花钱"）。
 
 ### Backend
 
